@@ -55,6 +55,21 @@ private:
     uint16_t m_regs[32];
 
     static const unsigned BATCH = 64;   // команд в пакете, не больше
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: the program ROM read in place, the ports resolved once
+    // (both while the map's tag stays)
+    const uint8_t * m_code = nullptr;
+    uint64_t m_code_tag = 0;
+    AddressableDevice * m_port_dev[2][32];
+    unsigned int m_port_addr[2][32];
+    uint64_t m_port_tag = 0;
+    void refresh_direct();
+public:
+    unsigned int execute_batched(unsigned int limit, unsigned int domain, unsigned int budget, bool * accounted) override;
+private:
+#endif
+    unsigned int port_in(unsigned int port);
+    void port_out(unsigned int port, unsigned int value);
     static bool port_op(unsigned op);   // команда обращается к порту маппера
 
     uint8_t fetch();

@@ -178,6 +178,9 @@ protected:
     void send_key_id(const std::string &id, bool press) override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     MS7004(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

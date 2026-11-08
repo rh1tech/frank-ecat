@@ -119,9 +119,46 @@ void IE15CPU::reset(bool cold)
     if (cold) CPU::reset(cold);
 }
 
+#ifdef ECAT_EMBEDDED
+void IE15CPU::refresh_direct()
+{
+    const uint64_t tag = mm->current_tag();
+    if (tag == m_code_tag && tag == m_port_tag) return;
+    m_code = mm->direct_span(0, 0x1000);
+    m_code_tag = tag;
+    for (unsigned int m = 0; m < 2; m++)
+        for (unsigned int p = 0; p < 32; p++)
+            m_port_dev[m][p] = mm->port_target(p, m ? MODE_W : MODE_R, &m_port_addr[m][p]);
+    m_port_tag = tag;
+}
+
+unsigned int IE15CPU::port_in(unsigned int port)
+{
+    AddressableDevice * d = m_port_dev[0][port & 31];
+    if (d == nullptr) return mm->read_port(port);
+    if (d->m_sync_on_access) im->dm->sync_pending();
+    return d->get_value(m_port_addr[0][port & 31]);
+}
+
+void IE15CPU::port_out(unsigned int port, unsigned int value)
+{
+    AddressableDevice * d = m_port_dev[1][port & 31];
+    if (d == nullptr) { mm->write_port(port, value); return; }
+    if (d->m_sync_on_access) im->dm->sync_pending();
+    d->set_value(m_port_addr[1][port & 31], value);
+}
+#else
+unsigned int IE15CPU::port_in(unsigned int port) { return mm->read_port(port); }
+void IE15CPU::port_out(unsigned int port, unsigned int value) { mm->write_port(port, value); }
+#endif
+
 uint8_t IE15CPU::fetch()
 {
-    const uint8_t v = (uint8_t)mm->read(m_pc) & 0xFF;
+#ifdef ECAT_EMBEDDED
+    const uint8_t v = m_code != nullptr ? m_code[m_pc] : (uint8_t)mm->read_fast(m_pc) & 0xFF;
+#else
+    const uint8_t v = (uint8_t)mm->read_fast(m_pc) & 0xFF;
+#endif
     m_pc = (m_pc + 1) & 0xFFF;
     return v;
 }
@@ -186,7 +223,7 @@ void IE15CPU::execute_one(uint8_t op)
             }
             break;
         case 0x60:      // LLA: порт 07 не подключён - 377
-            set_a((op == 0x67) ? 0xFF : (uint8_t)mm->read_port(op & 15));
+            set_a((op == 0x67) ? 0xFF : (uint8_t)port_in(op & 15));
             break;
         case 0x70:      // JMI
             m_pc = reg(op & 15) & 0xFFF;
@@ -197,7 +234,7 @@ void IE15CPU::execute_one(uint8_t op)
                 case 5:  f = (m_b & 0x80) != 0; break;
                 case 6:  f = m_cf; break;
                 case 7:  f = false; break;
-                default: f = (mm->read_port(IE15_FLAG_PORT | (op & 7)) & 0xFF) != 0; break;
+                default: f = (port_in(IE15_FLAG_PORT | (op & 7)) & 0xFF) != 0; break;
             }
             if (((op & 8) == 0) != f) skip();
             break;
@@ -210,14 +247,14 @@ void IE15CPU::execute_one(uint8_t op)
             break;
         case 0xC0:      // CFL/SFL; флаг 5 - это перенос
             if ((op & 7) == 5) m_cf = false;
-            else mm->write_port(IE15_FLAG_PORT | (op & 7), (op >> 3) & 1);
+            else port_out(IE15_FLAG_PORT | (op & 7), (op >> 3) & 1);
             break;
         case 0xD0: set_a(reg_lo(op & 15)); break;           // LDA
         case 0xE0: set_reg(op & 15, m_b | (m_pc & 0xF00)); break;   // STA - из БАЛУ
         default:        // OTA - из БАЛУ; 16 и 17 - страница регистров
             if (op == 0xFE) m_rf = true;
             else if (op == 0xFF) m_rf = false;
-            else mm->write_port(op & 15, m_b);
+            else port_out(op & 15, m_b);
             break;
     }
 }
@@ -235,12 +272,26 @@ unsigned int IE15CPU::execute()
         // Код, прочитанный для проверки, и исполняется: чтение через маппер
         // одно на команду
         unsigned n = 0;
-        uint8_t op = (uint8_t)mm->read(m_pc);
+#ifdef ECAT_EMBEDDED
+        if (mm->current_tag() != m_code_tag) refresh_direct();
+        if (m_code != nullptr) {
+            const uint8_t * const code = m_code;
+            uint8_t op = code[m_pc];
+            do {
+                m_pc = (m_pc + 1) & 0xFFF;
+                execute_one(op);
+                n++;
+                op = code[m_pc];
+            } while (n < BATCH && !port_op(op));
+            return n;
+        }
+#endif
+        uint8_t op = (uint8_t)mm->read_fast(m_pc);
         do {
             m_pc = (m_pc + 1) & 0xFFF;
             execute_one(op);
             n++;
-            op = (uint8_t)mm->read(m_pc);
+            op = (uint8_t)mm->read_fast(m_pc);
         } while (n < BATCH && !port_op(op));
         return n;
     }
@@ -251,9 +302,39 @@ unsigned int IE15CPU::execute()
     return 1;
 }
 
+#ifdef ECAT_EMBEDDED
+unsigned int IE15CPU::execute_batched(unsigned int limit, unsigned int domain, unsigned int budget, bool * accounted)
+{
+    if (m_debug != DEBUG_OFF || reset_mode || m_code == nullptr || mm->current_tag() != m_code_tag) {
+        *accounted = false;
+        return execute();
+    }
+    *accounted = true;
+    DeviceManager * const dm = im->dm;
+    const uint8_t * const code = m_code;
+    unsigned int total = 0;
+    while (total < limit) {
+        //One execute(): to the next port instruction, which opens the next
+        unsigned int n = 0;
+        uint8_t op = code[m_pc];
+        do {
+            m_pc = (m_pc + 1) & 0xFFF;
+            execute_one(op);
+            n++;
+            op = code[m_pc];
+        } while (n < BATCH && !port_op(op));
+        total += n;
+        dm->add_pending(domain, n);
+        if (dm->m_pending[domain] >= budget) dm->sync_domain(domain);
+        if (m_code != code) break;      //the map changed under it
+    }
+    return total;
+}
+#endif
+
 unsigned int IE15CPU::read_mem(unsigned int address)
 {
-    return mm->read(address);
+    return mm->read_fast(address);
 }
 
 // Программная память - только ПЗУ, процессор в неё не пишет

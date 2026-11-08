@@ -352,20 +352,20 @@ emulator::Result k1801vm1::load_state(const StateReader &r)
 
 unsigned int k1801vm1::read_mem(unsigned int address)
 {
-    unsigned int v = mm->read(address) & 0xFF;
+    unsigned int v = mm->read_fast(address) & 0xFF;
     note_timeout(address);
     return v;
 }
 
 void k1801vm1::write_mem(unsigned int address, unsigned int data)
 {
-    mm->write(address, data & 0xFF);
+    mm->write_fast(address, data & 0xFF);
     note_timeout(address);
 }
 
 unsigned int k1801vm1::read_mem_word(unsigned int address)
 {
-    unsigned int v = ((address & 1) ? mm->read_word_odd(address) : mm->read_word(address)) & 0xFFFF;
+    unsigned int v = ((address & 1) ? mm->read_word_odd(address) : mm->read_word_fast(address)) & 0xFFFF;
     note_timeout(address & ~1u);
     return v;
 }
@@ -373,7 +373,7 @@ unsigned int k1801vm1::read_mem_word(unsigned int address)
 void k1801vm1::write_mem_word(unsigned int address, unsigned int data)
 {
     if (address & 1) mm->write_word_odd(address, data & 0xFFFF);
-    else mm->write_word(address, data & 0xFFFF);
+    else mm->write_word_fast(address, data & 0xFFFF);
     note_timeout(address & ~1u);
 }
 

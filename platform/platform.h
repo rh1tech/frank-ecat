@@ -67,6 +67,8 @@ void platform_stall_watch_start(void);
 /* sampling profiler on the same timer: 4096 PCs of core 0 every `us`, then
  * platform_prof_dump_if_done() (main loop) prints them ("PROF BEGIN" .. "PROF END") */
 void platform_prof_start(uint32_t us);
+void platform_prof_core1_init(void);
+void platform_prof_start_core1(uint32_t us);
 bool platform_prof_dump_if_done(void);
 
 /* core 1 on a 4 KB stack in main RAM */

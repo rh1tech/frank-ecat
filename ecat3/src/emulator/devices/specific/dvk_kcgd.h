@@ -61,6 +61,9 @@ class KCGDMouse;
 class KCGD: public AddressableDevice, public WaitSource
 {
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     static const unsigned VRAM_WORDS = 65536;
     // Видимых строк в поле (гашение V7 по D62 и D63)
     static const unsigned LINES = 240;
@@ -209,6 +212,9 @@ protected:
     void render_all(bool force_render) override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     KCGDDisplay(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
@@ -260,6 +266,9 @@ private:
     static void add_pending(std::atomic<int> &axis, int delta);
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     KCGDMouse(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

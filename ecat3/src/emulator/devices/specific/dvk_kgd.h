@@ -37,6 +37,9 @@ private:
     unsigned int m_line_ticks = 1;  // тактов на строку растра терминала, 64,9 мкс
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     DVKKGD(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

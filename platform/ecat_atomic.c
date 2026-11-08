@@ -19,6 +19,11 @@
 
 #include "hardware/sync.h"
 
+/* Both cores run the emulator (the second processor of a machine on core 1):
+ * a read-modify-write is a hardware spinlock's, not merely a moment with the
+ * interrupts off, which kept only the other code of the same core out */
+#define ATOMIC_LOCK spin_lock_instance(PICO_SPINLOCK_ID_OS2)
+
 #define ATOMIC_OPS(N, T)                                                                     \
     T __atomic_load_##N(const volatile void *p, int m) {                                     \
         (void)m;                                                                             \
@@ -35,21 +40,21 @@
     }                                                                                        \
     T __atomic_exchange_##N(volatile void *p, T v, int m) {                                  \
         (void)m;                                                                             \
-        uint32_t s = save_and_disable_interrupts();                                          \
+        uint32_t s = spin_lock_blocking(ATOMIC_LOCK);                                          \
         T old = *(volatile T *)p;                                                            \
         *(volatile T *)p = v;                                                                \
-        restore_interrupts(s);                                                               \
+        spin_unlock(ATOMIC_LOCK, s);                                                               \
         return old;                                                                          \
     }                                                                                        \
     bool __atomic_compare_exchange_##N(volatile void *p, void *expected, T desired, bool weak, \
                                        int ms, int mf) {                                     \
         (void)weak; (void)ms; (void)mf;                                                      \
-        uint32_t s = save_and_disable_interrupts();                                          \
+        uint32_t s = spin_lock_blocking(ATOMIC_LOCK);                                          \
         T cur = *(volatile T *)p;                                                            \
         bool ok = cur == *(T *)expected;                                                     \
         if (ok) *(volatile T *)p = desired;                                                  \
         else *(T *)expected = cur;                                                           \
-        restore_interrupts(s);                                                               \
+        spin_unlock(ATOMIC_LOCK, s);                                                               \
         return ok;                                                                           \
     }                                                                                        \
     ATOMIC_RMW(N, T, fetch_add, add_fetch, +)                                                \
@@ -61,18 +66,18 @@
 #define ATOMIC_RMW(N, T, FETCH_OP, OP_FETCH, OP)                                             \
     T __atomic_##FETCH_OP##_##N(volatile void *p, T v, int m) {                              \
         (void)m;                                                                             \
-        uint32_t s = save_and_disable_interrupts();                                          \
+        uint32_t s = spin_lock_blocking(ATOMIC_LOCK);                                          \
         T old = *(volatile T *)p;                                                            \
         *(volatile T *)p = (T)(old OP v);                                                    \
-        restore_interrupts(s);                                                               \
+        spin_unlock(ATOMIC_LOCK, s);                                                               \
         return old;                                                                          \
     }                                                                                        \
     T __atomic_##OP_FETCH##_##N(volatile void *p, T v, int m) {                              \
         (void)m;                                                                             \
-        uint32_t s = save_and_disable_interrupts();                                          \
+        uint32_t s = spin_lock_blocking(ATOMIC_LOCK);                                          \
         T now = (T)(*(volatile T *)p OP v);                                                  \
         *(volatile T *)p = now;                                                              \
-        restore_interrupts(s);                                                               \
+        spin_unlock(ATOMIC_LOCK, s);                                                               \
         return now;                                                                          \
     }
 

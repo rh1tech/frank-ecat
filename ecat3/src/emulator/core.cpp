@@ -131,6 +131,43 @@ unsigned int Interface::get_mode()
 }
 
 
+#ifdef ECAT_EMBEDDED
+static unsigned int ecat_core_zero() { return 0; }
+unsigned int (*ecat_core_num)() = ecat_core_zero;
+bool ecat_parallel_on = false;
+
+//One queue each way, a single producer and a single consumer: the core that
+//changes a line and the core whose device it is. Handed over at quantum
+//starts; a line toggled faster than the queue empties (it never is: a serial
+//line, a beeper) loses changes rather than stalling a core
+struct CrossMsg { const LinkData * link; unsigned int value; };
+static const unsigned int CROSS_SIZE = 4096;
+static CrossMsg g_cross[2][CROSS_SIZE];
+static volatile uint32_t g_cross_head[2], g_cross_tail[2];
+uint32_t ecat_cross_dropped;
+
+void ecat_cross_push(unsigned int core, const LinkData * link, unsigned int value)
+{
+    const uint32_t h = g_cross_head[core];
+    if (h - g_cross_tail[core] >= CROSS_SIZE) { ecat_cross_dropped++; return; }
+    g_cross[core][h % CROSS_SIZE] = {link, value};
+    __sync_synchronize();
+    g_cross_head[core] = h + 1;
+}
+
+void ecat_cross_drain(unsigned int core)
+{
+    uint32_t t = g_cross_tail[core];
+    while (t != g_cross_head[core]) {
+        __sync_synchronize();
+        const CrossMsg m = g_cross[core][t % CROSS_SIZE];
+        m.link->d.i->changed(*m.link, m.value);
+        t++;
+        g_cross_tail[core] = t;
+    }
+}
+#endif
+
 void Interface::change(unsigned int new_value)
 {
     if (mode == MODE_W)
@@ -139,6 +176,16 @@ void Interface::change(unsigned int new_value)
         value = new_value;
         for (unsigned int i=0; i < linked; i++)
         {
+#ifdef ECAT_EMBEDDED
+            if (ecat_parallel_on) {
+                const Interface * t = linked_interfaces[i].d.i;
+                const unsigned int dc = (t->device != nullptr) ? t->device->m_core : 0;
+                if (dc != ecat_core_num()) {
+                    ecat_cross_push(dc, &linked_interfaces[i], new_value ^ linked_interfaces[i].inversion);
+                    continue;
+                }
+            }
+#endif
             linked_interfaces[i].d.i->changed(linked_interfaces[i], new_value ^ linked_interfaces[i].inversion);
         }
     } else {
@@ -296,8 +343,11 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
     clocked_devices.assign(cpus.size(), std::vector<ClockedDevice>());
     event_devices.assign(cpus.size(), std::vector<ComputerDevice*>());
 #ifdef ECAT_EMBEDDED
-    m_batch_ok = cpus.size() == 1;
-    m_batch_event_devices.clear();
+    m_pending.assign(cpus.size(), 0);
+    m_any_pending[0] = m_any_pending[1] = false;
+    m_domain_core.assign(cpus.size(), 0);
+    m_domain_batch_ok.assign(cpus.size(), 1);
+    m_batch_event_devices.assign(cpus.size(), std::vector<ComputerDevice*>());
 #endif
     for (unsigned int i=0; i < device_count; i++)
     {
@@ -313,11 +363,11 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
             if (cpus[j] == d->get_clock_source()) { domain = j; break; }
 
 #ifdef ECAT_EMBEDDED
-        if (d->has_batch_events()) m_batch_event_devices.push_back(d);
+        if (d->has_batch_events()) m_batch_event_devices[domain].push_back(d);
         if (!d->batch_safe()) {
-            if (m_batch_ok) printf("batch: %s (%s) is clocked after every instruction\n",
-                                   d->name.c_str(), devices[i].device_type.c_str());
-            m_batch_ok = false;
+            printf("batch: %s (%s) keeps domain %u clocked after every instruction\n",
+                   d->name.c_str(), devices[i].device_type.c_str(), (unsigned)domain);
+            m_domain_batch_ok[domain] = 0;
         }
 #endif
         ClockedDevice c;
@@ -326,6 +376,11 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
         clocked_devices[domain].push_back(c);
         if (c.direct && d->has_clock_events()) event_devices[domain].push_back(d);
     }
+#ifdef ECAT_EMBEDDED
+    m_domain_events.assign(cpus.size(), 0);
+    for (size_t k = 0; k < cpus.size(); k++)
+        m_domain_events[k] = !event_devices[k].empty() || !m_batch_event_devices[k].empty();
+#endif
 
     return emulator::Result::ok();
 }
@@ -3062,9 +3117,6 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
 
 unsigned int MemoryMapper::read_word(unsigned int address)
 {
-#ifdef ECAT_EMBEDDED
-    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
-#endif
     if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
         this->first_range = 1;
         invalidate_pages();
@@ -3077,6 +3129,13 @@ unsigned int MemoryMapper::read_word(unsigned int address)
         this->last_device = e->device_r;
         if (e->device_r != nullptr) {
             this->no_device = false;
+#ifdef ECAT_EMBEDDED
+            if (e->direct_r != nullptr) {
+                const unsigned int a = address + e->offset;
+                if (a + 1 < e->direct_r_size) return e->direct_r[a] | (e->direct_r[a + 1] << 8);
+            }
+#endif
+            ECAT_SYNC_FOR(e->device_r);
             return e->device_r->get_value_word(address + e->offset);
         }
         this->no_device = e->timeout_r;
@@ -3089,12 +3148,14 @@ unsigned int MemoryMapper::read_word(unsigned int address)
     AddressableDevice * d = map_read(address, &address_on_device, &range_index, &route);
     this->last_device = d;
     if (d != nullptr) {
+        ECAT_SYNC_FOR(d);
         unsigned int v = d->get_value_word(address_on_device);
 
         //See read(): ranges wired together answer at once, OR-ed
         while (reads_on(range_index, route) && range_index < this->ranges_count) {
             d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_R, &address_on_device, &range_index, &route);
             if (d == nullptr) break;
+            ECAT_SYNC_FOR(d);
             v |= d->get_value_word(address_on_device);
         }
         return v;
@@ -3114,9 +3175,6 @@ unsigned int MemoryMapper::read_word(unsigned int address)
 // odd address as two bytes, and it calls read_word() with it
 unsigned int MemoryMapper::read_word_odd(unsigned int address)
 {
-#ifdef ECAT_EMBEDDED
-    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
-#endif
     if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
         this->first_range = 1;
         invalidate_pages();
@@ -3140,9 +3198,6 @@ unsigned int MemoryMapper::read_word_odd(unsigned int address)
 //As read_word_odd(); write() also passes the byte on through a "through" range
 void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 {
-#ifdef ECAT_EMBEDDED
-    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
-#endif
     AddressableDevice * d;
     MapperPage * e = find_page(address, page_tag());
     if (e != nullptr) {
@@ -3161,14 +3216,22 @@ void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 
 void MemoryMapper::write_word(unsigned int address, unsigned int value)
 {
-#ifdef ECAT_EMBEDDED
-    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
-#endif
     MapperPage * e = find_page(address, page_tag());
     if (e != nullptr) {
         this->last_device = e->device_w;
         if (e->device_w != nullptr) {
             this->no_device = false;
+#ifdef ECAT_EMBEDDED
+            if (e->direct_w != nullptr) {
+                const unsigned int a = address + e->offset;
+                if (a + 1 < e->direct_w_size) {
+                    e->direct_w[a] = (uint8_t)value;
+                    e->direct_w[a + 1] = (uint8_t)(value >> 8);
+                    return;
+                }
+            }
+#endif
+            ECAT_SYNC_FOR(e->device_w);
             e->device_w->set_value_word(address + e->offset, value);
         } else
             this->no_device = e->timeout_w;
@@ -3184,10 +3247,12 @@ void MemoryMapper::write_word(unsigned int address, unsigned int value)
         this->no_device = !this->responds(address, MODE_W);
         return;
     }
+    ECAT_SYNC_FOR(d);
     d->set_value_word(address_on_device, value);
     while (goes_through(range_index, route) && range_index < this->ranges_count) {
         d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
         if (d == nullptr) break;
+        ECAT_SYNC_FOR(d);
         d->set_value_word(address_on_device, value);
     }
 }

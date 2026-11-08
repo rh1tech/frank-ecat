@@ -62,6 +62,9 @@ protected:
     void render_all(bool force_render) override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     KSMDisplay(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

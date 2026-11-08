@@ -167,6 +167,16 @@ struct LinkData {
     unsigned int inversion;
 };
 
+#ifdef ECAT_EMBEDDED
+// frank-ecat: a machine's processors on two cores (Emulator::set_parallel()).
+// A line changed on one core for a device of the other is queued and handed
+// over at the start of that core's next quantum
+extern unsigned int (*ecat_core_num)();
+extern bool ecat_parallel_on;
+void ecat_cross_push(unsigned int core, const LinkData * link, unsigned int value);
+void ecat_cross_drain(unsigned int core);
+#endif
+
 struct DeviceDescription {
     std::unique_ptr<ComputerDevice> device;
     std::string device_type;
@@ -350,6 +360,9 @@ public:
     //up to date first, when Emulator::timer_proc() clocks them a batch of
     //instructions at a time (MemoryMapper, DeviceManager::sync_pending())
     bool m_sync_on_access = false;
+    //The core whose emulation owns this device: 1 for a processor run on the
+    //second core and what belongs to it (Emulator::set_parallel())
+    uint8_t m_core = 0;
     //Reading or writing it depends on nothing that moves with time: memory,
     //and the decoders that only pass an access on. Every other device the
     //processor reaches (a port fed by the tape, the FDC) is brought up to date
@@ -614,6 +627,10 @@ private:
 #endif
     unsigned int callback_id;
 public:
+#ifdef ECAT_EMBEDDED
+    //The device at the other end of link l
+    const ComputerDevice * linked_device(unsigned int l) const { return linked_interfaces[l].d.i->device; }
+#endif
     unsigned int value;
     unsigned int mask;
     std::string name;
@@ -838,28 +855,52 @@ public:
     //has exactly one domain, number 0, and this is the old clock(counter)
     void clock(unsigned int domain, unsigned int counter);
 #ifdef ECAT_EMBEDDED
-    //Cycles of the single domain the devices have not been clocked for yet:
-    //timer_proc() runs a batch of instructions before clocking them once
-    unsigned int m_batch_pending = 0;
-    //Every clocked device is batch_safe(): set by load_devices_config()
-    bool m_batch_ok = false;
-    //The clocked devices with has_batch_events(), and the nearest of their events
-    std::vector<ComputerDevice*> m_batch_event_devices;
-    unsigned int cycles_to_batch_event() const
+    //Per clock domain: the cycles its devices have not been clocked for yet
+    //(timer_proc() runs a batch of instructions before clocking them once),
+    //whether every clocked device of it is batch_safe(), and those of its
+    //devices that have batch events. Set up by load_devices_config()
+    std::vector<unsigned int> m_pending;
+    std::vector<uint8_t> m_domain_batch_ok;
+    std::vector<uint8_t> m_domain_core;     //per domain: the core running it
+    std::vector<uint8_t> m_domain_events;   //per domain: any device that can end a batch early
+    std::vector<std::vector<ComputerDevice*>> m_batch_event_devices;
+    bool m_any_pending[2] = {false, false};     //per core
+    bool batch_ok(unsigned int domain) const { return domain < m_domain_batch_ok.size() && m_domain_batch_ok[domain]; }
+    unsigned int cycles_to_batch_event(unsigned int domain) const
     {
         unsigned int r = UINT_MAX;
-        for (const ComputerDevice *d : m_batch_event_devices) {
+        if (domain >= m_batch_event_devices.size()) return r;
+        for (const ComputerDevice *d : m_batch_event_devices[domain]) {
             const unsigned int e = d->cycles_to_batch_event();
             if (e < r) r = e;
         }
         return r;
     }
+    inline unsigned int domain_core(unsigned int domain) const
+    {
+        return domain < m_domain_core.size() ? m_domain_core[domain] : 0;
+    }
+    inline void add_pending(unsigned int domain, unsigned int c)
+    {
+        m_pending[domain] += c;
+        m_any_pending[domain_core(domain)] = true;
+    }
+    inline void sync_domain(unsigned int domain)
+    {
+        const unsigned int p = m_pending[domain];
+        if (p == 0) return;
+        m_pending[domain] = 0;
+        clock(domain, p);
+    }
+    //Every domain up to date: before an access to a device, before a script acts
+    //(of the domains the calling core runs: those of the other are its own)
     inline void sync_pending()
     {
-        if (m_batch_pending == 0) return;
-        const unsigned int p = m_batch_pending;
-        m_batch_pending = 0;
-        clock(0, p);
+        const unsigned int c = ecat_parallel_on ? ecat_core_num() : 0;
+        if (!m_any_pending[c]) return;
+        m_any_pending[c] = false;
+        for (unsigned int k = 0; k < m_pending.size(); k++)
+            if (domain_core(k) == c) sync_domain(k);
     }
 #endif
     //The nearest ComputerDevice::clocks_to_event() among the devices clocked by
@@ -949,6 +990,19 @@ public:
 
     emulator::Result load_config(SystemData *sd) override;
     virtual unsigned int execute() = 0;
+#ifdef ECAT_EMBEDDED
+    //Instructions until at least `limit` cycles have run, the domain's devices
+    //clocked on the way as Emulator::run_partition() would between execute()
+    //calls (a batch of `budget` cycles at a time). A processor whose execute()
+    //returns every few instructions saves the round trips. By default: one
+    //execute(), its cycles left to the caller (*accounted false)
+    virtual unsigned int execute_batched(unsigned int limit, unsigned int domain, unsigned int budget, bool * accounted)
+    {
+        (void)limit; (void)domain; (void)budget;
+        *accounted = false;
+        return execute();
+    }
+#endif
 
     //True when execute() will return 0, i.e. the processor's emulated time
     //stands still: stopped by the debugger. A processor that spends cycles
@@ -1245,6 +1299,112 @@ public:
     void routing_changed() { invalidate_pages(); }
     unsigned int read(unsigned int address);
     void write(unsigned int address, unsigned int value);
+#ifdef ECAT_EMBEDDED
+    //The device and its address behind a port, as read_port()/write_port()
+    //find them (nullptr: none, or ports go to memory); valid while page_tag() is
+    AddressableDevice * port_target(unsigned int address, unsigned int mode, unsigned int * address_on_device)
+    {
+        if (this->ports_to_mem || this->ports_count == 0) return nullptr;
+        return port_device(address & this->ports_mask, mode, address_on_device);
+    }
+    uint64_t current_tag() const { return page_tag(); }
+    //Where [address, address + len) reads plain memory in one buffer: the
+    //pointer such that p[a] is the byte at a. nullptr otherwise
+    const uint8_t * direct_span(unsigned int address, unsigned int len)
+    {
+        const uint8_t * base = nullptr;
+        for (unsigned int a = address; a < address + len; a += (1u << MM_PAGE_SHIFT)) {
+            MapperPage * e = find_page(a, page_tag());
+            if (e == nullptr || e->direct_r == nullptr) return nullptr;
+            const uint8_t * b = e->direct_r + e->offset;
+            if (base == nullptr) base = b;
+            else if (b != base) return nullptr;
+            if (address + len + e->offset > e->direct_r_size) return nullptr;
+        }
+        return base;
+    }
+    //Every device the map reaches, memory and ports (Emulator::set_parallel())
+    void collect_devices(std::vector<AddressableDevice*> &out) const
+    {
+        for (unsigned int i = 0; i <= ranges_count && i < MAPPER_MAX_RANGES; i++)
+            if (ranges[i].device != nullptr) out.push_back(ranges[i].device);
+        for (unsigned int i = 0; i < ports_count && i < MAPPER_MAX_RANGES; i++)
+            if (ports[i].device != nullptr) out.push_back(ports[i].device);
+    }
+#endif
+#ifdef ECAT_EMBEDDED
+    //read()/write() and the word ones, inline where the page is plain RAM or
+    //ROM (MapperPage::direct_r/_w): what the processors call on every fetch,
+    //and the call into read() cost more than the access
+    inline MapperPage * direct_page(unsigned int address)
+    {
+        const unsigned int page = address >> MM_PAGE_SHIFT;
+        if (page >= m_page_count) return nullptr;
+        if (this->first_range == 0 && (address & this->cancel_init_mask) != 0) return nullptr;
+        MapperPage * e = &this->m_pages[page];
+        return (e->tag == page_tag()) ? e : nullptr;
+    }
+    inline unsigned int read_fast(unsigned int address)
+    {
+        MapperPage * e = direct_page(address);
+        if (e != nullptr && e->direct_r != nullptr) {
+            const unsigned int a = address + e->offset;
+            if (a < e->direct_r_size) {
+                this->last_device = e->device_r;
+                this->no_device = false;
+                return e->direct_r[a];
+            }
+        }
+        return read(address);
+    }
+    inline void write_fast(unsigned int address, unsigned int value)
+    {
+        MapperPage * e = direct_page(address);
+        if (e != nullptr && e->direct_w != nullptr) {
+            const unsigned int a = address + e->offset;
+            if (a < e->direct_w_size) {
+                this->last_device = e->device_w;
+                this->no_device = false;
+                e->direct_w[a] = (uint8_t)value;
+                return;
+            }
+        }
+        write(address, value);
+    }
+    inline unsigned int read_word_fast(unsigned int address)
+    {
+        MapperPage * e = direct_page(address);
+        if (e != nullptr && e->direct_r != nullptr) {
+            const unsigned int a = address + e->offset;
+            if (a + 1 < e->direct_r_size) {
+                this->last_device = e->device_r;
+                this->no_device = false;
+                return e->direct_r[a] | (e->direct_r[a + 1] << 8);
+            }
+        }
+        return read_word(address);
+    }
+    inline void write_word_fast(unsigned int address, unsigned int value)
+    {
+        MapperPage * e = direct_page(address);
+        if (e != nullptr && e->direct_w != nullptr) {
+            const unsigned int a = address + e->offset;
+            if (a + 1 < e->direct_w_size) {
+                this->last_device = e->device_w;
+                this->no_device = false;
+                e->direct_w[a] = (uint8_t)value;
+                e->direct_w[a + 1] = (uint8_t)(value >> 8);
+                return;
+            }
+        }
+        write_word(address, value);
+    }
+#else
+    unsigned int read_fast(unsigned int address) { return read(address); }
+    void write_fast(unsigned int address, unsigned int value) { write(address, value); }
+    unsigned int read_word_fast(unsigned int address) { return read_word(address); }
+    void write_word_fast(unsigned int address, unsigned int value) { write_word(address, value); }
+#endif
     unsigned int read_port(unsigned int address);
     void write_port(unsigned int address, unsigned int value);
 

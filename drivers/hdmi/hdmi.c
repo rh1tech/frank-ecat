@@ -1606,6 +1606,9 @@ static inline void irq_remove_handler_DMA_core1() {
     irq_remove_handler(VIDEO_DMA_IRQ, irq_get_exclusive_handler(VIDEO_DMA_IRQ));
 }
 
+// frank-ecat: the line IRQ's number, for moving it to the other core
+int hdmi_video_irq(void) { return VIDEO_DMA_IRQ; }
+
 static inline void irq_set_exclusive_handler_DMA_core1() {
     irq_set_exclusive_handler(VIDEO_DMA_IRQ, dma_handler_HDMI);
     irq_set_priority(VIDEO_DMA_IRQ, 0);

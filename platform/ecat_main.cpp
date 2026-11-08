@@ -38,6 +38,7 @@ extern "C" {
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/clocks.h"
+#include "hardware/irq.h"
 #include "platform.h"
 #include "frank_audio.h"
 #include "frank_vfs.h"
@@ -282,12 +283,41 @@ void cache_touch(const std::string &) {}
 
 /* ---- core 1: the HDMI line IRQ ---- */
 
+/* The emulator whose second-core processors this core runs (set_parallel()) */
+static Emulator * volatile par_emu;
+
+static unsigned int core_num(void) { return get_core_num(); }
+
+/* Moving the HDMI line IRQ to core 0 (hdmi_irq_to_core0()): core 1 lets go
+ * of it first, so the two never take one line each */
+extern "C" int hdmi_video_irq(void);
+static volatile int hdmi_irq_release;   /* 1: core 1 to disable it, 2: done */
+
+static void hdmi_irq_to_core0(void)
+{
+    hdmi_irq_release = 1;
+    while (hdmi_irq_release != 2) tight_loop_contents();
+    irq_set_priority(hdmi_video_irq(), 0);
+    irq_set_enabled(hdmi_video_irq(), true);
+    printf("hdmi: line IRQ on core 0\n");
+}
+
 static void core1_main(void)
 {
     graphics_init();
     graphics_set_bgcolor(0x000000);
+    platform_prof_core1_init();
     multicore_fifo_push_blocking(1);
-    while (1) tight_loop_contents();
+    /* The HDMI line IRQ, and between its lines the quanta of the machine's
+     * second-core processors, as the first core hands them out */
+    while (1) {
+        if (hdmi_irq_release == 1) {
+            irq_set_enabled(hdmi_video_irq(), false);
+            hdmi_irq_release = 2;
+        }
+        Emulator * e = par_emu;
+        if (e) e->parallel_core1_step();
+    }
 }
 
 /* the machine to boot, kept over a watchdog reboot */
@@ -299,7 +329,7 @@ static FrankRenderer *renderer;
 static Emulator *emu;
 
 extern "C" uint32_t frank_audio_tick_us, frank_audio_ticks;
-extern "C" volatile uint32_t hdmi_irq_max_dur_us, hdmi_irq_max_gap_us;
+extern "C" volatile uint32_t hdmi_irq_max_dur_us, hdmi_irq_max_gap_us, hdmi_irq_dur_total_us;
 
 static void status(void)
 {
@@ -315,6 +345,15 @@ static void status(void)
     printf("hdmi line irq: longest %lu us, largest gap %lu us\n", (unsigned long)hdmi_irq_max_dur_us,
            (unsigned long)hdmi_irq_max_gap_us);
     hdmi_irq_max_dur_us = hdmi_irq_max_gap_us = 0;
+    {
+        static uint32_t last_total;
+        static uint64_t last_t;
+        const uint64_t now = time_us_64();
+        const uint32_t tot = hdmi_irq_dur_total_us;
+        if (last_t) printf("hdmi line irq: %lu%% of core 1\n", (unsigned long)((uint64_t)(tot - last_total) * 100 / (now - last_t)));
+        last_total = tot;
+        last_t = now;
+    }
     frank_audio_tick_us = frank_audio_ticks = 0;
 }
 
@@ -995,6 +1034,15 @@ int main()
         ecat_settings_apply();
         emu->init_video(nullptr);       /* the display gets the renderer, as in the console build */
         emu->run();
+        /* A terminal with a processor of its own (the ДВК): on the second core */
+        ecat_core_num = core_num;
+        ecat_time_us = time_us_64;
+        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu"})) {
+            par_emu = emu;
+            /* The ИЕ15 terminal is the heavier half: its core gets nothing else
+             * (the КСМ and КЦГД ones are lighter than the ДВК-3/4 main side) */
+            if (emu->dm->get_device_by_name("ie15-cpu", false) != nullptr) hdmi_irq_to_core0();
+        }
         printf("running %s\n", ecat_machines[machine]);
     }
     platform_watchdog_feed();
@@ -1140,6 +1188,10 @@ int main()
                 audio_output(FRANK_AUDIO_HDMI);
             } else if (strcmp(cmd, "audio i2s") == 0) {
                 audio_output(FRANK_AUDIO_I2S);
+            } else if (strncmp(cmd, "prof1", 5) == 0) {
+                unsigned us = 200;
+                sscanf(cmd + 5, "%u", &us);
+                platform_prof_start_core1(us);
             } else if (strncmp(cmd, "prof", 4) == 0) {
                 unsigned us = 200;
                 sscanf(cmd + 4, "%u", &us);
@@ -1155,6 +1207,11 @@ int main()
             last_clock = clk;
             if (!speed_skip) speed_khz = (uint32_t)(hz / 1000);    /* a menu stopped the machine */
             speed_skip = false;
+            if (emu->parallel()) {
+                printf("parallel: first core waited %lu us of %lu, %lu quanta\n", (unsigned long)emu->m_par_wait_us,
+                       (unsigned long)(now - last_status), (unsigned long)emu->m_par_quanta);
+                emu->m_par_wait_us = emu->m_par_quanta = 0;
+            }
             printf("speed %lu.%02lu MHz, busy %u%%, vsync %lu, ring %d, underruns %lu\n",
                    (unsigned long)(hz / 1000000), (unsigned long)(hz / 10000 % 100),
                    (unsigned)(busy_us * 100 / (now - last_status)), (unsigned long)vsyncs,

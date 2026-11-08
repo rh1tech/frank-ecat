@@ -36,6 +36,9 @@ private:
     void tick();
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     BKTimer(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     void save_state(StateWriter &w) override;

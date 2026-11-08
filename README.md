@@ -13,7 +13,7 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | Firmware | Machines | Load at full speed |
 |---|---|---|
 | `frank-ecat-rk86` | Радио-86РК, Спектр-001, Микроша, Апогей БК-01Ц | 60-75% of a core |
-| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | not yet: 13-45% of real speed |
+| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | ДВК-1/2 ~90-100% (both cores); ДВК-3 45%, ДВК-4 10%: not yet |
 | `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | ~55% (Агат-7), ~60% (Агат-9) |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`

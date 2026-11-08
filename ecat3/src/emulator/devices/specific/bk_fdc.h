@@ -119,6 +119,9 @@ private:
     void write_data(unsigned int value);
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     BKFDC(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     emulator::Result load_config(SystemData *sd) override;

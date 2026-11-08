@@ -1,3 +1,4 @@
+#include <climits>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
@@ -220,6 +221,18 @@ void DVKMX::start_word()
         break;
     }
 }
+
+#ifdef ECAT_EMBEDDED
+unsigned int DVKMX::clocks_to_batch_event() const
+{
+    uint64_t r = (m_rev_ticks > m_angle) ? m_rev_ticks - m_angle : 1;
+    if ((m_op == OP_READ || m_op == OP_WRITE) && m_word_left < r) r = m_word_left;
+    if (m_timer_left > 0 && m_timer_left < r) r = m_timer_left;
+    if (m_step_left > 0 && m_step_left < r) r = m_step_left;
+    if (r == 0) r = 1;
+    return r > UINT_MAX ? UINT_MAX : (unsigned int)r;
+}
+#endif
 
 void DVKMX::clock(unsigned int counter)
 {

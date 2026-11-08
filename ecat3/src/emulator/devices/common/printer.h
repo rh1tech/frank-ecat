@@ -44,6 +44,9 @@ protected:
     void plug_changed() override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     Printer(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     emulator::Result load_config(SystemData *sd) override;

@@ -89,12 +89,12 @@ unsigned int i8080::get_pc()
 
 unsigned int i8080::read_mem(unsigned int address)
 {
-    return mm->read(address);
+    return mm->read_fast(address);
 }
 
 void i8080::write_mem(unsigned int address, unsigned int data)
 {
-    mm->write(address, data);
+    mm->write_fast(address, data);
 }
 
 unsigned int i8080::read_port(unsigned int address)

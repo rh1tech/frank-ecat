@@ -99,6 +99,9 @@ protected:
     virtual void image_opened() {}
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     std::string files;
     HddImage & hdd_image() override { return m_image; }
     const std::string & hdd_files() const override { return files; }

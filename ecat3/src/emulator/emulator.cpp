@@ -1772,6 +1772,213 @@ void Emulator::debug_step_slice()
 #ifndef ECAT_BATCH_MAX
 #define ECAT_BATCH_MAX 32       //cycles: a sample of the sound at 32 kHz on a 1 MHz machine
 #endif
+#define ECAT_BATCH_MAX_CYCLES ECAT_BATCH_MAX
+#ifdef ECAT_EMBEDDED
+//What a processor's instruction leaves to its domain's devices: clocked
+//after it, or (batch_ok()) a batch of them at a time
+void Emulator::domain_executed(size_t k, unsigned int counter)
+{
+    ClockDomain &d = domains[k];
+    if (!dm->batch_ok((unsigned int)k)) {
+        dm->clock((unsigned int)k, counter);
+        return;
+    }
+    if (dm->m_pending[k] == 0) {
+        unsigned int budget = ECAT_BATCH_MAX_CYCLES;
+        if (k < dm->m_domain_events.size() && dm->m_domain_events[k]) {
+            const unsigned int e = dm->clocks_to_event(d.cpu);
+            if (e < budget) budget = e;
+            const unsigned int be = dm->cycles_to_batch_event((unsigned int)k);
+            if (be < budget) budget = be;
+        }
+        if (k >= m_batch_budget.size()) m_batch_budget.resize(domains.size(), 1);
+        m_batch_budget[k] = budget ? budget : 1;
+    }
+    dm->add_pending((unsigned int)k, counter);
+    if (dm->m_pending[k] >= m_batch_budget[k]) dm->sync_domain((unsigned int)k);
+}
+
+uint64_t (*ecat_time_us)() = nullptr;
+
+bool Emulator::set_parallel(const std::vector<std::string> &core1_cpus)
+{
+    m_parallel = false;
+    ecat_parallel_on = false;
+    if (domains.size() < 2) return false;
+    m_domain_core.assign(domains.size(), 0);
+    bool any = false;
+    for (size_t k = 1; k < domains.size(); k++)
+        for (const std::string &n : core1_cpus)
+            if (domains[k].cpu->name == n) { m_domain_core[k] = 1; any = true; }
+    if (!any) return false;
+    dm->m_domain_core = m_domain_core;
+
+    //The devices of the second core: its processors, what they clock, what
+    //their maps reach (maps within maps too), then whatever is wired only to
+    //those. Everything else stays with the first core
+    std::vector<int> core(dm->device_count, -1);
+    auto index_of = [&](const ComputerDevice * d) -> int {
+        for (unsigned int i = 0; i < dm->device_count; i++)
+            if (dm->get_device(i)->get() == d) return (int)i;
+        return -1;
+    };
+    std::vector<AddressableDevice*> todo;
+    for (size_t k = 0; k < domains.size(); k++) {
+        const int i = index_of(domains[k].cpu);
+        if (i >= 0) core[i] = m_domain_core[k];
+        if (m_domain_core[k] == 1 && domains[k].cpu->mm != nullptr) todo.push_back(domains[k].cpu->mm);
+    }
+    for (unsigned int i = 0; i < dm->device_count; i++) {
+        ComputerDevice * d = dm->get_device(i)->get();
+        if (core[i] >= 0 || !d->is_clocked()) continue;
+        for (size_t k = 0; k < domains.size(); k++)
+            if (d->get_clock_source() == domains[k].cpu) core[i] = m_domain_core[k];
+    }
+    while (!todo.empty()) {
+        AddressableDevice * a = todo.back();
+        todo.pop_back();
+        const int i = index_of(a);
+        if (i >= 0) {
+            if (core[i] == 0) continue;     //a clocked device of the first core
+            core[i] = 1;
+        }
+        if (MemoryMapper * m = dynamic_cast<MemoryMapper *>(a)) {
+            std::vector<AddressableDevice*> reach;
+            m->collect_devices(reach);
+            for (AddressableDevice * r : reach) {
+                const int j = index_of(r);
+                if (j >= 0 && core[j] < 0) todo.push_back(r);
+            }
+        }
+    }
+    //Wired only to the second core's devices
+    for (bool more = true; more;) {
+        more = false;
+        for (unsigned int i = 0; i < dm->device_count; i++) {
+            if (core[i] >= 0) continue;
+            const ComputerDevice * d = dm->get_device(i)->get();
+            bool to1 = false, to0 = false;
+            for (Interface * f : im->interfaces) {
+                for (unsigned int l = 0; l < f->linked; l++) {
+                    const ComputerDevice * a = f->device, * b = f->linked_device(l);
+                    const ComputerDevice * other = (a == d) ? b : (b == d) ? a : nullptr;
+                    if (other == nullptr || other == d) continue;
+                    const int j = index_of(other);
+                    if (j < 0 || core[j] < 0) continue;
+                    (core[j] == 1 ? to1 : to0) = true;
+                }
+            }
+            if (to1 && !to0) { core[i] = 1; more = true; }
+        }
+    }
+    unsigned int n1 = 0;
+    for (unsigned int i = 0; i < dm->device_count; i++) {
+        ComputerDevice * d = dm->get_device(i)->get();
+        d->m_core = (core[i] == 1) ? 1 : 0;
+        if (d->m_core) { n1++; printf("core 1: %s\n", d->name.c_str()); }
+    }
+    //A quantum of 100 us of the machine: what a line changed on one core waits
+    //at most before the other sees it
+    m_par_quantum = (uint64_t)(clock_freq / 10000) * domains[0].scale;
+    if (m_par_quantum == 0) m_par_quantum = domains[0].scale;
+    m_par_go = m_par_done = 0;
+    m_parallel = true;
+    ecat_parallel_on = true;
+    printf("parallel: %u devices on core 1, quantum %llu\n", n1, (unsigned long long)(m_par_quantum / domains[0].scale));
+    return true;
+}
+
+//The domains of one core, each to q_end, the one furthest behind first
+void Emulator::run_partition(unsigned int c, uint64_t q_end)
+{
+    ecat_cross_drain(c);
+    //One domain on this core (the usual case): no choosing between them
+    size_t only = SIZE_MAX;
+    for (size_t i = 0; i < domains.size(); i++)
+        if (m_domain_core[i] == c) { if (only == SIZE_MAX) only = i; else { only = SIZE_MAX - 1; break; } }
+    if (only < SIZE_MAX - 1) {
+        ClockDomain &d = domains[only];
+        CPU * const p = d.cpu;
+        const uint64_t scale = d.scale;
+        if (!dm->batch_ok((unsigned int)only)) {
+            while (d.norm < q_end) {
+                const unsigned int counter = p->execute();
+                if (counter == 0) { d.norm += 10ull * scale; continue; }
+                d.norm += (uint64_t)counter * scale;
+                if (only == 0) clock_counter += counter;
+                dm->clock((unsigned int)only, counter);
+            }
+        } else {
+            //domain_executed(), inline: this loop is the whole of a core
+            unsigned int &pending = dm->m_pending[only];
+            const bool events = only < dm->m_domain_events.size() && dm->m_domain_events[only];
+            unsigned int budget = ECAT_BATCH_MAX_CYCLES;
+            //No device of the domain ends a batch early: the processor may
+            //run the quantum itself (CPU::execute_batched())
+            while (!events && d.norm < q_end) {
+                const uint64_t left = (q_end - d.norm + scale - 1) / scale;
+                bool accounted = false;
+                const unsigned int counter = p->execute_batched(left > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned int)left,
+                                                                (unsigned int)only, ECAT_BATCH_MAX_CYCLES, &accounted);
+                if (counter == 0) { d.norm += 10ull * scale; continue; }
+                d.norm += (uint64_t)counter * scale;
+                if (only == 0) clock_counter += counter;
+                if (!accounted) {
+                    dm->add_pending((unsigned int)only, counter);
+                    if (pending >= ECAT_BATCH_MAX_CYCLES) dm->sync_domain((unsigned int)only);
+                }
+            }
+            while (d.norm < q_end) {
+                const unsigned int counter = p->execute();
+                if (counter == 0) { d.norm += 10ull * scale; continue; }
+                d.norm += (uint64_t)counter * scale;
+                if (only == 0) clock_counter += counter;
+                if (pending == 0) {
+                    budget = ECAT_BATCH_MAX_CYCLES;
+                    if (events) {
+                        const unsigned int e = dm->clocks_to_event(p);
+                        if (e < budget) budget = e;
+                        const unsigned int be = dm->cycles_to_batch_event((unsigned int)only);
+                        if (be < budget) budget = be;
+                        if (budget == 0) budget = 1;
+                    }
+                }
+                dm->add_pending((unsigned int)only, counter);
+                if (pending >= budget) dm->sync_domain((unsigned int)only);
+            }
+        }
+        dm->sync_pending();
+        return;
+    }
+    while (true) {
+        size_t k = SIZE_MAX;
+        uint64_t best = UINT64_MAX;
+        for (size_t i = 0; i < domains.size(); i++)
+            if (m_domain_core[i] == c && domains[i].norm < best) { best = domains[i].norm; k = i; }
+        if (k == SIZE_MAX || best >= q_end) break;
+        ClockDomain &d = domains[k];
+        const unsigned int counter = d.cpu->execute();
+        if (counter == 0) {             //stopped: its time goes on
+            d.norm += 10ull * d.scale;
+            continue;
+        }
+        d.norm += (uint64_t)counter * d.scale;
+        if (k == 0) clock_counter += counter;
+        domain_executed(k, counter);
+    }
+    dm->sync_pending();
+}
+
+void Emulator::parallel_core1_step()
+{
+    if (!m_parallel || m_par_done == m_par_go) return;
+    __sync_synchronize();
+    run_partition(1, m_par_target);
+    __sync_synchronize();
+    m_par_done = m_par_go;
+}
+#endif
+
 
 void Emulator::timer_proc(uint64_t time_ticks)
 {
@@ -1808,6 +2015,30 @@ void Emulator::timer_proc(uint64_t time_ticks)
         }
 
 #ifdef ECAT_EMBEDDED
+        //Two cores: quanta, each core its own domains to the quantum's end;
+        //the second core is told where to stop and the first waits for it
+        if (m_parallel && m_step_cpu == nullptr && !m_debug_paused && !m_debug_attached && !script) {
+            while (true) {
+                uint64_t lo = UINT64_MAX;
+                for (size_t i = 0; i < domains.size(); i++)
+                    if (m_domain_core[i] == 0 && domains[i].norm < lo) lo = domains[i].norm;
+                if (lo >= target) break;
+                const uint64_t q_end = (target - lo > m_par_quantum) ? lo + m_par_quantum : target;
+                m_par_target = q_end;
+                __sync_synchronize();
+                m_par_go = m_par_go + 1;
+                run_partition(0, q_end);
+                if (m_par_done != m_par_go) {
+                    const uint64_t w0 = ecat_time_us ? ecat_time_us() : 0;
+                    while (m_par_done != m_par_go) { }
+                    if (ecat_time_us) m_par_wait_us += ecat_time_us() - w0;
+                }
+                m_par_quanta++;
+                __sync_synchronize();
+            }
+        }
+#endif
+#ifdef ECAT_EMBEDDED
         //One processor: the devices are clocked once a batch of instructions,
         //not after each. A batch ends where a device has an event next
         //(clocks_to_event(): a line of the raster, its sync pulses, so the
@@ -1816,13 +2047,13 @@ void Emulator::timer_proc(uint64_t time_ticks)
         //(MemoryMapper, sync_pending()), so the FDC, the timers and the sound
         //see the time they would have seen. On the microcontroller clocking
         //every device after every instruction was a third of the time
-        if (domains.size() == 1 && m_step_cpu == nullptr && !m_debug_paused && !m_debug_attached) {
+        if (domains.size() == 1 && m_step_cpu == nullptr && !m_debug_paused && !m_debug_attached && !dm->m_pending.empty()) {
             ClockDomain &d = domains[0];
             while (d.norm < target) {
                 unsigned int budget = dm->clocks_to_event(d.cpu);
-                const unsigned int be = dm->cycles_to_batch_event();
+                const unsigned int be = dm->cycles_to_batch_event(0);
                 if (be < budget) budget = be;
-                const unsigned int batch_max = dm->m_batch_ok ? ECAT_BATCH_MAX : 1;
+                const unsigned int batch_max = dm->batch_ok(0) ? ECAT_BATCH_MAX : 1;
                 if (budget > batch_max) budget = batch_max;
                 if (script) {
                     const uint64_t wake = script->next_wake(clock_counter);
@@ -1836,7 +2067,7 @@ void Emulator::timer_proc(uint64_t time_ticks)
                     run += c;
                     d.norm += (uint64_t)c * d.scale;
                     clock_counter += c;
-                    dm->m_batch_pending += c;
+                    dm->add_pending(0, c);
                     if (run >= budget || d.norm >= target) break;
                 }
                 dm->sync_pending();
@@ -1866,7 +2097,29 @@ void Emulator::timer_proc(uint64_t time_ticks)
                 //that waits 20 ms means 20 ms of the machine, whatever the
                 //other processors are doing
                 if (k == 0) clock_counter += counter;
+#ifdef ECAT_EMBEDDED
+                //Several processors: each domain's devices a batch at a time,
+                //as above for one (a batch of the domain's own instructions)
+                if (dm->batch_ok((unsigned int)k) && m_step_cpu == nullptr && !m_debug_attached) {
+                    if (dm->m_pending[k] == 0) {
+                        unsigned int budget = dm->clocks_to_event(d.cpu);
+                        const unsigned int be = dm->cycles_to_batch_event((unsigned int)k);
+                        if (be < budget) budget = be;
+                        if (budget > ECAT_BATCH_MAX) budget = ECAT_BATCH_MAX;
+                        if (k >= m_batch_budget.size()) m_batch_budget.resize(domains.size(), 1);
+                        m_batch_budget[k] = budget ? budget : 1;
+                    }
+                    dm->add_pending((unsigned int)k, counter);
+                    if (dm->m_pending[k] >= m_batch_budget[k]) dm->sync_domain((unsigned int)k);
+                    //What a script looks at is up to date when it acts
+                    if (script && script->next_wake(clock_counter) <= clock_counter) dm->sync_pending();
+                } else {
+                    dm->sync_pending();     //this domain's devices see the others' up to date
+                    dm->clock((unsigned int)k, counter);
+                }
+#else
                 dm->clock((unsigned int)k, counter);
+#endif
 
                 //Scripts are advanced here, on the emulation thread, so they see
                 //the devices in the same state the CPU does. Ticking inside the
@@ -1922,6 +2175,9 @@ void Emulator::timer_proc(uint64_t time_ticks)
                 }
             }
         }
+#ifdef ECAT_EMBEDDED
+        dm->sync_pending();         //the slice ends with every device up to date
+#endif
         //A device refused what the guest asked of it (an unsupported mode, a
         //command the emulator does not model). Throwing from here used to end
         //the process; the machine is stopped instead, and the message stays in

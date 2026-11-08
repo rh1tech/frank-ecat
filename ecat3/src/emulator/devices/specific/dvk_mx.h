@@ -117,6 +117,12 @@ private:
     void put_word(uint16_t w);
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+    //The index, the end of a word, the step and the timer
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     DVKMX(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

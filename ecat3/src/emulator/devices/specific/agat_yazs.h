@@ -69,7 +69,7 @@ class AgatYazs : public AddressableDevice, public SoundSource
 {
 public:
 #ifdef ECAT_EMBEDDED
-    bool batch_safe() const override { return true; }   //checked: see DeviceManager::m_batch_ok
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
 #endif
     static const int TONES = 5;
     static const int COUNTERS = 6;

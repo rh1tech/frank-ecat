@@ -417,7 +417,7 @@ void platform_cyccnt_enable(void) {
 
 /* Core 1's stack lives in main RAM, not SCRATCH_X: the HDMI line IRQ's code
  * takes most of that bank (PICO_CORE1_STACK_SIZE=0 reserves nothing there). */
-#define CORE1_STACK_WORDS 1024
+#define CORE1_STACK_WORDS (16 * 1024 / 4)   /* 16 KB: core 1 runs a processor of the machine too */
 static uint32_t core1_stack[CORE1_STACK_WORDS];
 
 void platform_launch_core1(void (*entry)(void)) {
@@ -506,6 +506,46 @@ static void __attribute__((naked)) stall_isr(void) {
         "b stall_isr_c\n");
 }
 
+/* The same sampling on core 1 (a machine's second processor runs there):
+ * TIMER1's alarm 1, its IRQ enabled on core 1 by platform_prof_core1_init() */
+static volatile bool prof_core1;
+static volatile uint32_t sample1_us = 200;
+
+void __attribute__((used)) prof1_isr_c(uint32_t *frame) {
+    timer1_hw->intr = 2u;                              /* acknowledge alarm 1 */
+    if (!prof_core1 || !prof_buf || prof_n >= PROF_SAMPLES) return;
+    static uint32_t lfsr = 0x1D2Bu;
+    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+    timer1_hw->alarm[1] = timer1_hw->timerawl + sample1_us + (lfsr & 63u);
+    prof_buf[prof_n++] = frame[6];
+}
+
+static void __attribute__((naked)) prof1_isr(void) {
+    __asm volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "b prof1_isr_c\n");
+}
+
+/* on core 1 */
+void platform_prof_core1_init(void) {
+    irq_set_exclusive_handler(TIMER1_IRQ_1, prof1_isr);
+    irq_set_priority(TIMER1_IRQ_1, 0x40);
+    timer1_hw->inte |= 2u;
+    irq_set_enabled(TIMER1_IRQ_1, true);
+}
+
+void platform_prof_start_core1(uint32_t us) {
+    platform_prof_start(us);
+    sample_us = STALL_US;                              /* core 0 keeps its plain stall watch */
+    stall_div = 0;
+    sample1_us = us;
+    prof_core1 = true;
+    timer1_hw->alarm[1] = timer1_hw->timerawl + us;
+}
+
 void platform_prof_start(uint32_t us) {
     if (!prof_buf) prof_buf = (uint32_t *)ecat_sram_malloc(PROF_SAMPLES * sizeof(uint32_t));
     if (!prof_buf) prof_buf = (uint32_t *)malloc(PROF_SAMPLES * sizeof(uint32_t));   /* PSRAM */
@@ -519,6 +559,7 @@ void platform_prof_start(uint32_t us) {
 /* the samples as hex PCs, 8 a line, then back to the plain stall watch */
 bool platform_prof_dump_if_done(void) {
     if (!prof_buf || prof_n != PROF_SAMPLES) return false;   /* not full, or dumped */
+    prof_core1 = false;
     sample_us = STALL_US;
     stall_div = 0;
     printf("PROF BEGIN %u\n", PROF_SAMPLES);

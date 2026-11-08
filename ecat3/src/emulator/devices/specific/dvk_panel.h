@@ -56,6 +56,14 @@ private:
     void update_prt();
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+    //The next edge of the line clock (ПРТ) and the next power-up step: a
+    //batch ends on them, so the 50 Hz interrupt comes after the instruction
+    //it always came after
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     DVKPanel(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

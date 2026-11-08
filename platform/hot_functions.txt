@@ -9,6 +9,17 @@
 
 # the loop
 Emulator::timer_proc
+Emulator::run_partition
+Emulator::domain_executed
+Emulator::parallel_core1_step
+ecat_cross_drain
+ecat_cross_push
+DeviceManager::clocks_to_event
+DeviceManager::sync_pending
+DeviceManager::sync_domain
+DeviceManager::add_pending
+DeviceManager::cycles_to_batch_event
+ComputerDevice::cycles_to_batch_event
 DeviceManager::clock
 ComputerDevice::system_clock
 
@@ -49,6 +60,17 @@ k1801vm1::execute
 IE15CPU::execute
 IE15CPU::execute_one
 IE15CPU::skip
+IE15CPU::refresh_direct
+IE15CPU::execute_batched
+IE15CPU::port_in
+IE15CPU::port_out
+IE15CPU::fetch
+IE15CPU::arg
+IE15CPU::set_a
+IE15CPU::set_b
+IE15CPU::set_reg
+IE15CPU::reg
+IE15CPU::reg_lo
 IE15IO::clock
 IE15IO::get_value
 IE15IO::set_value

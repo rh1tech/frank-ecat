@@ -85,7 +85,7 @@ unsigned int mos6502::read_mem(unsigned int address)
 {
     m_bus_cycles++;
     drive_address(address);
-    return mm->read(address);
+    return mm->read_fast(address);
 }
 
 void mos6502::write_mem(unsigned int address, unsigned int data)
@@ -93,7 +93,7 @@ void mos6502::write_mem(unsigned int address, unsigned int data)
     m_bus_cycles++;
     drive_address(address);
 
-    mm->write(address, data);
+    mm->write_fast(address, data);
 }
 
 void mos6502::save_state(StateWriter &w)

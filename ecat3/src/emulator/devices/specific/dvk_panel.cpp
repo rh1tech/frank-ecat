@@ -1,3 +1,4 @@
+#include <climits>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
@@ -77,6 +78,17 @@ void DVKPanel::reset(bool cold)
     i_asp.change(0);
     set_phase(PH_WAIT_PG);
 }
+
+#ifdef ECAT_EMBEDDED
+unsigned int DVKPanel::clocks_to_batch_event() const
+{
+    unsigned int r = UINT_MAX;
+    if (m_prt && (m_phase == PH_ON || m_phase == PH_RESET))
+        r = (m_prt_half > m_prt_ticks) ? m_prt_half - m_prt_ticks : 1;
+    if (m_phase != PH_ON) r = 1;    //the power-up steps: a few, at once
+    return r;
+}
+#endif
 
 void DVKPanel::clock(unsigned int counter)
 {

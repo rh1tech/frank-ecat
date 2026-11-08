@@ -289,6 +289,12 @@ private:
     void write_flag(unsigned int n, bool v);
 
 public:
+#ifdef ECAT_EMBEDDED
+    //A port read sees the terminal's own logic as of the last batch, at most
+    //ECAT_BATCH_MAX cycles of its processor ago, not brought up to date first
+    bool timeless_access() const override { return true; }
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+#endif
     IE15IO(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

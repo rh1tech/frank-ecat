@@ -106,12 +106,12 @@ unsigned int z80::get_pc()
 
 unsigned int z80::read_mem(unsigned int address)
 {
-    return mm->read(address);
+    return mm->read_fast(address);
 }
 
 void z80::write_mem(unsigned int address, unsigned int data)
 {
-    mm->write(address, data);
+    mm->write_fast(address, data);
 }
 
 unsigned int z80::read_port(unsigned int address)

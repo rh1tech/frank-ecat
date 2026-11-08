@@ -228,7 +228,7 @@ protected:
 
 public:
 #ifdef ECAT_EMBEDDED
-    bool batch_safe() const override { return true; }   //checked: see DeviceManager::m_batch_ok
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
 #endif
     std::string files;
 

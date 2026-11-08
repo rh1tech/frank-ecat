@@ -45,6 +45,9 @@ struct DiskChoice {
     bool operator!=(const DiskChoice &o) const { return !(*this == o); }
 };
 
+#ifdef ECAT_EMBEDDED
+extern uint64_t (*ecat_time_us)();
+#endif
 class Emulator
 {
 private:
@@ -71,6 +74,21 @@ private:
         uint64_t norm;      // position in that normalised time, carried between slices
     };
     std::vector<ClockDomain> domains;
+#ifdef ECAT_EMBEDDED
+    std::vector<unsigned int> m_batch_budget;   //per domain: cycles of the batch it is in
+    //Two cores (set_parallel()): the core of each domain, the quantum both run
+    //to before they meet, in normalised time, and the handshake
+    bool m_parallel = false;
+    std::vector<uint8_t> m_domain_core;
+    uint64_t m_par_quantum = 0;
+    volatile uint64_t m_par_target = 0;
+    volatile uint32_t m_par_go = 0, m_par_done = 0;
+public:
+    uint64_t m_par_wait_us = 0, m_par_quanta = 0;   //the first core waiting for the second
+private:
+    void run_partition(unsigned int core, uint64_t q_end);
+    void domain_executed(size_t k, unsigned int counter);
+#endif
 
     CPU * cpu;              // The master, domains[0].cpu - and the machine's time base
     MemoryMapper * mm;
@@ -414,6 +432,15 @@ public:
     void get_screen_size(unsigned int * sx, unsigned int * sy) const { *sx = screen_sx; *sy = screen_sy; }
 
     void timer_proc(uint64_t time_ticks);
+#ifdef ECAT_EMBEDDED
+    //frank-ecat: the processors named run on the second core, which calls
+    //parallel_core1_step() in a loop; each slice of timer_proc() runs as
+    //quanta both cores finish before either goes on. False when a name is not
+    //a processor of the machine, or nothing is left for the first core
+    bool set_parallel(const std::vector<std::string> &core1_cpus);
+    bool parallel() const { return m_parallel; }
+    void parallel_core1_step();
+#endif
     void render_screen();
 
     // host: typed on the host keyboard, so the remap of Settings > Keyboard
