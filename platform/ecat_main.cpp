@@ -1182,6 +1182,13 @@ int main()
                 printf("machine %u: %s, rebooting\n", n, ecat_machines[n]);
                 sleep_ms(20);
                 platform_reboot_clean(false);
+            } else if (strcmp(cmd, "syncs") == 0) {
+                /* which devices' accesses clock the batch out: the polled ones */
+                for (unsigned i = 0; i < emu->dm->device_count; i++) {
+                    ComputerDevice *d = emu->dm->get_device(i)->get();
+                    if (d->m_syncs) printf("syncs %s: %lu\n", d->name.c_str(), (unsigned long)d->m_syncs);
+                    d->m_syncs = 0;
+                }
             } else if (cmd[0] == 's') {
                 status();
             } else if (cmd[0] == 'd') {
@@ -1240,11 +1247,17 @@ int main()
                 audio_output(FRANK_AUDIO_HDMI);
             } else if (strcmp(cmd, "audio i2s") == 0) {
                 audio_output(FRANK_AUDIO_I2S);
+            } else if (strncmp(cmd, "profl", 5) == 0) {
+                unsigned us = 200;
+                sscanf(cmd + 5, "%u", &us);
+                platform_prof_pairs(true);
+                platform_prof_start(us);
             } else if (strncmp(cmd, "prof1", 5) == 0) {
                 unsigned us = 200;
                 sscanf(cmd + 5, "%u", &us);
                 platform_prof_start_core1(us);
             } else if (strncmp(cmd, "prof", 4) == 0) {
+                platform_prof_pairs(false);
                 unsigned us = 200;
                 sscanf(cmd + 4, "%u", &us);
                 platform_prof_start(us);

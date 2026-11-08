@@ -60,3 +60,10 @@ target_compile_options(ecat_core PRIVATE
     -Wno-psabi -Wno-unused-parameter -Wno-deprecated-declarations)
 # no pico libraries here: their INTERFACE sources would be compiled into the
 # object library and again into the firmware
+
+# The PDP-11 processors (the ДВК) at -O3: their interpreter is most of a
+# core at the speeds these machines run
+set_source_files_properties(
+    ${ECAT3_SRC}/emulator/devices/cpu/pdp11core.cpp
+    ${ECAT3_SRC}/emulator/devices/cpu/k1801vm1.cpp
+    PROPERTIES COMPILE_OPTIONS "-O3")

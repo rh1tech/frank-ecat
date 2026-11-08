@@ -1772,14 +1772,14 @@ void Emulator::debug_step_slice()
 #ifndef ECAT_BATCH_MAX
 #define ECAT_BATCH_MAX 32       //cycles: a sample of the sound at 32 kHz on a 1 MHz machine
 #endif
-//A batch: 32 cycles, or 8 us of a faster processor (64 on the 8 MHz ВМ2)
+//A batch: 32 cycles, or 16 us of a faster processor (128 on the 8 MHz ВМ2)
 #define ECAT_BATCH_MAX_CYCLES batch_max_cycles(k)
 #ifdef ECAT_EMBEDDED
 //What a processor's instruction leaves to its domain's devices: clocked
 //after it, or (batch_ok()) a batch of them at a time
 unsigned int Emulator::batch_max_cycles(size_t k) const
 {
-    const unsigned int t = (k < domains.size()) ? domains[k].cpu->clock / 125000 : 0;
+    const unsigned int t = (k < domains.size()) ? domains[k].cpu->clock / 62500 : 0;
     return t > ECAT_BATCH_MAX ? t : ECAT_BATCH_MAX;
 }
 

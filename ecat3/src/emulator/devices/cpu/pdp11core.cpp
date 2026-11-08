@@ -1609,6 +1609,13 @@ unsigned int pdp11core::execute()
     // может только короткий импульс АИП (Система команд, 6.5; приложение 3, пункт 8)
     if (f11 && context.halted && !is_aclo && get_flag(PDP11::F_T)) return C_IDLE;
 
+#ifdef ECAT_EMBEDDED
+    //No line up at all (nearly every instruction): check_interrupts() would
+    //only forget the last poll's requests
+    if (!vm3 && !(is_irq2 | is_irq3 | is_virq | is_aclo | is_halt_req | halt_pin)) {
+        if (!m_step_pending && !no_poll) m_irq_seen = 0;
+    } else
+#endif
     if (!m_step_pending && !no_poll && check_interrupts(cycles)) { m_last_kind = LAST_INTERRUPT; return cycles; }
 
     if (context.halted) return C_IDLE;          // WAIT, idling until an interrupt

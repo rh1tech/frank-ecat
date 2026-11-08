@@ -32,6 +32,7 @@ MemoryMapper::write
 MemoryMapper::map_read
 MemoryMapper::map_write
 MemoryMapper::fill_page
+MemoryMapper::fill_direct
 MemoryMapper::reads_on
 MemoryMapper::map
 MemoryMapper::port_device

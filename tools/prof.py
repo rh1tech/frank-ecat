@@ -9,7 +9,7 @@
 # the sampled PCs read back, resolved against the ELF's symbols, a table of
 # functions by share of the samples.
 #
-# Usage: tools/prof.py build/frank-ecat-agat.elf [US | c1:US for core 1] [PORT] [TOP]
+# Usage: tools/prof.py build/frank-ecat-agat.elf [US | c1:US for core 1 | lr:US with callers] [PORT] [TOP]
 
 import bisect, subprocess, sys, time
 import serial
@@ -32,8 +32,9 @@ def main():
 
     s = serial.Serial(port, 115200, timeout=0.5)
     s.read(100000)
-    cmd = 'prof1' if us.startswith('c1:') else 'prof'
-    us = us[3:] if us.startswith('c1:') else us
+    pairs = us.startswith('lr:')
+    cmd = 'prof1' if us.startswith('c1:') else ('profl' if pairs else 'prof')
+    us = us[3:] if (us.startswith('c1:') or pairs) else us
     s.write(('~C %s %s~' % (cmd, us)).encode())
     buf, t = b'', time.time()
     while b'PROF END' not in buf and time.time() - t < 60:
@@ -44,6 +45,26 @@ def main():
     body = text.split('PROF BEGIN', 1)[1].split('PROF END', 1)[0]
     pcs = [int(w, 16) for w in body.split()[1:] if len(w) == 8]
 
+    def name_of(pc):
+        i = bisect.bisect_right(starts, pc & ~1) - 1
+        if i >= 0:
+            a, sz, n = syms[i]
+            if pc < a + max(sz, 1) or sz == 0:
+                return n
+        return '?'
+    if pairs:
+        # PC, LR pairs: who calls each of the hottest functions
+        callers = {}
+        for k in range(0, len(pcs) - 1, 2):
+            f, c = name_of(pcs[k]), name_of(pcs[k + 1])
+            callers.setdefault(f, {}).setdefault(c, 0)
+            callers[f][c] += 1
+        tot = len(pcs) // 2
+        for f, cs in sorted(callers.items(), key=lambda x: -sum(x[1].values()))[:top]:
+            print('%5.1f%%  %s' % (100.0 * sum(cs.values()) / tot, f[:90]))
+            for c, n in sorted(cs.items(), key=lambda x: -x[1])[:4]:
+                print('          %5.1f%%  <- %s' % (100.0 * n / tot, c[:80]))
+        return
     count = {}
     for pc in pcs:
         i = bisect.bisect_right(starts, pc & ~1) - 1

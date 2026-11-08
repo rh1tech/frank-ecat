@@ -1,3 +1,4 @@
+#include <climits>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
@@ -150,6 +151,21 @@ void DL11::transmit_done()
     update_irq();
 }
 
+#ifdef ECAT_EMBEDDED
+//What clock() below acts on next: the end of the character being sent, the
+//receiver's next look at the line (while nothing waits to be read)
+unsigned int DL11::clocks_to_batch_event() const
+{
+    int64_t r = INT64_MAX;
+    if (m_tx_busy) r = m_tx_hold ? 1 : m_tx_left;
+    if (m_rx_left > 0) { if (m_rx_left < r) r = m_rx_left; }
+    else if (!(m_rcsr & CSR_DONE)) r = 1;
+    if (r == INT64_MAX) return UINT_MAX;
+    if (r < 1) r = 1;
+    return r > (int64_t)UINT_MAX ? UINT_MAX : (unsigned int)r;
+}
+#endif
+
 void DL11::clock(unsigned int counter)
 {
     if (m_tx_busy) {
@@ -253,6 +269,11 @@ unsigned int DL11::get_value_word(unsigned int address)
     switch ((address >> 1) & 3) {
     case REG_RCSR: return m_rcsr | m_station_bits;
     case REG_RBUF: {
+#ifdef ECAT_EMBEDDED
+        //Taking the character changes what happens next: the devices up to
+        //date first, as for any device, and the batch ends here
+        im->dm->sync_pending();
+#endif
         const unsigned int v = m_rbuf & 0xFF;
         m_rcsr &= ~(CSR_DONE | RCSR_OVERRUN);
         m_rx_pending = false;
@@ -269,6 +290,9 @@ unsigned int DL11::get_value_word(unsigned int address)
 
 void DL11::set_value_word(unsigned int address, unsigned int value, MAYBE_UNUSED bool force)
 {
+#ifdef ECAT_EMBEDDED
+    im->dm->sync_pending();     //a write changes its events: see get_value_word()
+#endif
     switch ((address >> 1) & 3) {
     case REG_RCSR: set_rcsr(value); break;
     case REG_XCSR: set_xcsr(value); break;

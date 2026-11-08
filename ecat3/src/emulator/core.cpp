@@ -2937,7 +2937,7 @@ AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int *
 
 
 #ifdef ECAT_EMBEDDED
-#define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) im->dm->sync_pending(); } while (0)
+#define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); } } while (0)
 #else
 #define ECAT_SYNC_FOR(dev) do { } while (0)
 #endif

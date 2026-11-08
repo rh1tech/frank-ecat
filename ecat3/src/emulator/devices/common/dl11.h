@@ -104,7 +104,14 @@ private:
 
 public:
 #ifdef ECAT_EMBEDDED
-    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+//Its registers change only at its own events (a character in, a character
+    //out) and by the program's accesses: a batch ends at those events
+    //(clocks_to_batch_event), and a poll between them reads what it would
+    //have read with every device brought up to date first
+    bool timeless_access() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+        bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
 #endif
     DL11(InterfaceManager *im, EmulatorConfigDevice *cd);
 

@@ -22,7 +22,7 @@ private:
     // WaitSource), называет время ответа сама; разница с tn копится здесь.
     // Где в команде идёт цикл, формулы не знают: место считается сложением
     // циклов шины, внутренняя работа процессора в него не входит
-    void bus_cycle(uint32_t address, bool write);
+    inline void bus_cycle(uint32_t address, bool write);
 
 public:
     unsigned int bus_offset = 0;    // тактов от начала команды до текущего цикла
@@ -136,12 +136,28 @@ public:
     virtual void write_mem(unsigned int address, unsigned int data) override;
 
     // Word access, the native width of the bus
+#ifdef ECAT_EMBEDDED
+    //Inline: every word the processor reads or writes comes this way
+    inline unsigned int read_mem_word(unsigned int address)
+    {
+        unsigned int v = ((address & 1) ? mm->read_word_odd(address) : mm->read_word_fast(address)) & 0xFFFF;
+        if (mm->no_device) note_timeout(address & ~1u);
+        return v;
+    }
+    inline void write_mem_word(unsigned int address, unsigned int data)
+    {
+        if (address & 1) mm->write_word_odd(address, data & 0xFFFF);
+        else mm->write_word_fast(address, data & 0xFFFF);
+        if (mm->no_device) note_timeout(address & ~1u);
+    }
+#else
     unsigned int read_mem_word(unsigned int address);
     void write_mem_word(unsigned int address, unsigned int data);
+#endif
 
     // True when nothing answered the last access. On the МПИ bus that is a
     // timeout, and the processor turns it into a trap through vector 4.
-    bool bus_timeout();
+    bool bus_timeout() { return mm->no_device; }
     // What answered the last access, for the timing model
     Vm1BusTiming * timing() { return m_timing; }
     const BusReply * last_reply() { return (mm->last_device != nullptr) ? mm->last_device->bus_reply : nullptr; }
@@ -190,3 +206,23 @@ ComputerDevice * create_k1801vm1(InterfaceManager *im, EmulatorConfigDevice *cd)
 ComputerDevice * create_k1801vm2(InterfaceManager *im, EmulatorConfigDevice *cd);
 ComputerDevice * create_k1801vm3(InterfaceManager *im, EmulatorConfigDevice *cd);
 ComputerDevice * create_km1811vm1(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+// Clocks from the start of a bus cycle to the data strobe (DIN, DOUT)
+#ifndef BUS_STROBE
+#define BUS_STROBE  2
+#endif
+
+// Inline: every bus cycle of the processor (see the declaration)
+inline void K1801VM1Core::bus_cycle(uint32_t address, bool write)
+{
+    int cycle = (int)(write ? C_DATO : C_DATI);
+    if (WaitSource * w = emulator_device->last_wait()) {
+        const unsigned int reply = w->wait_states(address, write, bus_offset + BUS_STROBE);
+        if (reply != 0) {
+            const int extra = (int)reply - (int)C_REPLY;
+            bus_extra += extra;
+            cycle += extra;
+        }
+    }
+    if (cycle > 0) bus_offset += (unsigned int)cycle;
+}

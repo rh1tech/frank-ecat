@@ -70,19 +70,6 @@ void K1801VM1Core::write_byte(uint32_t address, uint8_t value)
 // память узнаёт, в какой момент её спросили
 #define BUS_STROBE  2
 
-void K1801VM1Core::bus_cycle(uint32_t address, bool write)
-{
-    int cycle = (int)(write ? C_DATO : C_DATI);
-    if (WaitSource * w = emulator_device->last_wait()) {
-        const unsigned int reply = w->wait_states(address, write, bus_offset + BUS_STROBE);
-        if (reply != 0) {
-            const int extra = (int)reply - (int)C_REPLY;
-            bus_extra += extra;
-            cycle += extra;
-        }
-    }
-    if (cycle > 0) bus_offset += (unsigned int)cycle;
-}
 
 void K1801VM1Core::on_virq_ack(uint16_t vector)
 {
@@ -363,6 +350,7 @@ void k1801vm1::write_mem(unsigned int address, unsigned int data)
     if (mm->no_device) note_timeout(address);
 }
 
+#ifndef ECAT_EMBEDDED
 unsigned int k1801vm1::read_mem_word(unsigned int address)
 {
     unsigned int v = ((address & 1) ? mm->read_word_odd(address) : mm->read_word_fast(address)) & 0xFFFF;
@@ -377,10 +365,7 @@ void k1801vm1::write_mem_word(unsigned int address, unsigned int data)
     if (mm->no_device) note_timeout(address & ~1u);
 }
 
-bool k1801vm1::bus_timeout()
-{
-    return mm->no_device;
-}
+#endif
 
 void k1801vm1::virq_acknowledged(unsigned int vector)
 {

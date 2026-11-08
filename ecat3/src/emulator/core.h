@@ -396,6 +396,7 @@ public:
     //The core whose emulation owns this device: 1 for a processor run on the
     //second core and what belongs to it (Emulator::set_parallel())
     uint8_t m_core = 0;
+    uint32_t m_syncs = 0;           //accesses to it that clocked the devices first (a statistic)
     //Reading or writing it depends on nothing that moves with time: memory,
     //and the decoders that only pass an access on. Every other device the
     //processor reaches (a port fed by the tape, the FDC) is brought up to date

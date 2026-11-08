@@ -472,6 +472,7 @@ static uint32_t stall_seen_tick, stall_count;
 #define PROF_SAMPLES 4096
 static uint32_t *prof_buf;
 static volatile uint32_t prof_n;
+static volatile bool prof_pairs;     /* samples are PC, LR pairs */
 static volatile uint32_t sample_us = STALL_US;
 static uint32_t stall_div, stall_acc;
 
@@ -483,7 +484,10 @@ void __attribute__((used)) stall_isr_c(uint32_t *frame) {
     lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
     timer1_hw->alarm[0] = timer1_hw->timerawl + sample_us
                         + ((prof_buf && prof_n < PROF_SAMPLES) ? (lfsr & 63u) : 0u);
-    if (prof_buf && prof_n < PROF_SAMPLES) prof_buf[prof_n++] = frame[6];
+    if (prof_buf && prof_n < PROF_SAMPLES) {
+        prof_buf[prof_n++] = frame[6];
+        if (prof_pairs && prof_n < PROF_SAMPLES) prof_buf[prof_n++] = frame[5];   /* LR: the caller */
+    }
     if (stall_div > 1 && ++stall_acc < stall_div) return;   /* the stall check stays at 100 ms */
     stall_acc = 0;
     if (crumbs[3] != stall_seen_tick) {
@@ -553,6 +557,8 @@ void platform_prof_start_core1(uint32_t us) {
     prof_core1 = true;
     timer1_hw->alarm[1] = timer1_hw->timerawl + us;
 }
+
+void platform_prof_pairs(bool on) { prof_pairs = on; }
 
 void platform_prof_start(uint32_t us) {
     if (!prof_buf) prof_buf = (uint32_t *)ecat_sram_malloc(PROF_SAMPLES * sizeof(uint32_t));
