@@ -88,6 +88,7 @@ void DVKKMD::reset(bool cold)
 void DVKKMD::clock(MAYBE_UNUSED unsigned int counter)
 {
 #ifdef ECAT_EMBEDDED
+    if (!m_pulse) return;           //nearly always: no lock for nothing
     EcatDeviceGuard guard(m_lock);
 #endif
 

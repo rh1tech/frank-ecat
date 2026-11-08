@@ -1233,6 +1233,10 @@ private:
     //The ports, resolved once per configuration as the pages are (read_port(),
     //write_port()): an 8-bit port space, the scan of the ranges otherwise
     struct PortEntry { uint64_t tag; AddressableDevice * device; unsigned int address; };
+    //map_read() of an address in a page that is not cached (the PDP-11 I/O
+    //page: many registers to a page), per address; non-routed answers only
+    struct ReadEntry { uint64_t tag; unsigned int address, first, offset, range; AddressableDevice * device; bool memo; };
+    ReadEntry m_read_cache[64];
     PortEntry m_port_cache[2][256];
     AddressableDevice * port_device(unsigned int a, unsigned int mode, unsigned int * address_on_device);
 #endif

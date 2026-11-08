@@ -293,7 +293,12 @@ static unsigned int core_num(void) { return get_core_num(); }
 extern "C" int hdmi_video_irq(void);
 extern "C" void hdmi_restart(void);
 extern "C" void hdmi_report_state(void);
+extern "C" void hdmi_report_late(void);
 static volatile int hdmi_irq_release;   /* 1: core 1 to disable it, 2: done */
+/* A display of the second core is drawn there, between its quanta (render_tick):
+ * core 0 then has only the processors it runs. A menu takes the screen
+ * after core 1 has let go of it (core1_render_hold, core1_rendering) */
+static volatile bool core1_renders, core1_render_hold, core1_rendering;
 static volatile int hdmi_irq_core = 1;   /* the core that takes it */
 static volatile bool hdmi_restart_req;   /* core 1: restart the scan-out */
 static uint32_t hdmi_restarts;
@@ -326,7 +331,15 @@ static void core1_main(void)
             hdmi_restart_req = false;
         }
         Emulator * e = par_emu;
-        if (e) e->parallel_core1_step();
+        if (e) {
+            e->parallel_core1_step();
+            if (core1_renders && !core1_render_hold) {
+                core1_rendering = true;
+                __dmb();
+                if (!core1_render_hold) e->render_tick();
+                core1_rendering = false;
+            }
+        }
     }
 }
 
@@ -660,6 +673,12 @@ void vga_ui_present(void)
 
 void vga_set_mode(vga_mode_t m)
 {
+    /* the surface is the menu's: core 1 stops drawing the machine on it */
+    if (m == VGA_MODE_UI) {
+        core1_render_hold = true;
+        __dmb();
+        while (core1_rendering) tight_loop_contents();
+    }
     if (m == vga_mode) return;
     int hs, vs;
     if (m == VGA_MODE_UI) {
@@ -683,6 +702,7 @@ void vga_set_mode(vga_mode_t m)
         hdmi_set_layout(saved_w, saved_h, hs, vs);
     }
     vga_mode = m;
+    if (m == VGA_MODE_MACHINE) core1_render_hold = false;
 }
 
 /* ---- what the menus ask of the emulator (ui/ecat_ui.h) ---- */
@@ -1049,8 +1069,9 @@ int main()
         /* A terminal with a processor of its own (the ДВК): on the second core */
         ecat_core_num = core_num;
         ecat_time_us = time_us_64;
-        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu"})) {
+        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu", "kmd-cpu"})) {
             par_emu = emu;
+            core1_renders = emu->display_on_core1();
             /* (The КМД's own ВМ1 stays on core 0: on core 1 the HDMI line IRQ
              * there came late during its disk transfers, and the scan-out
              * stopped for good - not understood yet.)
@@ -1080,7 +1101,7 @@ int main()
         emu->slice((now - last) > 20000 ? 20000 : (now - last));
         last = now;
         platform_crumb(11, 0);
-        emu->render_tick();
+        if (!core1_renders) emu->render_tick();
         platform_crumb(12, 0);
         audio_pump();
         /* The scan-out stopped (no vsync for 100 ms): set up again, by the core
@@ -1091,6 +1112,7 @@ int main()
             if (vsyncs != seen_vs) { seen_vs = vsyncs; seen_at = now; }
             else if (now - seen_at > (hdmi_restarts ? 2000000u : 100000u)) {
                 hdmi_report_state();
+                if (!hdmi_restarts) hdmi_report_late();
                 hdmi_restarts++;
                 printf("hdmi: scan-out stopped, restarting (%lu)\n", (unsigned long)hdmi_restarts);
                 if (hdmi_irq_core == 0) hdmi_restart();

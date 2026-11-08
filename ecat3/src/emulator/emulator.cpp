@@ -1772,10 +1772,17 @@ void Emulator::debug_step_slice()
 #ifndef ECAT_BATCH_MAX
 #define ECAT_BATCH_MAX 32       //cycles: a sample of the sound at 32 kHz on a 1 MHz machine
 #endif
-#define ECAT_BATCH_MAX_CYCLES ECAT_BATCH_MAX
+//A batch: 32 cycles, or 8 us of a faster processor (64 on the 8 MHz ВМ2)
+#define ECAT_BATCH_MAX_CYCLES batch_max_cycles(k)
 #ifdef ECAT_EMBEDDED
 //What a processor's instruction leaves to its domain's devices: clocked
 //after it, or (batch_ok()) a batch of them at a time
+unsigned int Emulator::batch_max_cycles(size_t k) const
+{
+    const unsigned int t = (k < domains.size()) ? domains[k].cpu->clock / 125000 : 0;
+    return t > ECAT_BATCH_MAX ? t : ECAT_BATCH_MAX;
+}
+
 void Emulator::domain_executed(size_t k, unsigned int counter)
 {
     ClockDomain &d = domains[k];
@@ -1888,84 +1895,78 @@ bool Emulator::set_parallel(const std::vector<std::string> &core1_cpus)
     return true;
 }
 
-//The domains of one core, each to q_end, the one furthest behind first
+//One domain to q_end: the processor's batches, its devices clocked a batch at
+//a time (domain_executed(), inline: this loop is a whole core)
+void Emulator::run_domain(size_t only, uint64_t q_end)
+{
+    ClockDomain &d = domains[only];
+    CPU * const p = d.cpu;
+    const unsigned int batch_max = batch_max_cycles(only);
+    const uint64_t scale = d.scale;
+    if (!dm->batch_ok((unsigned int)only)) {
+        while (d.norm < q_end) {
+            const unsigned int counter = p->execute();
+            if (counter == 0) { d.norm += 10ull * scale; continue; }
+            d.norm += (uint64_t)counter * scale;
+            if (only == 0) clock_counter += counter;
+            dm->clock((unsigned int)only, counter);
+        }
+    } else {
+        //domain_executed(), inline: this loop is the whole of a core
+        unsigned int &pending = dm->m_pending[only];
+        const bool events = only < dm->m_domain_events.size() && dm->m_domain_events[only];
+        unsigned int budget = batch_max;
+        //No device of the domain ends a batch early: the processor may
+        //run the quantum itself (CPU::execute_batched())
+        //The cycles left to q_end, divided out once: the norm moves by whole
+        //cycles of this domain, so counting them down stays exact
+        uint64_t left = (!events && d.norm < q_end) ? (q_end - d.norm + scale - 1) / scale : 0;
+        while (!events && d.norm < q_end) {
+            bool accounted = false;
+            const unsigned int counter = p->execute_batched(left > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned int)left,
+                                                            (unsigned int)only, batch_max, &accounted);
+            if (counter == 0) {
+                d.norm += 10ull * scale;
+                left = (left > 10) ? left - 10 : 0;
+                continue;
+            }
+            d.norm += (uint64_t)counter * scale;
+            left = (left > counter) ? left - counter : 0;
+            if (only == 0) clock_counter += counter;
+            if (!accounted) {
+                dm->add_pending((unsigned int)only, counter);
+                if (pending >= batch_max) dm->sync_domain((unsigned int)only);
+            }
+        }
+        while (d.norm < q_end) {
+            const unsigned int counter = p->execute();
+            if (counter == 0) { d.norm += 10ull * scale; continue; }
+            d.norm += (uint64_t)counter * scale;
+            if (only == 0) clock_counter += counter;
+            if (pending == 0) {
+                budget = batch_max;
+                if (events) {
+                    const unsigned int e = dm->clocks_to_event(p);
+                    if (e < budget) budget = e;
+                    const unsigned int be = dm->cycles_to_batch_event((unsigned int)only);
+                    if (be < budget) budget = be;
+                    if (budget == 0) budget = 1;
+                }
+            }
+            dm->add_pending((unsigned int)only, counter);
+            if (pending >= budget) dm->sync_domain((unsigned int)only);
+        }
+    }
+}
+
+//The domains of one core, each to q_end in turn: the ones a core shares (a
+//terminal and a disk controller) do not talk to each other, only to the
+//other core's devices, which they reach as they always do
 void Emulator::run_partition(unsigned int c, uint64_t q_end)
 {
     ecat_cross_drain(c);
-    //One domain on this core (the usual case): no choosing between them
-    size_t only = SIZE_MAX;
-    for (size_t i = 0; i < domains.size(); i++)
-        if (m_domain_core[i] == c) { if (only == SIZE_MAX) only = i; else { only = SIZE_MAX - 1; break; } }
-    if (only < SIZE_MAX - 1) {
-        ClockDomain &d = domains[only];
-        CPU * const p = d.cpu;
-        const uint64_t scale = d.scale;
-        if (!dm->batch_ok((unsigned int)only)) {
-            while (d.norm < q_end) {
-                const unsigned int counter = p->execute();
-                if (counter == 0) { d.norm += 10ull * scale; continue; }
-                d.norm += (uint64_t)counter * scale;
-                if (only == 0) clock_counter += counter;
-                dm->clock((unsigned int)only, counter);
-            }
-        } else {
-            //domain_executed(), inline: this loop is the whole of a core
-            unsigned int &pending = dm->m_pending[only];
-            const bool events = only < dm->m_domain_events.size() && dm->m_domain_events[only];
-            unsigned int budget = ECAT_BATCH_MAX_CYCLES;
-            //No device of the domain ends a batch early: the processor may
-            //run the quantum itself (CPU::execute_batched())
-            while (!events && d.norm < q_end) {
-                const uint64_t left = (q_end - d.norm + scale - 1) / scale;
-                bool accounted = false;
-                const unsigned int counter = p->execute_batched(left > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned int)left,
-                                                                (unsigned int)only, ECAT_BATCH_MAX_CYCLES, &accounted);
-                if (counter == 0) { d.norm += 10ull * scale; continue; }
-                d.norm += (uint64_t)counter * scale;
-                if (only == 0) clock_counter += counter;
-                if (!accounted) {
-                    dm->add_pending((unsigned int)only, counter);
-                    if (pending >= ECAT_BATCH_MAX_CYCLES) dm->sync_domain((unsigned int)only);
-                }
-            }
-            while (d.norm < q_end) {
-                const unsigned int counter = p->execute();
-                if (counter == 0) { d.norm += 10ull * scale; continue; }
-                d.norm += (uint64_t)counter * scale;
-                if (only == 0) clock_counter += counter;
-                if (pending == 0) {
-                    budget = ECAT_BATCH_MAX_CYCLES;
-                    if (events) {
-                        const unsigned int e = dm->clocks_to_event(p);
-                        if (e < budget) budget = e;
-                        const unsigned int be = dm->cycles_to_batch_event((unsigned int)only);
-                        if (be < budget) budget = be;
-                        if (budget == 0) budget = 1;
-                    }
-                }
-                dm->add_pending((unsigned int)only, counter);
-                if (pending >= budget) dm->sync_domain((unsigned int)only);
-            }
-        }
-        dm->sync_pending();
-        return;
-    }
-    while (true) {
-        size_t k = SIZE_MAX;
-        uint64_t best = UINT64_MAX;
-        for (size_t i = 0; i < domains.size(); i++)
-            if (m_domain_core[i] == c && domains[i].norm < best) { best = domains[i].norm; k = i; }
-        if (k == SIZE_MAX || best >= q_end) break;
-        ClockDomain &d = domains[k];
-        const unsigned int counter = d.cpu->execute();
-        if (counter == 0) {             //stopped: its time goes on
-            d.norm += 10ull * d.scale;
-            continue;
-        }
-        d.norm += (uint64_t)counter * d.scale;
-        if (k == 0) clock_counter += counter;
-        domain_executed(k, counter);
-    }
+    for (size_t k = 0; k < domains.size(); k++)
+        if (m_domain_core[k] == c) run_domain(k, q_end);
     dm->sync_pending();
 }
 

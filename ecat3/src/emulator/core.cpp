@@ -2415,6 +2415,7 @@ MemoryMapper::MemoryMapper(InterfaceManager *im, EmulatorConfigDevice *cd):
     size_pages(16);
 #ifdef ECAT_EMBEDDED
     memset(m_port_cache, 0, sizeof(m_port_cache));
+    memset(m_read_cache, 0, sizeof(m_read_cache));
 #endif
 }
 
@@ -2436,6 +2437,7 @@ void MemoryMapper::invalidate_pages()
         memset(m_pages, 0, m_page_count * sizeof(MapperPage));
 #ifdef ECAT_EMBEDDED
         memset(m_port_cache, 0, sizeof(m_port_cache));
+        memset(m_read_cache, 0, sizeof(m_read_cache));
 #endif
     }
 }
@@ -2856,6 +2858,24 @@ AddressableDevice * MemoryMapper::map_port(
 AddressableDevice * MemoryMapper::map_read(unsigned int address, unsigned int * address_on_device, unsigned int * range_index, unsigned int * route)
 {
     const unsigned int config = this->i_config.value;
+#ifdef ECAT_EMBEDDED
+    ReadEntry &ce = m_read_cache[(address >> 1) & 63];
+    const uint64_t ctag = page_tag();
+    if (ce.tag == ctag && ce.address == address && ce.first == this->first_range) {
+        * address_on_device = ce.offset;
+        * range_index = ce.range;
+        if (route != nullptr) * route = ROUTE_ANSWER;
+        if (ce.memo) {
+            wm_address = address;
+            wm_config = config;
+            wm_first = this->first_range;
+            wm_device = ce.device;
+            wm_offset = ce.offset;
+            wm_range = ce.range;
+        }
+        return ce.device;
+    }
+#endif
     bool clean = true;
     for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
     {
@@ -2887,6 +2907,17 @@ AddressableDevice * MemoryMapper::map_read(unsigned int address, unsigned int * 
                 wm_offset = * address_on_device;
                 wm_range = i;
             }
+#ifdef ECAT_EMBEDDED
+            if (!mr->routed) {
+                ce.tag = ctag;
+                ce.address = address;
+                ce.first = this->first_range;
+                ce.offset = * address_on_device;
+                ce.range = i;
+                ce.device = mr->device;
+                ce.memo = clean && (mr->mode & MODE_W) != 0;
+            }
+#endif
             return mr->device;
         }
     }

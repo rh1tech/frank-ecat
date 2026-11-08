@@ -87,7 +87,9 @@ public:
     uint64_t m_par_wait_us = 0, m_par_quanta = 0;   //the first core waiting for the second
 private:
     void run_partition(unsigned int core, uint64_t q_end);
+    void run_domain(size_t k, uint64_t q_end);
     void domain_executed(size_t k, unsigned int counter);
+    unsigned int batch_max_cycles(size_t k) const;
 #endif
 
     CPU * cpu;              // The master, domains[0].cpu - and the machine's time base
@@ -439,6 +441,8 @@ public:
     //a processor of the machine, or nothing is left for the first core
     bool set_parallel(const std::vector<std::string> &core1_cpus);
     bool parallel() const { return m_parallel; }
+    //The display belongs to the second core: render_tick() is best called there
+    bool display_on_core1() const { return m_parallel && display != nullptr && display->m_core == 1; }
     void parallel_core1_step();
 #endif
     void render_screen();

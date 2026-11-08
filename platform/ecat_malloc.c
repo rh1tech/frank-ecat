@@ -106,7 +106,13 @@ static void *psram_malloc_nl(size_t n) {
  * every entry point holds a hardware spinlock, the helpers above and below
  * (_nl) run under it */
 #define HEAP_LOCK spin_lock_instance(PICO_SPINLOCK_ID_OS1)
-#define LOCKED(expr) ({ uint32_t _s = spin_lock_blocking(HEAP_LOCK); __typeof__(expr) _r = (expr); spin_unlock(HEAP_LOCK, _s); _r; })
+/* With the interrupts left on: an allocation in the PSRAM walks dlmalloc's
+ * lists there for 40-90 us, and the HDMI line IRQ waiting behind it missed
+ * lines until its DMA misloaded a descriptor and the picture stopped for good.
+ * No interrupt handler of this firmware allocates, so none can deadlock on it */
+static inline uint32_t heap_lock(void) { spin_lock_unsafe_blocking(HEAP_LOCK); return 0; }
+static inline void heap_unlock(uint32_t s) { (void)s; spin_unlock_unsafe(HEAP_LOCK); }
+#define LOCKED(expr) ({ uint32_t _s = heap_lock(); __typeof__(expr) _r = (expr); heap_unlock(_s); _r; })
 
 void *ecat_sram_malloc(size_t n) { return LOCKED(sram_malloc_nl(n)); }
 void *ecat_psram_malloc(size_t n) { return LOCKED(psram_malloc_nl(n)); }
@@ -159,9 +165,9 @@ void *_malloc_r(struct _reent *r, size_t n) {
 
 void _free_r(struct _reent *r, void *p) {
     (void)r;
-    uint32_t s = spin_lock_blocking(HEAP_LOCK);
+    uint32_t s = heap_lock();
     heap_free(p);
-    spin_unlock(HEAP_LOCK, s);
+    heap_unlock(s);
 }
 
 void *_realloc_r(struct _reent *r, void *p, size_t n) {
@@ -170,16 +176,16 @@ void *_realloc_r(struct _reent *r, void *p, size_t n) {
      * line IRQ, on this core in the ДВК firmware, missed its lines and the
      * picture stopped */
     if (p && n) {
-        uint32_t s = spin_lock_blocking(HEAP_LOCK);
+        uint32_t s = heap_lock();
         const size_t old = is_psram(p) ? psram_usable_size(p) : mspace_usable_size(p);
-        if (n <= old) { spin_unlock(HEAP_LOCK, s); return p; }
+        if (n <= old) { heap_unlock(s); return p; }
         void *q = heap_malloc(n);
-        spin_unlock(HEAP_LOCK, s);
+        heap_unlock(s);
         if (!q) { r->_errno = ENOMEM; return NULL; }
         memcpy(q, p, old);
-        s = spin_lock_blocking(HEAP_LOCK);
+        s = heap_lock();
         heap_free(p);
-        spin_unlock(HEAP_LOCK, s);
+        heap_unlock(s);
         return q;
     }
     void *q = LOCKED(heap_realloc(p, n));
@@ -201,7 +207,7 @@ void *_calloc_r(struct _reent *r, size_t a, size_t b) {
 /* SRAM only: the PSRAM mspace (psram_heap.c) has no memalign. The HDMI
  * driver's x3 palette page (8 KB, 8 KB-aligned) is the one user. */
 void *_memalign_r(struct _reent *r, size_t align, size_t n) {
-    uint32_t s = spin_lock_blocking(HEAP_LOCK);
+    uint32_t s = heap_lock();
     if (!sram_msp) sram_init();
     void *p = NULL;
     if (sram_msp) {
@@ -211,7 +217,7 @@ void *_memalign_r(struct _reent *r, size_t align, size_t n) {
             if (sram_used > sram_peak) sram_peak = sram_used;
         }
     }
-    spin_unlock(HEAP_LOCK, s);
+    heap_unlock(s);
     if (!p) r->_errno = ENOMEM;
     return p;
 }

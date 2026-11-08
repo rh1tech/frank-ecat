@@ -10,7 +10,10 @@
 # the loop
 Emulator::timer_proc
 Emulator::run_partition
+Emulator::run_domain
 Emulator::domain_executed
+Emulator::batch_max_cycles
+DVKKMD::clock
 Emulator::parallel_core1_step
 ecat_cross_drain
 ecat_cross_push

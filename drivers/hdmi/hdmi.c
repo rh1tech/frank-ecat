@@ -1590,8 +1590,24 @@ ex:
 
 // Thin timing wrapper so every early return of the body is covered by one exit
 // measurement. The body is static and called once, so it inlines here.
-static void __scratch_x("hdmi_driver") dma_handler_HDMI() {
+// frank-ecat: what the core was doing when a line IRQ came late (> 40 us
+// after the one before): the interrupted PC and LR, from the exception frame
+// the trampoline below passes
+volatile uint32_t hdmi_late[16][3];
+volatile uint32_t hdmi_late_n;
+void __attribute__((used)) __scratch_x("hdmi_driver") dma_handler_HDMI_framed(uint32_t *frame) {
     const uint32_t t0 = time_us_32();
+    {
+        static uint32_t prev;
+        const uint32_t gap = t0 - prev;
+        prev = t0;
+        if (gap > 40 && gap < 1000000) {
+            const uint32_t k = hdmi_late_n++ & 15;
+            hdmi_late[k][0] = gap;
+            hdmi_late[k][1] = frame[6];
+            hdmi_late[k][2] = frame[5];
+        }
+    }
     dma_handler_HDMI_body();
     const uint32_t dur = time_us_32() - t0;
     hdmi_irq_dur_total_us += dur;
@@ -1608,6 +1624,15 @@ static inline void irq_remove_handler_DMA_core1() {
 
 // frank-ecat: the line IRQ's number, for moving it to the other core
 int hdmi_video_irq(void) { return VIDEO_DMA_IRQ; }
+
+static void __attribute__((naked)) __scratch_x("hdmi_driver") dma_handler_HDMI(void) {
+    __asm volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "b dma_handler_HDMI_framed\n");
+}
 
 static inline void irq_set_exclusive_handler_DMA_core1() {
     irq_set_exclusive_handler(VIDEO_DMA_IRQ, dma_handler_HDMI);
@@ -2932,6 +2957,15 @@ void hdmi_set_profi_ds80_mode(bool active,
 // channel ran off its descriptors): everything stopped and set up again, on
 // the core that is to take the line IRQ from now on
 void hdmi_restart(void) { hdmi_init(); }
+void hdmi_report_late(void)
+{
+    const uint32_t n = hdmi_late_n;
+    printf("hdmi late line irqs: %lu\n", (unsigned long)n);
+    for (uint32_t i = (n > 16 ? n - 16 : 0); i < n; i++)
+        printf("  late %lu us: pc %08lx lr %08lx\n", (unsigned long)hdmi_late[i & 15][0],
+               (unsigned long)hdmi_late[i & 15][1], (unsigned long)hdmi_late[i & 15][2]);
+}
+
 void hdmi_report_state(void)
 {
     printf("hdmi state: %lu irqs, line %u, ctrl ch%d busy %d read %08lx count %lu, data ch%d busy %d read %08lx count %lu, irq enabled %d\n",
