@@ -76,11 +76,14 @@ static inline uint32_t __not_in_flash_func(ring_pop)(void) {
 
 /* ---- HDMI: 1 kHz timer, 32 frames per tick ---- */
 
+static volatile bool hdmi_plays;   /* else the I2S DAC has the ring, HDMI gets silence */
+
 static bool __not_in_flash_func(hdmi_tick)(repeating_timer_t *t) {
     (void)t;
-    /* 32000 Hz / 1000 Hz: exactly 32 frames a tick */
+    /* 32000 Hz / 1000 Hz: exactly 32 frames a tick. While I2S plays, HDMI is
+     * kept fed with silence: a starved driver repeats what it had */
     for (int i = 0; i < FRANK_AUDIO_RATE / 1000; i++) {
-        uint32_t v = ring_pop();
+        uint32_t v = hdmi_plays ? ring_pop() : 0;
         hdmi_audio_write_sample((int16_t)(v & 0xFFFF), (int16_t)(v >> 16));
     }
     return true;
@@ -94,10 +97,7 @@ static void __not_in_flash_func(i2s_fill)(int idx, uint32_t *buf, uint32_t frame
 }
 
 static void stop_output(void) {
-    if (hdmi_timer_on) {
-        cancel_repeating_timer(&hdmi_timer);
-        hdmi_timer_on = false;
-    }
+    hdmi_plays = false;             /* the timer stays: silence to HDMI */
     if (i2s_up) {
         i2s_deinit(&i2s_cfg);
         i2s_up = false;
@@ -110,12 +110,14 @@ void frank_audio_select(frank_audio_out_t out) {
     /* HDMI keeps its audio packets running (silence) whatever the output:
      * a sink that saw audio once may blank the picture if it goes away */
     if (!hdmi_audio_up) hdmi_audio_up = hdmi_audio_init();
+    if (hdmi_audio_up && !hdmi_timer_on)
+        hdmi_timer_on = add_repeating_timer_us(-1000, hdmi_tick, NULL, &hdmi_timer);
     if (out == FRANK_AUDIO_HDMI) {
         if (!hdmi_audio_up) {
             printf("audio: HDMI audio unavailable (mode or heap)\n");
             out = FRANK_AUDIO_OFF;
         } else {
-            hdmi_timer_on = add_repeating_timer_us(-1000, hdmi_tick, NULL, &hdmi_timer);
+            hdmi_plays = true;
         }
     } else if (out == FRANK_AUDIO_I2S) {
         memset(&i2s_cfg, 0, sizeof(i2s_cfg));

@@ -21,7 +21,8 @@ TARGET=${1:-frank-ecat-rk86}
 UF2="build/${TARGET}.uf2"
 [ -f "$UF2" ] || { echo "no $UF2: run ./build.sh $TARGET" >&2; exit 1; }
 
-in_bootsel() { timeout 5 picotool info >/dev/null 2>&1; }
+# "info" fails on a half-written image too, so the device answering is what counts
+in_bootsel() { ! timeout 5 picotool info 2>&1 | grep -q "No accessible RP"; }
 
 if ! in_bootsel; then
     for port in ${CONSOLE:-/dev/cu.usbmodem*}; do

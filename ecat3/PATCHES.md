@@ -12,7 +12,7 @@ compiles to exactly what upstream does (the console build passes the whole suite
 |---|---|
 | `src/emulator/core.h`, `core.cpp` | `Interface::linked_interfaces` is a `std::vector<LinkData>` that grows link by link instead of `LinkData[MAX_LINKS]` (4 KB per line). `MapperArray` holds `MAPPER_MAX_RANGES` entries (48 instead of 100; the largest shipped map has 36), `load_config` reports a map that overflows it. |
 | `src/emulator/renderer.h` | `ecat_pixel_t`: one dot of the surface, `uint32_t` RGBA upstream, `uint8_t` palette index with `ECAT_EMBEDDED`. |
-| `src/emulator/indexed_palette.h` | New: `IndexedPalette`, the colour → index table behind `MapRGB()` on an 8-bit surface (index 0 is black). |
+| `src/emulator/indexed_palette.h` | New: `IndexedPalette`, the colour → index table behind `MapRGB()` on an 8-bit surface (index 0 is black; 224 entries, the rest of the 256 are the firmware menu's and the border). |
 | `src/emulator/core.cpp` (`GenericDisplay::validate`) | Surface width check by `sizeof(ecat_pixel_t)`. |
 
 ## Displays (written in `ecat_pixel_t`, neutral upstream)

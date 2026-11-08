@@ -141,6 +141,21 @@ target_link_libraries(ecat_platform PUBLIC
     pico_stdlib pico_multicore hardware_clocks hardware_vreg hardware_watchdog
     drivers video_hdmi fatfs sdcard usbhid audio_driver)
 
+# the menus: frank-dino's UI (ui/), over this firmware (ui/ecat_ui.h)
+add_library(ecat_ui STATIC
+    ui/menu.c
+    ui/storage.c
+    ui/ui_browser.c
+    ui/ui_dialog.c
+    ui/ui_font.c
+    ui/ui_gfx.c
+    ui/ui_nav.c
+    ui/ui_render.c
+    ui/ui_tree.c
+)
+target_include_directories(ecat_ui PUBLIC ui)
+target_link_libraries(ecat_ui PUBLIC ecat_platform)
+
 # memmap_ecat.ld INCLUDEs ecat_hot.ld (the functions that run from SRAM):
 # empty until the emulator core is built, see ecat_hot below
 if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.ld)
@@ -219,6 +234,7 @@ function(ecat_add_firmware family)
         COMMENT "Packing the ${family} machines into the flash VFS")
     add_executable(${target}
         platform/ecat_main.cpp
+        platform/frank_keys.cpp
         platform/frank_fs.c
         platform/ecat_atomic.c
         platform/ram_hot.c
@@ -228,7 +244,7 @@ function(ecat_add_firmware family)
     target_compile_definitions(${target} PRIVATE
         ECAT_VIDEO_MODE=${F_VIDEO_MODE} ECAT_REFRESH=${F_REFRESH} ECAT_FAMILY="${family}"
         ECAT_SURFACE_W=${surface_w} ECAT_SURFACE_H=${surface_h})
-    target_link_libraries(${target} ecat_platform ecat_core)
+    target_link_libraries(${target} ecat_ui ecat_platform ecat_core)
     ecat_firmware_setup(${target})
     add_dependencies(${target} ecat_hot)
     set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.stamp)

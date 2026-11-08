@@ -18,6 +18,7 @@ HDMI.
 |---|---|
 | `ecat3/` | the vendored eCat3 (`src/`, `deploy/`, `tests/`), see `ecat3/UPSTREAM.md` and `ecat3/PATCHES.md` |
 | `cmake/ecat_core.cmake` | the eCat3 core as a firmware library (`ECAT_EMBEDDED`, `ECAT_SINGLE_THREAD`) |
+| `ui/` | the menus, from frank-dino (`ui/ecat_ui.h` is what they ask of the emulator) |
 | `platform/` | board bring-up, heap (SRAM + PSRAM), files (flash VFS + SD), sound (HDMI / I2S), the emulator frontend, the diag firmware |
 | `drivers/` | HDMI (pico-speccy, HSTX back-end), I2S, PSRAM, SD / FatFs, USB HID |
 | `tools/embed_vfs.py` | packs a family's machines into the flash VFS |
@@ -43,7 +44,18 @@ Sends `~BOOT~` to a running firmware, or waits for a hung one: every firmware
 feeds a watchdog, and after a hang it prints where it stopped and enters
 BOOTSEL by itself.
 
-Console (USB CDC): a typed line goes to the machine's keyboard; `~C m N~`
+## Menus
+
+frank-dino's menus, in the colours of a Soviet manual: **F11** the file
+browser (a program loads into memory, a tape image goes on the machine's
+tape recorder, a disk image into its drive), **F12** the settings (model,
+reset, tape transport, HDMI or I2S sound, volume, emulator info, "Save
+settings to the card" into `/ecat/frank.ini`). At power-on the models of the
+firmware are listed for 3 s, the last one used marked; a key stays.
+
+Console (USB CDC): a typed line goes to the machine's keyboard; `~C m~` opens
+the settings and `~C files~` the files (driven with ANSI cursor keys, Enter,
+Esc, Tab to close), `~C boot~` restarts to the model list, `~C m N~`
 switches to machine N of the family, `~C s~` status, `~C d~` display/CPU
 state, `~C c DEVICE COMMAND PARAMS~` a device command (as a script's
 `COMMAND device.command(params)`), `~C f DEVICE FIELD...~` device fields (as

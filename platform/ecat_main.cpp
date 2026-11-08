@@ -16,6 +16,8 @@
  * Hangs: a 5 s watchdog fed by the main loop, breadcrumbs (platform_crumb)
  * at every stage; after a hang the next boot reports where and enters BOOTSEL.
  *
+ * Keys (USB keyboard): F10 sound HDMI <-> I2S, F11 the machine menu, F12 reset.
+ *
  * Console: a typed line goes to the machine (Emulator::paste_text, Enter ends
  * it); "~C m N~" reboots into machine N of the family, "~C s~" prints the
  * status, "~BOOT~" / "~RST~" as in the diag firmware.
@@ -42,6 +44,21 @@ extern "C" {
 #include "graphics.h"
 #include "hdmi.h"
 #include "ff.h"
+#if USB_HID_ENABLED
+#include "usbhid.h"
+#endif
+}
+#include "frank_keys.h"
+#include "emulator/devices/common/tape.h"
+#include "emulator/devices/common/fdd.h"
+extern "C" {
+#include "vga.h"
+#include "ecat_ui.h"
+#include "storage.h"
+#include "menu.h"
+#include "ui_dialog.h"
+#include "ui_model.h"
+#include "ui_nav.h"
 }
 
 #ifndef ECAT_VIDEO_MODE
@@ -260,6 +277,7 @@ static void core1_main(void)
 /* the machine to boot, kept over a watchdog reboot */
 static uint32_t __attribute__((section(".uninitialized_data"))) boot_machine[2];
 #define BOOT_MAGIC 0xEC47B007u
+#define MENU_BOOT_MAGIC 0xEC47AE4Bu     /* boot to the model list */
 
 static FrankRenderer *renderer;
 static Emulator *emu;
@@ -327,10 +345,564 @@ static void console_pump(void)
     console_queue.pop_front();
 }
 
+/* ---- the last machine used, kept in /ecat/<family>.last ---- */
+
+static bool last_machine_read(unsigned *m)
+{
+    FIL f;
+    char buf[8] = {0};
+    UINT n = 0;
+    if (f_open(&f, "/ecat/" ECAT_FAMILY ".last", FA_READ) != FR_OK) return false;
+    f_read(&f, buf, sizeof(buf) - 1, &n);
+    f_close(&f);
+    unsigned v = (unsigned)atoi(buf);
+    if (v >= ecat_machine_count) return false;
+    *m = v;
+    return true;
+}
+
+static void last_machine_write(unsigned m)
+{
+    FIL f;
+    f_mkdir("/ecat");
+    if (f_open(&f, "/ecat/" ECAT_FAMILY ".last", FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    char buf[8];
+    UINT n;
+    snprintf(buf, sizeof(buf), "%u\n", m);
+    f_write(&f, buf, strlen(buf), &n);
+    f_close(&f);
+}
+
+/* ---- the settings, kept in /ecat/frank.ini ---- */
+
+ecat_settings_t ecat_settings;
+
+void ecat_settings_defaults(void)
+{
+    ecat_settings.audio_out = 0;            /* the menu's 0 HDMI, 1 I2S */
+    ecat_settings.volume = 50;
+    ecat_settings.muted = 0;
+    ecat_settings.splash = 1;
+}
+
+static void settings_read(void)
+{
+    ecat_settings_defaults();
+    FIL f;
+    char buf[256] = {0};
+    UINT n = 0;
+    if (f_open(&f, "/ecat/frank.ini", FA_READ) != FR_OK) return;
+    f_read(&f, buf, sizeof(buf) - 1, &n);
+    f_close(&f);
+    char *p = buf, *ln;
+    while ((ln = strtok_r(p, "\r\n", &p)) != nullptr) {
+        char *eq = strchr(ln, '=');
+        if (!eq) continue;
+        *eq = 0;
+        const char *k = ln, *v = eq + 1;
+        if (!strcmp(k, "audio")) ecat_settings.audio_out = !strcmp(v, "i2s");
+        else if (!strcmp(k, "volume")) { int x = atoi(v); ecat_settings.volume = (uint8_t)(x < 0 ? 0 : x > 100 ? 100 : x); }
+        else if (!strcmp(k, "muted")) ecat_settings.muted = atoi(v) != 0;
+        else if (!strcmp(k, "model_list")) ecat_settings.splash = atoi(v) != 0;
+    }
+}
+
+bool ecat_settings_save(void)
+{
+    FIL f;
+    UINT n;
+    f_mkdir("/ecat");
+    if (f_open(&f, "/ecat/frank.ini", FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
+    char t[128];
+    snprintf(t, sizeof(t), "audio=%s\nvolume=%u\nmuted=%u\nmodel_list=%u\n",
+             ecat_settings.audio_out ? "i2s" : "hdmi", ecat_settings.volume,
+             ecat_settings.muted, ecat_settings.splash);
+    const bool ok = f_write(&f, t, strlen(t), &n) == FR_OK && n == strlen(t);
+    return f_close(&f) == FR_OK && ok;
+}
+
+void ecat_settings_apply(void)
+{
+    const frank_audio_out_t out = ecat_settings.audio_out ? FRANK_AUDIO_I2S : FRANK_AUDIO_HDMI;
+    if (frank_audio_output() != out) frank_audio_select(out);
+    if (emu) {
+        emu->set_volume(ecat_settings.volume);
+        emu->set_muted(ecat_settings.muted != 0);
+    }
+}
+
+/* ---- the machines, by English names ----
+ *
+ * The configurations name the machines in Russian (the system block's version,
+ * or its name); the menu is English and its font Latin, so the names are
+ * transliterated, the few with an established spelling taken from this table */
+
+static std::string config_field(unsigned i, const char *key)
+{
+    const ecat_vfs_entry_t *v = ecat_vfs_find(ecat_machines[i]);
+    if (!v) return std::string();
+    const std::string t((const char *)v->data, v->size);
+    const size_t sys = t.find("system");
+    if (sys == std::string::npos) return std::string();
+    const size_t end = t.find('}', sys);
+    for (size_t k = t.find(key, sys); k != std::string::npos && k < end; k = t.find(key, k + 1)) {
+        const size_t eq = t.find('=', k), nl = t.find('\n', k);
+        if (eq == std::string::npos || eq > nl || (k && t[k - 1] != '\t' && t[k - 1] != ' ' && t[k - 1] != '\n'))
+            continue;
+        std::string name = t.substr(k, eq - k);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+        if (name != key) continue;
+        std::string val = t.substr(eq + 1, nl - eq - 1);
+        while (!val.empty() && (val[0] == ' ' || val[0] == '\t')) val.erase(0, 1);
+        while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) val.pop_back();
+        return val;
+    }
+    return std::string();
+}
+
+static std::string translit(const std::string &u)
+{
+    static const char *const lower[32] = {
+        "a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+        "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya",
+    };
+    std::string o;
+    for (size_t i = 0; i < u.size(); i++) {
+        const unsigned char c = (unsigned char)u[i];
+        if (c < 0x80) { o += (char)c; continue; }
+        if ((c & 0xE0) != 0xC0 || i + 1 >= u.size()) {
+            while (i + 1 < u.size() && ((unsigned char)u[i + 1] & 0xC0) == 0x80) i++;
+            continue;
+        }
+        const unsigned cp = ((c & 0x1F) << 6) | ((unsigned char)u[++i] & 0x3F);
+        if (cp == 0x401 || cp == 0x451) { o += cp == 0x401 ? "Yo" : "yo"; continue; }
+        if (cp < 0x410 || cp > 0x44F) continue;
+        const bool upper = cp < 0x430;
+        std::string s = lower[(cp - 0x410) & 31];
+        if (upper && !s.empty()) {
+            /* a capital in a run of capitals stays all capitals (РК -> RK) */
+            const bool run = (i + 2 < u.size() && (unsigned char)u[i + 1] == 0xD0
+                              && (unsigned char)u[i + 2] >= 0x90 && (unsigned char)u[i + 2] <= 0xAF)
+                          || (!o.empty() && isupper((unsigned char)o.back()));
+            for (size_t k = 0; k < s.size(); k++) if (run || k == 0) s[k] = (char)toupper((unsigned char)s[k]);
+        }
+        o += s;
+    }
+    return o;
+}
+
+static const struct { const char *ru, *en; } kNames[] = {
+    { "Апогей БК-01Ц", "Apogey BK-01C" },
+    { "Апогей-БК01Ц", "Apogey BK-01C" },
+    { "Орион-128", "Orion-128" },
+    { "Ириша", "Irisha" },
+    { "Агат", "Agat" },
+    { "Правец", "Pravetz" },
+};
+
+static std::string english(std::string s)
+{
+    for (const auto &n : kNames) {
+        const size_t at = s.find(n.ru);
+        if (at != std::string::npos) s.replace(at, strlen(n.ru), n.en);
+    }
+    return translit(s);
+}
+
+static std::vector<std::string> machine_titles;
+static std::string family_title;
+
+static void machine_names_build(void)
+{
+    for (unsigned i = 0; i < ecat_machine_count; i++) {
+        std::string t = config_field(i, "version");
+        if (t.empty()) t = config_field(i, "name");
+        if (t.empty()) t = ecat_machines[i];
+        machine_titles.push_back(english(t));
+    }
+    family_title = english(config_field(0, "name"));
+}
+
+/* ---- the menus' screen: the surface, put aside while they have it ---- */
+
+static uint8_t surface_saved[sizeof(surface)] __attribute__((section(".psram_bss")));
+static uint8_t ui_back[VGA_UI_W * VGA_UI_H] __attribute__((section(".psram_bss")));
+uint8_t *vga_ui_fb = ui_back;
+static vga_mode_t vga_mode = VGA_MODE_MACHINE;
+static int saved_w, saved_h;
+
+/* frank-dino's colour roles (ui_gfx.h), in the colours of a Soviet manual:
+ * cream paper, black print, a red title band with a gold star, amber for
+ * where you are */
+static const uint32_t kUiPalette[] = {
+    0x8C8270,   // C_BG          the desk round the window
+    0xF3EBD8,   // C_PANEL       paper
+    0xE4D8BC,   // C_PANEL_ALT   bands: the path, a dialog
+    0x2B2118,   // C_SEP         rules and frames
+    0x1E1A16,   // C_TEXT
+    0x6B6257,   // C_TEXT_DIM
+    0x000000,   // C_WHITE       emphasis: black on the paper
+    0xF2B632,   // C_SEL_BG      the amber bar
+    0xD9CBAE,   // C_SEL_BAND    the bar in the pane without the focus
+    0xA51C16,   // C_ACCENT      red
+    0xD8CCB2,   // C_FOOT_BG
+    0x5A5248,   // C_SHADOW
+    0xB01810,   // C_ICON_R
+    0xA86A00,   // C_ICON_Y
+    0x1F6F78,   // C_ICON_C
+    0xA39A8C,   // C_DISABLED
+    0xFFC83A,   // C_FLASH_R     the star and the first stripe: gold
+    0xF08A24,   // C_FLASH_Y     orange
+    0xF3E6C4,   // C_FLASH_G     cream
+    0x6E0E0A,   // C_FLASH_C     crimson
+    0xA51C16,   // C_TITLE_BG    the red band
+    0xFFF4DC,   // C_TITLE_TEXT
+    0x2E7D32,   // C_OK
+};
+
+void vga_build_ui_palette(void)
+{
+    for (unsigned i = 0; i < sizeof(kUiPalette) / sizeof(kUiPalette[0]); i++)
+        graphics_set_palette(UI_PAL_BASE + i, kUiPalette[i]);
+}
+
+vga_mode_t vga_get_mode(void) { return vga_mode; }
+
+void vga_ui_present(void)
+{
+    if (vga_mode != VGA_MODE_UI || ui_dirty_hi < ui_dirty_lo) return;
+    const int lo = ui_dirty_lo, hi = ui_dirty_hi;
+    ui_dirty_lo = VGA_UI_H;
+    ui_dirty_hi = -1;
+    /* Right after a vertical sync the beam is at the top: a copy of the
+     * rows takes well under a frame (PSRAM to SRAM, ~0.5 ms the screen),
+     * so it is done before the beam reaches what it changes, or after */
+    const uint32_t v = vsyncs;
+    const uint64_t t0 = time_us_64();
+    while (vsyncs == v && time_us_64() - t0 < 25000) tight_loop_contents();
+    memcpy(surface + lo * VGA_UI_W, ui_back + lo * VGA_UI_W, (size_t)(hi - lo + 1) * VGA_UI_W);
+}
+
+void vga_set_mode(vga_mode_t m)
+{
+    if (m == vga_mode) return;
+    int hs, vs;
+    if (m == VGA_MODE_UI) {
+        saved_w = surface_w;
+        saved_h = surface_h;
+        memcpy(surface_saved, surface, sizeof(surface));
+        vga_build_ui_palette();
+        memset(surface, UI_PAL_BASE, VGA_UI_W * VGA_UI_H);
+        memset(ui_back, UI_PAL_BASE, sizeof(ui_back));
+        ui_dirty_lo = VGA_UI_H;
+        ui_dirty_hi = -1;
+        surface_w = VGA_UI_W;
+        surface_h = VGA_UI_H;
+        layout_for(VGA_UI_W, VGA_UI_H, &hs, &vs);
+        hdmi_set_layout(VGA_UI_W, VGA_UI_H, hs, vs);
+    } else {
+        memcpy(surface, surface_saved, sizeof(surface));
+        surface_w = saved_w;
+        surface_h = saved_h;
+        layout_for(saved_w, saved_h, &hs, &vs);
+        hdmi_set_layout(saved_w, saved_h, hs, vs);
+    }
+    vga_mode = m;
+}
+
+/* ---- what the menus ask of the emulator (ui/ecat_ui.h) ---- */
+
+static bool card_mounted;
+static unsigned machine_running;
+static bool booting = true;             /* the power-on model list: no machine yet */
+static int boot_choice = -1;
+
+/* a key the menu reads, as the console would send it */
+static void menu_keys(const char *s)
+{
+    while (*s) menu_key(*s++);
+}
+
+static void hid_to_menu(uint8_t u)
+{
+    switch (u) {
+    case 0x52: menu_keys("\x1b[A"); return;
+    case 0x51: menu_keys("\x1b[B"); return;
+    case 0x4F: menu_keys("\x1b[C"); return;
+    case 0x50: menu_keys("\x1b[D"); return;
+    case 0x4A: menu_keys("\x1b[H"); return;
+    case 0x4D: menu_keys("\x1b[F"); return;
+    case 0x4B: menu_keys("\x1b[5~"); return;
+    case 0x4E: menu_keys("\x1b[6~"); return;
+    case 0x28: case 0x58: menu_key('\r'); return;
+    case 0x29: menu_key(0x1B); return;
+    case 0x2A: menu_key(0x7F); return;
+    case 0x2B: case 0x44: menu_key('\t'); return;     /* Tab, F11: close */
+    case 0x45: menu_key('\\'); return;                /* F12: settings / close */
+    case 0x3C: menu_key(0x06); return;                /* F3: find */
+    default: break;
+    }
+    const int k = frank_hid_to_emukey(u);
+    if (k >= 'A' && k <= 'Z') menu_key((char)(k - 'A' + 'a'));
+    else if (k > 0 && k < 0x7F && k != '\\') menu_key((char)k);
+}
+
+extern "C" void ecat_ui_poll(void)
+{
+    vga_ui_present();
+    platform_watchdog_feed();
+    platform_crumb_tick();
+    frank_audio_underruns = 0;          /* nothing plays while a menu is up */
+    platform_usb_poll();
+#if USB_HID_ENABLED
+    uint8_t code;
+    int down;
+    while (usbhid_get_key_action(&code, &down))
+        if (down) hid_to_menu(code);
+#endif
+}
+
+extern "C" int ecat_ui_console_getchar(void)
+{
+    static bool in_cmd;
+    const int c = getchar_timeout_us(0);
+    if (c < 0) return -1;
+    platform_uart_cmd(c);
+    if (c == '~') { in_cmd = !in_cmd; return -1; }
+    return in_cmd ? -1 : c;
+}
+
+extern "C" bool ecat_ui_card_mounted(void) { return card_mounted; }
+extern "C" const char *ecat_ui_family_name(void) { return family_title.c_str(); }
+extern "C" unsigned ecat_ui_machine_count(void) { return ecat_machine_count; }
+extern "C" const char *ecat_ui_machine_title(unsigned i)
+{
+    return i < machine_titles.size() ? machine_titles[i].c_str() : "?";
+}
+extern "C" unsigned ecat_ui_machine_current(void) { return machine_running; }
+extern "C" bool ecat_ui_booting(void) { return booting; }
+
+extern "C" void ecat_ui_start_machine(unsigned i)
+{
+    if (booting) {
+        boot_choice = (int)i;
+        ui_request_close();
+        return;
+    }
+    last_machine_write(i);
+    boot_machine[0] = BOOT_MAGIC;
+    boot_machine[1] = i;
+    platform_reboot_clean(false);
+}
+
+extern "C" void ecat_ui_reset(bool cold)
+{
+    if (emu) emu->reset(cold);
+}
+
+extern "C" void ecat_ui_bootsel(void) { platform_reboot_clean(true); }
+
+static std::string lower_ext(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    std::string e = dot ? dot : "";
+    for (char &c : e) c = (char)tolower((unsigned char)c);
+    return e;
+}
+
+/* "*.rk *.rkr" (or a Qt filter list) names the extension */
+static bool filter_has(const std::string &filter, const std::string &ext)
+{
+    if (ext.empty()) return false;
+    std::string f = filter;
+    for (char &c : f) c = (char)tolower((unsigned char)c);
+    const std::string pat = "*" + ext;
+    for (size_t at = f.find(pat); at != std::string::npos; at = f.find(pat, at + 1)) {
+        const char after = at + pat.size() < f.size() ? f[at + pat.size()] : ' ';
+        if (after == ' ' || after == ')' || after == ';') return true;
+    }
+    return false;
+}
+
+static TapeRecorder *machine_tape(void)
+{
+    if (!emu || !emu->dm) return nullptr;
+    for (unsigned i = 0; i < emu->dm->device_count; i++) {
+        TapeRecorder *t = dynamic_cast<TapeRecorder *>(emu->dm->get_device(i)->get());
+        if (t) return t;
+    }
+    return nullptr;
+}
+
+static FDD *machine_drive(const std::string &ext)
+{
+    if (!emu || !emu->dm) return nullptr;
+    for (unsigned i = 0; i < emu->dm->device_count; i++) {
+        FDD *d = dynamic_cast<FDD *>(emu->dm->get_device(i)->get());
+        if (d && filter_has(d->files, ext)) return d;
+    }
+    return nullptr;
+}
+
+static bool is_quickload(const std::string &ext)
+{
+    static const char *const known[] = { ".hex", ".rk", ".rkr", ".rkm", ".rka", ".gam", ".rko", ".ord", ".bru", ".cim", ".bin" };
+    for (const char *k : known) if (ext == k) return true;
+    return false;
+}
+
+extern "C" int ecat_ui_file_kind(const char *name)
+{
+    if (!emu) return FILE_OTHER;
+    const std::string ext = lower_ext(name);
+    if (is_quickload(ext) && filter_has(emu->get_system_data()->allowed_files, ext)) return FILE_PROGRAM;
+    if (TapeRecorder *t = machine_tape())
+        if (filter_has(t->files, ext) || (ext.size() > 1 && !t->format_for_extension(ext.substr(1)).empty()))
+            return FILE_TAPE;
+    if (machine_drive(ext)) return FILE_DISK;
+    return FILE_OTHER;
+}
+
+extern "C" const char *ecat_ui_software_dir(void)
+{
+    /* the machine's own folder (its system type, as the desktop's library
+     * names them), else the family's, else the library */
+    static char dir[96];
+    FILINFO fi;
+    if (emu) {
+        snprintf(dir, sizeof(dir), "/ecat/software/%s", emu->get_system_data()->system_type.c_str());
+        if (f_stat(dir, &fi) == FR_OK) return dir;
+    }
+    snprintf(dir, sizeof(dir), "/ecat/software/%s", ECAT_FAMILY);
+    if (f_stat(dir, &fi) == FR_OK) return dir;
+    return f_stat("/ecat/software", &fi) == FR_OK ? "/ecat/software" : "/";
+}
+
+static void detail_of(const emulator::Result &r, const char *ok, const char *name, char *detail, unsigned n)
+{
+    if (r) { snprintf(detail, n, "%s %s", ok, name); return; }
+    /* the core's messages are "{Context|text} more": the text and the rest */
+    std::string m = r.message;
+    const size_t bar = m.find('|'), close = m.find('}');
+    if (bar != std::string::npos && close != std::string::npos && close > bar)
+        m = m.substr(bar + 1, close - bar - 1) + m.substr(close + 1);
+    snprintf(detail, n, "%s", m.c_str());
+}
+
+extern "C" bool ecat_ui_load(const char *path, int kind, char *detail, unsigned n)
+{
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    emulator::Result r = emulator::Result::ok();
+    if (kind == FILE_PROGRAM) {
+        r = HandleExternalFile(emu, path);
+        detail_of(r, "Loaded", base, detail, n);
+    } else if (kind == FILE_TAPE) {
+        TapeRecorder *t = machine_tape();
+        r = t->send_command("load", path);
+        if (r) r = t->send_command("play", "");
+        detail_of(r, "On the tape:", base, detail, n);
+    } else if (kind == FILE_DISK) {
+        FDD *d = machine_drive(lower_ext(path));
+        r = d->send_command("load", path);
+        detail_of(r, "In the drive:", base, detail, n);
+    } else {
+        snprintf(detail, n, "This machine cannot open %s", base);
+        return false;
+    }
+    printf("ui load %s: %s\n", path, detail);
+    return (bool)r;
+}
+
+extern "C" const char *ecat_ui_tape_state(void)
+{
+    TapeRecorder *t = machine_tape();
+    if (!t) return nullptr;
+    static char buf[UI_DYN_VALUE_LEN];
+    const std::string &name = t->get_loaded_name();
+    const int total = t->get_total(), pos = t->get_position();
+    if (name.empty()) snprintf(buf, sizeof(buf), "empty");
+    else if (total > 0) snprintf(buf, sizeof(buf), "%d%% %s", pos * 100 / total, name.c_str());
+    else snprintf(buf, sizeof(buf), "%s", name.c_str());
+    return buf;
+}
+
+extern "C" bool ecat_ui_tape_command(const char *command)
+{
+    TapeRecorder *t = machine_tape();
+    return t && (bool)t->send_command(command, "");
+}
+
+static uint32_t speed_khz;
+static bool speed_skip;
+
+extern "C" const char *ecat_ui_speed(void)
+{
+    static char buf[UI_DYN_VALUE_LEN];
+    if (!speed_khz) return "measuring";
+    snprintf(buf, sizeof(buf), "%lu.%03lu MHz", (unsigned long)(speed_khz / 1000), (unsigned long)(speed_khz % 1000));
+    return buf;
+}
+
+extern "C" void ecat_ui_info(char *buf, unsigned n)
+{
+    const video_mode_t m = graphics_get_video_mode(ECAT_VIDEO_MODE);
+    const char *tape = ecat_ui_tape_state();
+    snprintf(buf, n,
+        UI_MK_HEAD "--- Machine ---\n"
+        UI_MK_TEXT "Model          : " UI_MK_WHITE "%s\n"
+        UI_MK_TEXT "Family         : " UI_MK_WHITE "%s\n"
+        UI_MK_TEXT "Configuration  : " UI_MK_WHITE "%s\n"
+        UI_MK_TEXT "CPU speed      : " UI_MK_WHITE "%s\n"
+        UI_MK_TEXT "Screen         : " UI_MK_WHITE "%dx%d, %u colours\n"
+        "\n"
+        UI_MK_HEAD "--- Board ---\n"
+        UI_MK_TEXT "Video          : " UI_MK_WHITE "%dx%d HDMI\n"
+        UI_MK_TEXT "Sound          : " UI_MK_WHITE "%s, %d Hz\n"
+        UI_MK_TEXT "Card           : %s\n"
+        UI_MK_TEXT "Tape           : " UI_MK_WHITE "%s\n"
+        UI_MK_TEXT "System clock   : " UI_MK_WHITE "%lu MHz\n"
+        "\n"
+        UI_MK_HEAD "--- Firmware ---\n"
+        UI_MK_TEXT "frank-ecat     : " UI_MK_WHITE "%s, %s\n"
+        UI_MK_TEXT "Emulator core  : " UI_MK_WHITE "eCat3 by Mikhail Revzin\n",
+        ecat_ui_machine_title(machine_running), family_title.c_str(), ecat_machines[machine_running],
+        ecat_ui_speed(), saved_w, saved_h, renderer ? renderer->palette_count() : 0,
+        m.screen_width * 2, m.v_active,
+        frank_audio_output() == FRANK_AUDIO_I2S ? "I2S" : "HDMI", FRANK_AUDIO_RATE,
+        card_mounted ? UI_MK_OK "mounted" : UI_MK_BAD "no card",
+        tape ? tape : "none",
+        (unsigned long)(clock_get_hz(clk_sys) / 1000000),
+        ECAT_VERSION, ECAT_FAMILY);
+}
+
+/* F11 the files, F12 the settings; the machine stands still meanwhile */
+static void open_menu(bool settings)
+{
+    printf("menu: %s\n", settings ? "settings" : "files");
+    menu_open_settings(settings);
+    menu_run();
+    speed_skip = true;
+    printf("menu closed\n");
+}
+
+static void audio_output(frank_audio_out_t out)
+{
+    ecat_settings.audio_out = out == FRANK_AUDIO_I2S;
+    ecat_settings_apply();
+    ecat_settings_save();
+}
+
 int main()
 {
     unsigned machine = 0;
-    if (boot_machine[0] == BOOT_MAGIC && boot_machine[1] < ecat_machine_count) machine = boot_machine[1];
+    bool chosen = false, menu = false;
+    if (boot_machine[0] == BOOT_MAGIC && boot_machine[1] < ecat_machine_count) {
+        machine = boot_machine[1];
+        chosen = true;
+    } else if (boot_machine[0] == MENU_BOOT_MAGIC) {
+        menu = true;
+    }
     boot_machine[0] = 0;
 
     platform_init_clocks();
@@ -344,7 +916,8 @@ int main()
     platform_crumb(1, 0);
     platform_init_psram();
     platform_crumb(2, 0);
-    frank_fs_set_sd(platform_mount_sd() == 0);
+    card_mounted = platform_mount_sd() == 0;
+    frank_fs_set_sd(card_mounted);
     platform_init_usb();
     platform_watchdog_feed();
 
@@ -357,7 +930,28 @@ int main()
     hdmi_set_layout(surface_w, surface_h, 2, 2);   /* until the machine says */
     platform_launch_core1(core1_main);
     multicore_fifo_pop_blocking();
-    frank_audio_init(FRANK_AUDIO_HDMI);
+    settings_read();
+    frank_audio_init(ecat_settings.audio_out ? FRANK_AUDIO_I2S : FRANK_AUDIO_HDMI);
+    machine_names_build();
+
+    unsigned last_used = 0;
+    const bool have_last = last_machine_read(&last_used);
+    if (!chosen) machine = have_last ? last_used : 0;
+    machine_running = machine;
+    if (!chosen && (menu || ecat_settings.splash)) {
+        /* The models, in the settings menu, before anything starts: on the
+         * marked one after 3 s unless a key is pressed (at once on
+         * "~C m~", which waits) */
+        while (getchar_timeout_us(0) >= 0) {}      /* what the console had */
+        menu_autoclose(menu ? 0 : 3000);
+        menu_preload("\r\r");          /* Machine, then Model */
+        menu_open_settings(true);
+        menu_run();
+        if (boot_choice >= 0) machine = (unsigned)boot_choice;
+    }
+    booting = false;
+    machine_running = machine;
+    if (!have_last || last_used != machine) last_machine_write(machine);
 
     printf("machines:\n");
     for (unsigned i = 0; i < ecat_machine_count; i++) printf("  %u%s %s\n", i, i == machine ? "*" : " ", ecat_machines[i]);
@@ -372,8 +966,7 @@ int main()
         printf("load_config %s: %s\n", ecat_machines[machine], res.message.c_str());
     } else {
         platform_crumb(6, machine);
-        emu->set_volume(atoi(emu->read_setup("Sound", "volume", "50").c_str()));
-        emu->set_muted(emu->read_setup("Sound", "muted", "0") == "1");
+        ecat_settings_apply();
         emu->init_video(nullptr);       /* the display gets the renderer, as in the console build */
         emu->run();
         printf("running %s\n", ecat_machines[machine]);
@@ -405,6 +998,29 @@ int main()
         platform_crumb(13, 0);
         platform_usb_poll();
         platform_crumb(14, 0);
+#if USB_HID_ENABLED
+        {
+            static int mods;
+            uint8_t code;
+            int down;
+            while (usbhid_get_key_action(&code, &down)) {
+                const int key = frank_hid_to_emukey(code);
+                if (!key) continue;
+                const int bit = key == EMUKEY_SHIFT ? EMUMOD_SHIFT : key == EMUKEY_CONTROL ? EMUMOD_CONTROL
+                              : key == EMUKEY_ALT ? EMUMOD_ALT : 0;
+                if (bit) mods = down ? (mods | bit) : (mods & ~bit);
+                if (key == EMUKEY_F11 || key == EMUKEY_F12) {   /* files, settings */
+                    if (down) {
+                        open_menu(key == EMUKEY_F12);
+                        mods = 0;
+                        last = time_us_64();
+                    }
+                    continue;
+                }
+                emu->key_event(key, mods, down != 0, true);
+            }
+        }
+#endif
 
         int c = getchar_timeout_us(0);
         if (c >= 0) {
@@ -424,7 +1040,15 @@ int main()
         char cmd[96];
         if (platform_debug_cmd_line(cmd, sizeof(cmd))) {
             unsigned n;
-            if (sscanf(cmd, "m %u", &n) == 1 && n < ecat_machine_count) {
+            if (strcmp(cmd, "m") == 0 || strcmp(cmd, "menu") == 0 || strcmp(cmd, "files") == 0) {
+                open_menu(cmd[0] != 'f');       /* driven from here: ESC [ A and so on */
+                last = time_us_64();
+            } else if (strcmp(cmd, "boot") == 0) {
+                boot_machine[0] = MENU_BOOT_MAGIC;
+                printf("model list, rebooting\n");
+                sleep_ms(20);
+                platform_reboot_clean(false);
+            } else if (sscanf(cmd, "m %u", &n) == 1 && n < ecat_machine_count) {
                 boot_machine[0] = BOOT_MAGIC;
                 boot_machine[1] = n;
                 printf("machine %u: %s, rebooting\n", n, ecat_machines[n]);
@@ -484,6 +1108,10 @@ int main()
                 const std::string path(cmd + 5);
                 emulator::Result r = HandleExternalFile(emu, path);
                 printf("load %s: %s\n", path.c_str(), r ? "ok" : r.message.c_str());
+            } else if (strcmp(cmd, "audio hdmi") == 0) {
+                audio_output(FRANK_AUDIO_HDMI);
+            } else if (strcmp(cmd, "audio i2s") == 0) {
+                audio_output(FRANK_AUDIO_I2S);
             } else if (strncmp(cmd, "prof", 4) == 0) {
                 unsigned us = 200;
                 sscanf(cmd + 4, "%u", &us);
@@ -497,6 +1125,8 @@ int main()
             const uint64_t clk = emu->clock_now();
             const uint64_t hz = (clk - last_clock) * 1000000 / (now - last_status);
             last_clock = clk;
+            if (!speed_skip) speed_khz = (uint32_t)(hz / 1000);    /* a menu stopped the machine */
+            speed_skip = false;
             printf("speed %lu.%02lu MHz, busy %u%%, vsync %lu, ring %d, underruns %lu\n",
                    (unsigned long)(hz / 1000000), (unsigned long)(hz / 10000 % 100),
                    (unsigned)(busy_us * 100 / (now - last_status)), (unsigned long)vsyncs,

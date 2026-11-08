@@ -16,7 +16,8 @@
 class IndexedPalette
 {
 public:
-    enum { SIZE = 255 };    // index 255 is the HDMI driver's border colour
+    // 224..254 are frank-ecat's menu colours, 255 the HDMI driver's border
+    enum { SIZE = 224 };
 
     IndexedPalette() { clear(); }
 
