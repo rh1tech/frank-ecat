@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")/../ecat3"
 EXE=${1:-../build-host-emb}/eCat3-headless
-MACHINES="rk86 mikrosha apogey spektr orion irisha dialog kaspiy unior argo agat pravetz"
+MACHINES="rk86 mikrosha apogey spektr orion irisha dialog kaspiy unior argo agat pravetz dvk"
 fail=0
 for m in $MACHINES; do
     out=$(python3 tests/run_tests.py -j 8 --exe "$EXE" -k "$m" 2>&1)

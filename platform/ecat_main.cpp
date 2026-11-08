@@ -77,11 +77,13 @@ extern "C" {
 /* ---- the surface: palette indices, one byte a dot, scanned out as it is ---- */
 
 static uint8_t surface[ECAT_SURFACE_W * ECAT_SURFACE_H];
+
 static volatile int surface_w = 468, surface_h = 300;
 
 extern "C" uint8_t *__not_in_flash_func(getLineBuffer)(int line) {
     return surface + line * surface_w;
 }
+
 
 extern "C" int __not_in_flash_func(get_video_mode)(void) {
     return ECAT_VIDEO_MODE;
@@ -297,6 +299,7 @@ static FrankRenderer *renderer;
 static Emulator *emu;
 
 extern "C" uint32_t frank_audio_tick_us, frank_audio_ticks;
+extern "C" volatile uint32_t hdmi_irq_max_dur_us, hdmi_irq_max_gap_us;
 
 static void status(void)
 {
@@ -309,6 +312,9 @@ static void status(void)
     printf("vsync %lu, audio ring %d, underruns %lu\n", (unsigned long)vsyncs, frank_audio_level(),
            (unsigned long)frank_audio_underruns);
     printf("hdmi audio tick: %lu us in %lu ticks\n", (unsigned long)frank_audio_tick_us, (unsigned long)frank_audio_ticks);
+    printf("hdmi line irq: longest %lu us, largest gap %lu us\n", (unsigned long)hdmi_irq_max_dur_us,
+           (unsigned long)hdmi_irq_max_gap_us);
+    hdmi_irq_max_dur_us = hdmi_irq_max_gap_us = 0;
     frank_audio_tick_us = frank_audio_ticks = 0;
 }
 
@@ -1042,8 +1048,10 @@ int main()
         }
 #endif
 
-        int c = getchar_timeout_us(0);
-        if (c >= 0) {
+        /* every byte the console has: a slow machine goes round this loop ten
+         * times a second, and a "~BOOT~" sent by a script that then closes
+         * the port was lost a byte at a time */
+        for (int c; (c = getchar_timeout_us(0)) >= 0;) {
             platform_uart_cmd(c);
             /* "~...~" are console commands (platform_uart_cmd), not typing */
             static bool in_cmd;

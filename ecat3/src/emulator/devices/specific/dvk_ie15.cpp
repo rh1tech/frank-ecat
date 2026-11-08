@@ -268,6 +268,9 @@ void IE15Display::reset(bool cold)
 void IE15Display::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     vr.FillRGB(m_palette, m_colors, 2);
 }
 
@@ -286,13 +289,23 @@ void IE15Display::draw_line(unsigned y, unsigned line, const uint16_t * cells, u
 
     compat_lock_guard guard(m_surface_mutex);
     if (!has_valid_renderer() || render_pixels == nullptr || m_vram == nullptr) return;
-    if ((int)(WIDTH * 4) > line_bytes || y >= HEIGHT) return;
+    if ((int)(WIDTH * sizeof(ecat_pixel_t)) > line_bytes || y >= HEIGHT) return;
 
     // Луч нарисовал линию: render_all() кадр больше не стирает (иначе под
     // -j 8 снимок выходил чёрным)
     screen_valid = true;
 
-    uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
+#ifdef ECAT_EMBEDDED
+    {
+        if (m_drawn.size() != (size_t)HEIGHT * 81) m_drawn.assign((size_t)HEIGHT * 81, 0);
+        uint16_t * d = &m_drawn[(size_t)y * 81];
+        if (m_drawn_frames < 50 && d[80] == line + 1 && memcmp(d, cells, 80 * sizeof(uint16_t)) == 0) return;
+        memcpy(d, cells, 80 * sizeof(uint16_t));
+        d[80] = (uint16_t)(line + 1);
+    }
+#endif
+
+    ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
     const unsigned ra = line & 7;
     for (unsigned x = 0; x < 80; x++) {
         const uint16_t cell = cells[x];
@@ -313,6 +326,9 @@ void IE15Display::draw_line(unsigned y, unsigned line, const uint16_t * cells, u
 
 void IE15Display::end_frame()
 {
+#ifdef ECAT_EMBEDDED
+    if (++m_drawn_frames > 50) m_drawn_frames = 0;
+#endif
     was_updated = true;
     frame_complete();
 }
@@ -321,8 +337,11 @@ void IE15Display::end_frame()
 void IE15Display::render_all(MAYBE_UNUSED bool force_render)
 {
     if (!screen_valid && render_pixels != nullptr) {
+#ifdef ECAT_EMBEDDED
+        forget_drawn();
+#endif
         for (unsigned y = 0; y < HEIGHT; y++) {
-            uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
+            ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
             for (unsigned x = 0; x < WIDTH; x++) *p++ = m_colors[0];
         }
         screen_valid = true;

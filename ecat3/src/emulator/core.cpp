@@ -1238,6 +1238,19 @@ void Memory::set_memory_callback(ComputerDevice * d, unsigned int callback_id, u
     if ((mode & MODE_W) != 0) write_callback = callback_id;
 }
 
+#ifdef ECAT_EMBEDDED
+uint8_t * Memory::direct_buffer(bool write, unsigned int * size)
+{
+    const std::type_info &t = typeid(*this);
+    if (t != typeid(RAM) && t != typeid(ROM)) return nullptr;
+    if (t == typeid(ROM) && static_cast<ROM *>(this)->streaming()) return nullptr;
+    if (write ? (write_callback != 0 || !can_write) : (read_callback != 0 || !can_read)) return nullptr;
+    if (buffer.empty()) return nullptr;
+    *size = get_size();
+    return buffer.data();
+}
+#endif
+
 uint8_t * Memory::get_buffer()
 {
     return buffer.empty() ? nullptr : buffer.data();
@@ -2345,6 +2358,9 @@ MemoryMapper::MemoryMapper(InterfaceManager *im, EmulatorConfigDevice *cd):
     //A tag of 0 never matches, so an empty table needs no other marker
     this->page_generation = 1;
     size_pages(16);
+#ifdef ECAT_EMBEDDED
+    memset(m_port_cache, 0, sizeof(m_port_cache));
+#endif
 }
 
 void MemoryMapper::size_pages(unsigned int address_bits)
@@ -2363,6 +2379,9 @@ void MemoryMapper::invalidate_pages()
         //A tag of 0 means "empty", so the counter never stands on 0
         this->page_generation = 1;
         memset(m_pages, 0, m_page_count * sizeof(MapperPage));
+#ifdef ECAT_EMBEDDED
+        memset(m_port_cache, 0, sizeof(m_port_cache));
+#endif
     }
 }
 
@@ -2377,6 +2396,30 @@ void MemoryMapper::invalidate_pages()
 //only candidate for every address of the page, so the answer per direction is
 //the device when the mode fits, and otherwise a timeout when the range is
 //strict - which is what responds() says
+#ifdef ECAT_EMBEDDED
+void MemoryMapper::fill_direct(MapperPage * e)
+{
+    e->direct_r = e->direct_w = nullptr;
+    e->direct_r_size = e->direct_w_size = 0;
+    if (Memory * m = dynamic_cast<Memory *>(e->device_r)) e->direct_r = m->direct_buffer(false, &e->direct_r_size);
+    if (Memory * m = dynamic_cast<Memory *>(e->device_w)) e->direct_w = m->direct_buffer(true, &e->direct_w_size);
+}
+
+AddressableDevice * MemoryMapper::port_device(unsigned int a, unsigned int mode, unsigned int * address_on_device)
+{
+    unsigned int range_index;
+    if (a > 0xFF) return this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, mode, address_on_device, &range_index);
+    PortEntry &p = m_port_cache[mode == MODE_W ? 1 : 0][a];
+    const uint64_t tag = page_tag();
+    if (p.tag != tag) {
+        p.device = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, mode, &p.address, &range_index);
+        p.tag = tag;
+    }
+    *address_on_device = p.address;
+    return p.device;
+}
+#endif
+
 MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 {
     MapperPage * e = &this->m_pages[page];
@@ -2389,6 +2432,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
     e->device_r = e->device_w = nullptr;
     e->offset = 0;
     e->timeout_r = e->timeout_w = true;
+#ifdef ECAT_EMBEDDED
+    e->direct_r = e->direct_w = nullptr;
+#endif
 
     const MapperRange * found = nullptr;
     for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
@@ -2425,6 +2471,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
             else e->timeout_r = true;
             if (w == ROUTE_ANSWER) { e->device_w = mr->device; e->timeout_w = false; }
             else e->timeout_w = true;
+#ifdef ECAT_EMBEDDED
+            fill_direct(e);
+#endif
             return e;
         }
         if (found != nullptr) {
@@ -2449,6 +2498,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
     else e->timeout_r = found->strict;
     if ((found->mode & MODE_W) != 0) { e->device_w = found->device; e->timeout_w = false; }
     else e->timeout_w = found->strict;
+#ifdef ECAT_EMBEDDED
+    fill_direct(e);
+#endif
     return e;
 }
 
@@ -2817,6 +2869,12 @@ unsigned int MemoryMapper::read(unsigned int address)
         this->last_device = e->device_r;
         if (e->device_r != nullptr) {
             this->no_device = false;
+#ifdef ECAT_EMBEDDED
+            if (e->direct_r != nullptr) {
+                const unsigned int a = address + e->offset;
+                if (a < e->direct_r_size) return e->direct_r[a];
+            }
+#endif
             ECAT_SYNC_FOR(e->device_r);
             return e->device_r->get_value(address + e->offset);
         }
@@ -2971,6 +3029,12 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
         this->last_device = e->device_w;
         if (e->device_w != nullptr) {
             this->no_device = false;
+#ifdef ECAT_EMBEDDED
+            if (e->direct_w != nullptr) {
+                const unsigned int a = address + e->offset;
+                if (a < e->direct_w_size) { e->direct_w[a] = (uint8_t)value; return; }
+            }
+#endif
             ECAT_SYNC_FOR(e->device_w);
             e->device_w->set_value(address + e->offset, value);
         } else
@@ -3137,8 +3201,13 @@ unsigned int MemoryMapper::read_port(unsigned int address)
         //be the whole unsigned range and the scan would walk off the array
         if (this->ports_count == 0) return _FFFF;
         unsigned int a = address & this->ports_mask;
-        unsigned int address_on_device, range_index;
+        unsigned int address_on_device;
+#ifdef ECAT_EMBEDDED
+        AddressableDevice * d = port_device(a, MODE_R, &address_on_device);
+#else
+        unsigned int range_index;
         AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_R, &address_on_device, &range_index);
+#endif
         if (d != nullptr)
         {
             ECAT_SYNC_FOR(d);
@@ -3156,10 +3225,15 @@ void MemoryMapper::write_port(unsigned int address, unsigned int value)
     } else {
         if (this->ports_count == 0) return;
         unsigned int a = address & this->ports_mask;
-        unsigned int address_on_device, range_index;
+        unsigned int address_on_device;
         //MODE_W: a range declared write-only has to be reachable for a write,
         //and a read-only one must not be. Copied from read_port() as MODE_R
+#ifdef ECAT_EMBEDDED
+        AddressableDevice * d = port_device(a, MODE_W, &address_on_device);
+#else
+        unsigned int range_index;
         AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_W, &address_on_device, &range_index);
+#endif
         if (d != nullptr)
         {
             ECAT_SYNC_FOR(d);

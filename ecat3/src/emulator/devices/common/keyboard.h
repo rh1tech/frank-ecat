@@ -141,7 +141,13 @@ namespace EmuKey {
 
 struct KeyDescription {
     unsigned int code;
+#ifdef ECAT_EMBEDDED
+    //A C string: the table is in every file that includes this header, and
+    //with std::string each copy was 3.6 KB of SRAM built before main()
+    const char * name;
+#else
     std::string name;
+#endif
 };
 
 static const KeyDescription KEYS[] ={

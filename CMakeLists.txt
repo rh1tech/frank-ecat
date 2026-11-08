@@ -213,7 +213,8 @@ set(ECAT_HOST_HEADLESS "${CMAKE_CURRENT_SOURCE_DIR}/build-host/eCat3-headless" C
 
 # ecat_add_firmware(<family> VIDEO_MODE <n> REFRESH <Hz x 100> SURFACE <w> <h>
 #                   MACHINES <cfg|ext>...)
-# SURFACE: the largest picture of the family's displays (static SRAM)
+# SURFACE: the largest picture of the family's displays (static SRAM: the HDMI
+# line IRQ reads it, and cannot read 800 dots a line out of the PSRAM in time)
 function(ecat_add_firmware family)
     cmake_parse_arguments(F "" "VIDEO_MODE;REFRESH" "MACHINES;SURFACE" ${ARGN})
     list(GET F_SURFACE 0 surface_w)
@@ -264,3 +265,9 @@ ecat_add_firmware(agat VIDEO_MODE 28 REFRESH 5001 SURFACE 512 256 MACHINES
     agat/Agat-9.cfg
     agat/Agat-9-pp.ext
     agat/Agat-9-yazs.ext)
+
+ecat_add_firmware(dvk VIDEO_MODE 28 REFRESH 5001 SURFACE 800 286 MACHINES
+    dvk/DVK-1.cfg
+    dvk/DVK-2.cfg
+    dvk/DVK-3.cfg
+    dvk/DVK-4.cfg)

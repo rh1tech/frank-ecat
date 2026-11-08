@@ -860,13 +860,13 @@ void KCGDDisplay::render_line(unsigned v, unsigned half)
 {
     compat_lock_guard guard(m_surface_mutex);
     if (!has_valid_renderer() || render_pixels == nullptr) return;
-    if ((int)(KCGD_WIDTH * 4) > line_bytes) return;
+    if ((int)(KCGD_WIDTH * sizeof(ecat_pixel_t)) > line_bytes) return;
     const bool interlace = m_kcgd->interlace();
     if (m_surface_lines != (interlace ? KCGD_HEIGHT : KCGD_HEIGHT / 2)) return;
     const unsigned y = interlace ? 2 * v + (half & 1) : v;
     uint32_t pal[16];
     for (unsigned i = 0; i < 16; i++) pal[i] = m_colors[m_kcgd->palette(i)];
-    draw_row(reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes),
+    draw_row(reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes),
              interlace ? y : 2 * v, pal);
     // Луч рисовал на этой поверхности: render_all() не должен рисовать её
     // заново одной палитрой (см. BKDisplay::render_line())
@@ -896,7 +896,7 @@ void KCGDDisplay::render_all(MAYBE_UNUSED bool force_render)
         const unsigned lines = (m_surface_lines < KCGD_HEIGHT) ? m_surface_lines : KCGD_HEIGHT;
         const unsigned step = (lines == KCGD_HEIGHT) ? 1 : 2;
         for (unsigned y = 0; y < lines; y++)
-            draw_row(reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes),
+            draw_row(reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes),
                      y * step, pal);
     }
     screen_valid = true;
@@ -904,7 +904,7 @@ void KCGDDisplay::render_all(MAYBE_UNUSED bool force_render)
 }
 
 // Строка растра row (0-479) в p: 100 слов по 8 точек
-void KCGDDisplay::draw_row(uint32_t * p, unsigned row, const uint32_t * pal) const
+void KCGDDisplay::draw_row(ecat_pixel_t * p, unsigned row, const uint32_t * pal) const
 {
     unsigned a = line_address(row);
     for (unsigned i = 0; i < KCGD_LINE_WORDS; i++) {

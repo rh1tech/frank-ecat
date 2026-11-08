@@ -200,7 +200,7 @@ private:
 
     void follow_scan();
     void render_line(unsigned v, unsigned half);
-    void draw_row(uint32_t * p, unsigned row, const uint32_t * pal) const;
+    void draw_row(ecat_pixel_t * p, unsigned row, const uint32_t * pal) const;
     unsigned line_address(unsigned y) const;
     unsigned pixel(unsigned a, unsigned x) const;
     std::string screen_text() const;

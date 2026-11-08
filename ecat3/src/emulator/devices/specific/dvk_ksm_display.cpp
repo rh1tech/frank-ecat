@@ -106,7 +106,7 @@ void KSMDisplay::render_row(unsigned top, unsigned offset, bool blink)
     const unsigned size = (unsigned)m_vram->get_size();
     for (unsigned y = 0; y < KSM_CELL_H; y++) {
         uint8_t * base = static_cast<uint8_t*>(render_pixels) + (top + y) * line_bytes;
-        uint32_t * p = reinterpret_cast<uint32_t*>(base);
+        ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(base);
         const unsigned src = (y > 7) ? offset - KSM_CURSOR : offset;
         const unsigned ra = y % 8;
         for (unsigned x = 0; x < KSM_COLUMNS; x++) {
@@ -126,7 +126,7 @@ void KSMDisplay::render_row(unsigned top, unsigned offset, bool blink)
 void KSMDisplay::render_graphics()
 {
     for (unsigned y = 0; y < KGD_HEIGHT && y < sy; y++) {
-        uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
+        ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
         for (unsigned x = 0; x < KGD_WIDTH; x++)
             if (m_kgd->pixel(x, y)) {
                 p[x * 2] = m_colors[1];
@@ -150,7 +150,7 @@ void KSMDisplay::render_all(MAYBE_UNUSED bool force_render)
                 render_row(m_text_top + r * KSM_CELL_H, KSM_TEXT + (((line + r - 1) % KSM_RING) * KSM_ROW_BYTES), blink);
         } else {
             for (unsigned y = 0; y < sy; y++) {
-                uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
+                ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes);
                 for (unsigned x = 0; x < sx; x++) p[x] = m_colors[0];
             }
         }

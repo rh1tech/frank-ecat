@@ -11,9 +11,16 @@
 #include <set>
 
 namespace dsk_tools {
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: the tables as C strings, in flash - as std::string they were
+    // 66 KB of the microcontroller's SRAM, built before main()
+    typedef const char * charmap_entry_t;
+#else
+    typedef std::string charmap_entry_t;
+#endif
 
     struct CharmapInfo {
-        const std::string (*charmap)[256] = nullptr;
+        const charmap_entry_t (*charmap)[256] = nullptr;
         std::set<uint8_t> crlf;
         std::set<uint8_t> ignore;
         std::set<uint8_t> spaces;      // printed as a single space, e.g. justification padding
@@ -25,7 +32,7 @@ namespace dsk_tools {
     CharmapInfo init_charmap(const std::string & cm_name);
 
     // http://forum.agatcomp.ru//viewtopic.php?id=378
-    extern const std::string agat_charmap[256];
+    extern const charmap_entry_t agat_charmap[256];
 
     // To avoid non-POD static warning
     inline const std::map<std::string, int>& get_reverse_agat_charmap() {
@@ -61,28 +68,28 @@ namespace dsk_tools {
 
     // https://en.wikipedia.org/wiki/Apple_II_character_set
     // https://en.wikipedia.org/wiki/MouseText
-    extern const std::string apple2_charmap[256];
+    extern const charmap_entry_t apple2_charmap[256];
 
 
-    extern const std::string apple2c_charmap[256];
+    extern const charmap_entry_t apple2c_charmap[256];
 
-    extern const std::string ascii_charmap[256];
+    extern const charmap_entry_t ascii_charmap[256];
 
-    extern const std::string koi7_n0_n1_charmap[256];
+    extern const charmap_entry_t koi7_n0_n1_charmap[256];
 
-    extern const std::string koi7_n2_charmap[256];
+    extern const charmap_entry_t koi7_n2_charmap[256];
 
-    extern const std::string koi8_r_charmap[256];
+    extern const charmap_entry_t koi8_r_charmap[256];
 
-    extern const std::string koi8_m_charmap[256];
+    extern const charmap_entry_t koi8_m_charmap[256];
 
     // https://en.wikipedia.org/wiki/Code_page_866
-    extern const std::string cp866_charmap[256];
+    extern const charmap_entry_t cp866_charmap[256];
 
     // https://en.wikipedia.org/wiki/Windows-1251
-    extern const std::string cp1251_charmap[256];
+    extern const charmap_entry_t cp1251_charmap[256];
 
     // https://en.wikipedia.org/wiki/ISO/IEC_8859-5
-    extern const std::string iso8859_5_charmap[256];
+    extern const charmap_entry_t iso8859_5_charmap[256];
 
 }

@@ -299,6 +299,14 @@ struct MapperPage {
     bool                uncached;   //this page needs the full scan under this tag
     bool                timeout_r;  //what no_device becomes when device_r is null
     bool                timeout_w;
+#ifdef ECAT_EMBEDDED
+    //Plain RAM or ROM behind the page: its bytes, read and written without
+    //the virtual call (fill_page(); MemoryMapper::read() and write())
+    uint8_t *           direct_r;
+    uint8_t *           direct_w;
+    unsigned int        direct_r_size;
+    unsigned int        direct_w_size;
+#endif
 };
 
 enum class ROMMode {
@@ -666,6 +674,12 @@ protected:
 
 public:
 #ifdef ECAT_EMBEDDED
+    //Its bytes, for the mapper to read or write without a call: only a plain RAM
+    //or ROM (not a class of its own, which has get_value()/set_value() of its own),
+    //without an access hook, a ROM not streaming. nullptr otherwise
+    uint8_t * direct_buffer(bool write, unsigned int * size);
+#endif
+#ifdef ECAT_EMBEDDED
     bool timeless_access() const override { return true; }
 #endif
     Memory(InterfaceManager *im, EmulatorConfigDevice *cd);
@@ -711,6 +725,9 @@ private:
     std::string m_image;            // the image as the configuration names it
     emulator::Result load_image(const std::string &image);
 public:
+#ifdef ECAT_EMBEDDED
+    bool streaming() const { return rom_mode != ROMMode::Normal; }
+#endif
     ROM(InterfaceManager *im, EmulatorConfigDevice *cd);
     //The image in the socket, as named in the configuration (image, or
     //image_1 for a socket of several): a card may act on which chip it has
@@ -1124,6 +1141,14 @@ private:
     uint64_t page_tag() const { return ((uint64_t)page_generation << 32) | this->i_config.value; }
     void invalidate_pages();
     MapperPage * fill_page(unsigned int page, uint64_t tag);
+#ifdef ECAT_EMBEDDED
+    void fill_direct(MapperPage * e);
+    //The ports, resolved once per configuration as the pages are (read_port(),
+    //write_port()): an 8-bit port space, the scan of the ranges otherwise
+    struct PortEntry { uint64_t tag; AddressableDevice * device; unsigned int address; };
+    PortEntry m_port_cache[2][256];
+    AddressableDevice * port_device(unsigned int a, unsigned int mode, unsigned int * address_on_device);
+#endif
     //The entry for the address under this tag, or nullptr when the page does
     //not resolve uniformly and the caller has to take the long way
     MapperPage * find_page(unsigned int address, uint64_t tag)

@@ -88,6 +88,13 @@ private:
     // строка погашена; для поля text
     unsigned int m_row_addr[25];
     bool m_fl7 = false;             // ФЛ7 при показе последней строки, для поля text
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: the cells each line of the surface was drawn from; a line
+    // whose cells are the same is not drawn again (every line once a second)
+    std::vector<uint16_t> m_drawn;  // HEIGHT x 81: the cells, then the line + 1
+    unsigned m_drawn_frames = 0;
+    void forget_drawn() { std::fill(m_drawn.begin(), m_drawn.end(), (uint16_t)0); }
+#endif
 
 protected:
     void render_all(bool force_render) override;
