@@ -1,0 +1,1344 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Emulator core classes, header
+
+#pragma once
+
+#include "emulator/renderer.h"
+#include <atomic>
+#include <climits>
+#include <functional>
+#include <list>
+#include <memory>
+#include <string>
+#include <vector>
+
+#ifdef RENDERER_SDL2
+    #include <SDL.h>
+#endif
+
+#include "config.h"
+#include "state.h"
+#include "emulator/result.h"
+#include "globals.h"
+#include "thread_compat.h"
+
+#ifdef PROJECT_NAME
+    static_assert(true, "Suppress unused include warning");
+#endif
+
+#define MAX_LINKS               100
+#define MAX_INTERFACES          200
+
+#define MODE_OFF                0
+#define MODE_R                  1
+#define MODE_W                  2
+#define MODE_RW                 MODE_R + MODE_W
+
+//What AddressableDevice::route() answers for an address of a routed range
+#define ROUTE_ANSWER            0
+#define ROUTE_PASS              1
+#define ROUTE_TIMEOUT           2
+#define ROUTE_THROUGH           3
+#define ROUTE_OR                4
+
+#define DEBUG_OFF               0
+#define DEBUG_STOPPED           1
+#define DEBUG_STEP              2
+#define DEBUG_BRAKES            3
+
+//What stopped a processor in DEBUG_BRAKES, see CPU::break_hit
+#define BREAK_NONE              0
+#define BREAK_POINT             1       // a breakpoint of its list
+#define BREAK_TEMP              2       // the debugger's own stop, CPU::set_temp_break()
+
+//The debugger's own stop, see CPU::set_temp_break()
+#define TEMP_NONE               0
+#define TEMP_PC                 1       // at an address
+#define TEMP_RETURN             2       // the stack back at a level: the call has returned (step over)
+#define TEMP_OUT                3       // the stack above a level, by a jump: the routine has returned (step out)
+
+//A register as the debugger shows and edits it. An empty name is the gap
+//between two groups
+struct CpuRegister {
+    std::string name;
+    unsigned int value;
+    unsigned int bits;
+};
+
+#define MM_CONFIG               1
+
+#define SCREEN_RATIO_43         0
+#define SCREEN_RATIO_SQ         1
+#define SCREEN_RATIO_11         2
+
+#define SCREEN_FILTERING_NONE           0
+#define SCREEN_FILTERING_LINEAR         1
+#define SCREEN_FILTERING_ANISOTROPIC    2
+//Scan lines and a mask of a picture tube; the OpenGL renderer only
+#define SCREEN_FILTERING_CRT            3
+//Each texel a flat block, smoothed only at its edge: a shader in OpenGL, an
+//enlargement by whole numbers and a linear rest in SDL2
+#define SCREEN_FILTERING_SHARP          4
+
+#define SCREEN_FILTERING_SOFT_SMOOTH    1
+
+#define MAX_DEVICES 100
+
+// C++11 compatible attribute for unused parameters/variables
+// Supports GCC, Clang (via __attribute__), and MSVC (pragma-based)
+#if defined(__GNUC__) || defined(__clang__)
+    #define MAYBE_UNUSED __attribute__((unused))
+#elif defined(_MSC_VER)
+    // MSVC doesn't support __attribute__, fallback to empty macro
+    // Warnings suppressed via project settings instead
+    #define MAYBE_UNUSED
+#else
+    #define MAYBE_UNUSED
+#endif
+
+class DeviceManager;
+class InterfaceManager;
+class Interface;
+class ComputerDevice;
+class AddressableDevice;
+class MemoryMapper;
+class CPU;
+class DisAsm;
+struct DisasmLine;
+class FDD;
+
+typedef uint8_t ScreenColor[3];
+
+struct SystemData {
+    std::string     system_file;
+    std::string     system_path;
+    std::string     script_path;    //Directory of the running script, empty if none
+    std::string     ext_path;       //Directory of the configuration extension, empty for a plain .cfg
+    std::string     system_type;
+    std::string     system_name;
+    std::string     system_version;
+    std::string     system_charmap;
+    std::string     software_path;
+    std::string     data_path;
+    float           screen_ratio;
+    unsigned int    screen_scale;
+    std::string     allowed_files;
+
+    //Base of the numbers the machine writes without a prefix: the "radix" of
+    //the configuration, which a script can change with the RADIX command. Every
+    //number without a prefix is read in it, so delays, counts and frequencies,
+    //which are not the machine's own values, are written with "_" (decimal)
+    unsigned int    radix = 10;
+
+    //False keeps every sound device from opening an audio device at all. A
+    //machine without a sound card is not an error, but the driver says so on
+    //stderr, and a test run counts any stderr output as a failure.
+    bool            audio_enabled = true;
+
+    //Read-only access to the ini file, installed by the Emulator. Lets a device
+    //resolve a setting on its own, the way the tape recorder looks up the file
+    //format of an image in [TapeFiles].
+    std::function<std::string(const std::string &section, const std::string &ident, const std::string &def)> read_setup;
+};
+
+//typedef void (ComputerDevice::*InterfaceCallbackFunc)(unsigned int, unsigned int);
+using InterfaceCallbackFunc = void (ComputerDevice::*)(unsigned int, unsigned int);
+
+typedef ComputerDevice * (*CreateDeviceFunc)(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+typedef void (*MemoryCallbackFunc)(unsigned int);
+
+struct RegisteredDevice {
+    std::string type;
+    CreateDeviceFunc create_func;
+};
+
+struct LinkedInterface {
+    Interface * i;
+    unsigned int mask;
+    unsigned int shift;
+};
+
+struct LinkData {
+    LinkedInterface s;
+    LinkedInterface d;
+    unsigned int inversion;
+};
+
+struct DeviceDescription {
+    std::unique_ptr<ComputerDevice> device;
+    std::string device_type;
+    std::string device_name;
+
+    // Helper to get raw pointer for non-owning access
+    ComputerDevice* get() const {
+        return device.get();
+    }
+};
+
+struct DeviceOptionValue {
+    unsigned id;
+    std::string title;
+};
+
+#define DEVICE_OPTION_DROPDOWN  0
+#define DEVICE_OPTION_TOGGLE    1   // a button that stays pressed: values 0 (off) and 1 (on)
+
+struct DeviceOption {
+    unsigned id;
+    unsigned type;
+    std::string title;
+    std::string icon;
+    std::vector<DeviceOptionValue> values;
+    unsigned current;               // id of the value the device has now, not necessarily the first
+};
+
+typedef std::vector<DeviceOption> DeviceOptions;
+
+//----------------- Parameters a configuration extension edits -------------//
+//What a device lets the user change through an .ext (the configuration
+//editor of the machine chooser). Described from the config parameters
+//alone: the editor constructs the devices without loading them
+
+#define CONFIG_FIELD_CHOICE     0   // one of values
+#define CONFIG_FIELD_STRING     1   // free text, def when not set (may be empty)
+#define CONFIG_FIELD_FILE       2   // a file name; files is the file dialog filter
+
+struct ConfigFieldValue {
+    std::string value;              // as written in the config
+    std::string title;              // QT_TRANSLATE_NOOP("DeviceOptions", ...)
+};
+
+struct ConfigField {
+    std::string name;               // the device parameter, e.g. "image"
+    std::string title;              // QT_TRANSLATE_NOOP("ConfigFields", ...)
+    unsigned type;
+    std::vector<ConfigFieldValue> values;
+    std::string def;
+    std::string files;
+    bool embeddable = true;         // a file may be stored inside the .ext
+};
+
+typedef std::vector<ConfigField> ConfigFields;
+
+//------------------- Device introspection and control ---------------------//
+// These types back the scripting engine (LOG / COMMAND) and are designed to be
+// reusable by an external driver such as an MCP server: devices describe
+// themselves (get_device_fields / get_device_commands), return raw values
+// (get_field) and accept textual commands (send_command).
+
+// Output settings, controlled by the script command LOGDEFS
+struct LogFormat {
+    unsigned int width;         //8 or 16 - value width in bits
+    unsigned int base;          //2, 8, 10 or 16 - radix used for output
+    LogFormat(): width(8), base(16) {}
+};
+
+struct DeviceFieldInfo {
+    std::string name;           //Field name, as used in LOG device.field
+    std::string description;
+    bool        ranged;         //Accepts an address/index range
+};
+
+struct DeviceCommandInfo {
+    std::string name;           //Command name, as used in COMMAND device.command
+    std::string params;         //Parameter signature, for help and introspection
+    std::string description;
+};
+
+// Raw result of a field read. Devices fill it in, ComputerDevice::log_device()
+// turns it into text, so formatting exists in exactly one place.
+struct DeviceFieldValue {
+    bool                        numeric;    //false: use text as is
+    bool                        has_start;  //true: print the "start:" prefix
+    unsigned int                start;      //Address/index of the first value
+    std::vector<unsigned int>   values;
+    std::string                 text;
+    //Width in bits of the values. 0 means the width set by LOGDEFS. Fields that
+    //are inherently wider than a byte, such as a program counter, set it
+    //explicitly so that LOGDEFS 8 does not truncate them.
+    unsigned int                width;
+    DeviceFieldValue(): numeric(false), has_start(false), start(0), width(0) {}
+};
+
+struct MapperRange {
+    unsigned int        config_mask;		//AND-маска, которая накладывается на значение порта конфигурации
+    unsigned int        config_value;		//Число, с которым сравнивается значение порта после маски
+    unsigned int        range_begin;		//Адрес начала диапазона
+    unsigned int        range_end;      	//Адрес конца диапазона
+    unsigned int        address_mask;		//AND-маска, которая накладывается на адрес
+    unsigned int        address_value;		//Число, с которым сравнивается адрес после маски
+    //Already downcast: map() is on the path of every byte the CPU reads, and a
+    //dynamic_cast there walks the class hierarchy on each of them
+    AddressableDevice * device;             //Устройство, соответствующее наложенным условиям
+    unsigned int        base;				//Адрес во внутр. адр. пр-ве устройства, соотв. range_begin системы
+    unsigned int        mode;				//Режим допустимости чтения-записи для устройства
+    bool                strict;             //Обращение другого режима остается без ответа (таймаут магистрали)
+    bool                through;            //Запись идет дальше, к следующим подходящим диапазонам
+    //Чтение идет дальше, а результаты объединяются по ИЛИ: на шине отвечают
+    //сразу несколько устройств. Так устроены окна УК-НЦ (регистр 177054), где
+    //ПЗУ и ОЗУ отдают данные одновременно
+    bool                or_read;
+    //Устройство само решает по каждому адресу, отвечает ли оно (route()):
+    //плата, которая по режиму перекрывает или отключает память машины
+    bool                routed;
+};
+
+//One page of the address space as it resolves under one configuration. The
+//value of the config lines is part of the tag, so a configuration change
+//invalidates nothing: the tags simply stop matching, and match again when the
+//configuration comes back. See MemoryMapper::fill_page() for when a page may
+//be resolved this way at all
+struct MapperPage {
+    uint64_t            tag;        //(generation << 32) | config value; 0 is empty
+    AddressableDevice * device_r;   //nullptr: nothing answers a read here
+    AddressableDevice * device_w;   //nullptr: nothing answers a write here
+    unsigned int        offset;     //address_on_device == address + offset
+    bool                uncached;   //this page needs the full scan under this tag
+    bool                timeout_r;  //what no_device becomes when device_r is null
+    bool                timeout_w;
+};
+
+enum class ROMMode {
+    Normal,
+    Stream
+};
+
+class ComputerDevice
+{
+public:
+    std::string type;
+    std::string name;
+    std::string device_class;
+    unsigned int reset_priority;
+
+    //Something the guest asked for that this device does not model, counted
+    //and remembered instead of stopping the machine: the fields "unsupported"
+    //and "unsupported_last" show it to a script or an MCP client.
+    //DeviceManager::error() stays for faults of the emulator itself
+    void note_unsupported(const std::string &what);
+    unsigned int unsupported_count() const { return m_unsupported; }
+
+    ComputerDevice(InterfaceManager *im, EmulatorConfigDevice *cd);
+    virtual ~ComputerDevice() = default;
+    virtual void reset(bool cold);
+    virtual emulator::Result load_config(SystemData *sd);
+    virtual void clock(unsigned int counter);
+    virtual void system_clock(unsigned int counter);
+    //Clocks of its domain until this device may next change a line by itself
+    //(a frame interrupt), counted from where clock() left it; UINT_MAX when it
+    //does not know. A processor idling in WAIT steps no further than that, so
+    //it sees the interrupt on the clock it came, not up to a step later. Only
+    //asked of a device clocked 1:1 (DeviceManager::clocks_to_event())
+    virtual unsigned int clocks_to_event() const { return UINT_MAX; }
+    //True for a class whose clocks_to_event() ever answers: only those are
+    //asked, on every idle step of a WAIT
+    virtual bool has_clock_events() const { return false; }
+    //Whether clocking this device does anything at all - see m_clocked
+    bool is_clocked() const { return m_clocked; }
+    //True for a class with a system_clock() of its own. The others count in
+    //the domain's cycles when their clock ratio is 1:1, and DeviceManager then
+    //calls clock() straight away: two virtual calls per device per instruction
+    //were one too many for what system_clock() does in that case - nothing
+    virtual bool own_system_clock() const { return false; }
+    bool clock_ratio_one() const { return clock_miltiplier == clock_divider; }
+
+    //The processor whose clock this device counts in, set by load_config()
+    //from the clock_source parameter. Null on a processor itself
+    CPU * get_clock_source() const { return cpu; }
+
+    virtual DeviceOptions get_device_options();
+    virtual void set_device_option(unsigned option_id, unsigned value_id);
+
+    //Parameters the configuration editor offers for this device. Read from
+    //cd only: it is called on a device that was constructed but never loaded
+    virtual ConfigFields get_config_fields();
+
+    //--------------------- Introspection and control ----------------------//
+    //Self-description, used by docs/SCRIPTING.md, the script engine and any
+    //external driver that needs to discover what a device offers
+    virtual std::vector<DeviceFieldInfo> get_device_fields();
+    virtual std::vector<DeviceCommandInfo> get_device_commands();
+
+    //Raw read of a device property. Returns false if the field is unknown.
+    virtual bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out);
+
+    //Formats the result of get_field(). Not virtual on purpose - formatting is
+    //implemented once for every device.
+    std::string log_device(const std::string &field, std::pair<unsigned int, unsigned int> range, const LogFormat &fmt);
+
+    //Performs an action on the device. Parameters are a raw comma separated list.
+    virtual emulator::Result send_command(const std::string &command, const std::string &parameters);
+
+    //-------------------------- Saved state -------------------------------//
+    //Everything about this device that a cold start does not reproduce, so
+    //that a machine restored from a snapshot cannot tell it was restarted.
+    //Every override calls its base class first - the base writes the lines of
+    //the device and its fractional clock, so no device does that itself
+    virtual void save_state(StateWriter &w);
+    //Read back after reset(true). The base restores the lines of this device
+    //first, so an override must neither depend on the value of an interface
+    //nor drive one: Interface::change() would cascade into devices that have
+    //not been restored yet. Assign members, nothing else. A key that is not
+    //in the file leaves the value alone: the device keeps what the reset gave
+    //it, which is how a snapshot of an older build still loads
+    virtual emulator::Result load_state(const StateReader &r);
+    //Once, after every device and every line has been restored. Caches that
+    //depend on a line or on another device's buffer are rebuilt here
+    virtual void state_restored() {}
+
+    //True for a configuration parameter naming a medium whose contents this
+    //device writes into the state itself - a disk image, a tape. The snapshot
+    //takes what is in the drive now, the machine's own writes included, and
+    //the parameter is dropped from the configuration it carries, so that
+    //opening the state does not send the device back to a file on disk that
+    //has meanwhile moved, changed or never had those writes at all
+    virtual bool state_owns_file(const std::string &parameter) const
+        { (void)parameter; return false; }
+
+    virtual void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value);
+    virtual void memory_callback(unsigned int callback_id, unsigned int address);
+    bool belongs_to_class(const std::string &class_to_check);
+    bool get_reset_behavior(bool is_cold);
+
+
+    //Base for the machine values of a device command: addresses and register
+    //contents. A script may have changed it with RADIX, so it is read every
+    //time instead of being cached
+    unsigned int radix() const { return (sd != nullptr)?sd->radix:10; }
+
+    //A parameter of this device's configuration as it is written, empty when
+    //there is none - for another device that reads it, as a connector reads
+    //the "title" of the devices in its list
+    std::string config_parameter(const std::string &parameter) const;
+
+protected:
+    SystemData * sd = nullptr;      //Stored by load_config(), used to locate files
+    unsigned int clock_miltiplier;
+    unsigned int clock_divider;
+    CPU * cpu = nullptr;
+    uint32_t m_system_clock = 0;
+    //Set by the constructor of every class that overrides clock() (or
+    //system_clock()). DeviceManager::clock() runs once per instruction and
+    //used to call through to RAM, ROM, ports and registers as well, where the
+    //call lands in an empty ComputerDevice::clock()
+    bool m_clocked = false;
+
+    unsigned int clock_stored;
+
+    //Makes 'line' follow the output of a port another device names by
+    //parameter, as a "~line = port.value" in the configuration would: the
+    //port calls this device back on every write instead of this device
+    //reading the port on every instruction. False when the port can also
+    //change without a write - a ~data (input) or ~reset line wired to it
+    //assigns the value without driving it out - and the caller has to keep
+    //polling
+    bool follow_port(Interface &line, const std::string &port_name);
+
+    EmulatorConfigDevice * cd;
+    InterfaceManager * im;
+    ComputerDevice * memory_callback_device;
+
+private:
+    bool m_cold_reset = true;
+    bool m_soft_reset = true;
+    unsigned int m_unsupported = 0;
+    std::string m_unsupported_last;
+};
+
+//How a memory answers a bus cycle whose processor times every cycle it runs
+//(К1801ВМ1 with timing = vm1). A device that names no bus-timing device
+//answers at once. The БК dynamic RAM sits behind the ВП1-037, which takes a
+//request only at one moment of its own 1333 ns cycle, and only when the strobe
+//came early enough before it; the reply follows a fixed delay later. All in
+//ns, the processor converts them into its own clock. See vm1_timing.h
+struct BusReply {
+    unsigned int window_ns = 0;     //period of the points a request is taken at, 0: no window
+    unsigned int setup_read_ns = 0; //how early DIN must be before such a point
+    unsigned int setup_write_ns = 0;//the same for DOUT of a write
+    unsigned int setup_rmw_ns = 0;  //the same for DOUT of the write half of a read-modify-write
+    unsigned int reply_ns = 0;      //from the point to RPLY
+    unsigned int rmw_extra = 0;     //half clocks a fast memory adds to the write half of a read-modify-write
+    //How much later than the processor's time 0 the points come: the phase the
+    //dividers of the processor clock and of the controller took at power-on
+    unsigned int phase_ns = 0;
+};
+
+//A device that holds the processor up on the memory it shares with it: the
+//video of the Поиск-1 fetches from the main RAM, and a processor cycle there
+//waits for a free slot. A processor that counts wait states (i8088) asks it
+//after every memory cycle; a memory names it with "wait = <device>". offset
+//is the T1 of the cycle, in processor clocks after the point up to which the
+//devices have been clocked: the device knows where its beam is at that point.
+//A 1801 processor under timing = legacy (the КЦГД) asks the same way, but
+//offset is the moment of its data strobe and the answer is the whole time
+//until RPLY, which replaces reply_delay for that cycle; 0 keeps reply_delay
+class WaitSource
+{
+public:
+    virtual ~WaitSource() {}
+    virtual unsigned int wait_states(unsigned int address, bool write, unsigned int offset) = 0;
+    //The same with what kind of cycle it is, for a memory that times them apart
+    //(the УК-НЦ plane 0 writes a byte in one access and a word in two, and the
+    //write half of a read-modify-write is shorter than a write of its own).
+    //Only timing = vm2 tells more than WAIT_WRITE; the default ignores the rest
+    enum { WAIT_WRITE = 1, WAIT_BYTE = 2, WAIT_RMW = 4 };
+    virtual unsigned int wait_cycle(unsigned int address, unsigned int flags, unsigned int offset)
+        { return wait_states(address, (flags & WAIT_WRITE) != 0, offset); }
+};
+
+class AddressableDevice: public ComputerDevice
+{
+protected:
+    bool can_read;
+    bool can_write;
+    unsigned int addresable_size;
+public:
+    //Null for a memory nobody contends for. Set by load_bus_reply() from the
+    //parameter "wait"
+    WaitSource * wait_source = nullptr;
+    //Null for a device that answers at once, see BusReply. Set by
+    //load_bus_reply() from the bus-timing device the parameter "bus_timing" names;
+    //ComputerDevice::load_config() calls it
+    const BusReply * bus_reply = nullptr;
+    emulator::Result load_bus_reply();
+    AddressableDevice(InterfaceManager *im, EmulatorConfigDevice *cd):
+        ComputerDevice(im, cd),
+        addresable_size(0),
+        can_read(false),
+        can_write(false){};
+
+    virtual unsigned get_value(unsigned address) = 0;
+    virtual unsigned get_direct(unsigned address);
+    virtual void set_value(unsigned int address, unsigned int value, bool force=false) = 0;
+    //Not virtual: no device has ever answered anything but its own size, and
+    //Memory::get_value() asks on every byte the CPU reads
+    unsigned int get_size() { return addresable_size; }
+
+    // 16-bit (word) access, used by CPUs with a word-oriented bus (PDP-11 family).
+    // The default implementation composes a word out of two byte accesses in
+    // little-endian order, which reproduces the plain byte behaviour exactly.
+    // Devices holding true 16-bit registers override these to stay atomic.
+    virtual unsigned int get_value_word(unsigned int address);
+    virtual void set_value_word(unsigned int address, unsigned int value, bool force=false);
+
+    //A device on the low byte of a 1801 bus that decodes A0 itself (an 8-bit
+    //Intel peripheral): a word cycle at its odd address reaches the register
+    //at that address, see MemoryMapper::read_word_odd()
+    virtual bool byte_wide() const { return false; }
+
+    //A cell of memory at this address, which the debugger's dump may change
+    //with set_value(force): the byte is stored and nothing else happens. A
+    //register is not: its write acts (a DL11 sends the byte, a channel starts),
+    //and the dump only shows it. Memories and the windows into them say true
+    virtual bool debug_writable(MAYBE_UNUSED unsigned int address) const { return false; }
+
+    //Asked by the mapper for a range marked "routed = 1", before the access and
+    //with the same address the device would get: does this device answer here
+    //(ROUTE_ANSWER), leave the address to the ranges after it (ROUTE_PASS),
+    //hold the bus without an answer (ROUTE_TIMEOUT), or answer a write and let
+    //it go on to the ranges after it as well (ROUTE_THROUGH), or answer a read
+    //wired together with the ranges after it, OR-ed like "or_read" (ROUTE_OR).
+    //A board that
+    //switches parts of the machine's own memory off, like the СМК of the БК,
+    //decides this by its mode. Must be free of side effects: the debugger and
+    //the bus timing ask too
+    virtual unsigned int route(unsigned int address, unsigned int mode) { (void)address; (void)mode; return ROUTE_ANSWER; }
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+class Interface
+{
+private:
+    unsigned int size;
+    unsigned int mode;
+    unsigned int old_value;
+    unsigned int edge_value;
+    InterfaceManager *im;
+#ifdef ECAT_EMBEDDED
+    //frank-ecat: grows link by link. A fixed MAX_LINKS table is 4 KB per line
+    //(a LinkData is 40 bytes), most of the RAM of a microcontroller machine
+    std::vector<LinkData> linked_interfaces;
+#else
+    LinkData linked_interfaces[MAX_LINKS];
+#endif
+    unsigned int callback_id;
+public:
+    unsigned int value;
+    unsigned int mask;
+    std::string name;
+    unsigned int linked;
+    unsigned int linked_bits;
+    ComputerDevice *device;
+
+    Interface(
+        ComputerDevice * device,
+        InterfaceManager * im,
+        unsigned int size,
+        const std::string &name,
+        unsigned int mode,
+        unsigned int callback_id = 0
+        );
+
+    //False when either end has no room for another link (MAX_LINKS); the
+    //link is then not made at all
+    bool connect(LinkedInterface s, LinkedInterface d, bool invert=false);
+    unsigned int get_size();
+    void set_size(unsigned int new_size);
+    void set_mode(unsigned int new_mode);
+    unsigned int get_mode();
+    void change(unsigned int new_value); //Вызывается устройством для изменения выхода
+    //Taken by reference: a LinkData is 40 bytes, and this is called for
+    //every link of every interface on every change
+    void changed(const LinkData &link, unsigned int value); //Вызывается связанными интерфейсами при изменении значения на них
+    void clear();
+    bool pos_edge(); //Триггеры фронтов для 0-го бита
+    bool neg_edge();
+    void pull(unsigned int new_value);
+
+    //---------------------------- Saved state -----------------------------//
+    //Everything about a line that a cold start does not reproduce. The
+    //topology (links, mask, size) comes from the configuration and is rebuilt
+    //by ComputerDevice::load_config(), but the value, the edge triggers and a
+    //mode the device changed at run time do not
+    void snapshot(unsigned int &v, unsigned int &old_v, unsigned int &edge_v, unsigned int &m) const
+        { v = value; old_v = old_value; edge_v = edge_value; m = mode; }
+    //A plain assignment: not change(), which would cascade through every
+    //linked interface and fire callbacks on half restored devices, and not
+    //set_mode(), which replays the writers of a line it switches to reading
+    void restore(unsigned int v, unsigned int old_v, unsigned int edge_v, unsigned int m)
+        { value = v; old_value = old_v; edge_value = edge_v; mode = m; }
+};
+
+class Memory: public AddressableDevice
+{
+protected:
+    bool auto_output;
+    Interface i_address;
+    Interface i_data;
+    std::vector<uint8_t> buffer;
+    unsigned short fill;
+    bool random_fill;
+    unsigned int read_callback;
+    unsigned int write_callback;
+
+public:
+    Memory(InterfaceManager *im, EmulatorConfigDevice *cd);
+    ~Memory() override;
+    void set_size(unsigned int value);
+    unsigned get_value(unsigned int address) override;
+    unsigned get_direct(unsigned int address) override;
+    void set_memory_callback(ComputerDevice * d, unsigned int callback_id, unsigned int mode);
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    bool debug_writable(MAYBE_UNUSED unsigned int address) const override { return true; }
+    virtual uint8_t * get_buffer();
+    //No access hook and both directions allowed: the buffer may be read and
+    //written directly, as PlanePair does for the УК-НЦ processor
+    bool is_plain() const { return read_callback == 0 && write_callback == 0 && can_read && can_write; }
+
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+class RAM: public Memory
+{
+public:
+    RAM(InterfaceManager *im, EmulatorConfigDevice *cd);
+    emulator::Result load_config(SystemData *sd) override;
+    void reset(bool cold) override;
+};
+
+class ROM: public Memory
+{
+private:
+    ROMMode rom_mode = ROMMode::Normal;
+    unsigned stream_counter = 0;
+    // partial = 1: образ короче окна - остаток гнёзд пуст и на шине не
+    // отвечает (диапазон в карте помечается routed = 1)
+    bool m_partial = false;
+    unsigned m_image_length = 0;
+    std::string m_image;            // the image as the configuration names it
+    emulator::Result load_image(const std::string &image);
+public:
+    ROM(InterfaceManager *im, EmulatorConfigDevice *cd);
+    //The image in the socket, as named in the configuration (image, or
+    //image_1 for a socket of several): a card may act on which chip it has
+    const std::string & image_name() const { return m_image; }
+    emulator::Result load_config(SystemData *sd) override;
+    ConfigFields get_config_fields() override;
+    unsigned int route(unsigned int address, unsigned int mode) override;
+    unsigned get_value(unsigned int address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+
+    //Deliberately not Memory's: the contents come back from the image, which
+    //a saved state carries as a file of its own. Only the read pointer of a
+    //stream ROM is state
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+class Port:public AddressableDevice
+{
+protected:
+    unsigned int size;
+    unsigned int flip_mask;
+    unsigned int mask;
+    unsigned int constant_value;
+    bool has_constant_return;
+    bool access_on_read = true;
+    bool access_on_write = true;
+
+    unsigned int value;
+    unsigned int default_value;
+
+    // A second bank of the same register, selected by a bit of the value being
+    // written. Disabled while alt_bit is negative.
+    int alt_bit;
+    unsigned int alt_value;
+    unsigned int alt_default;
+
+    Interface i_input;
+    Interface i_data;
+    Interface i_access;
+    Interface i_flip;
+    Interface i_reset;
+    Interface i_alt;
+
+protected:
+    // Whole-register access, bypassing the byte lane selection done by
+    // get_value()/set_value() on ports wider than 8 bits.
+    unsigned int read_register();
+    void write_register(unsigned int new_value);
+
+public:
+    unsigned get_direct(unsigned address) override;
+    // What get_direct() returns, without the virtual call: for a device that
+    // looks at the register after every instruction (the БК raster)
+    unsigned int stored_value() const { return value; }
+    unsigned int get_value(unsigned address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    unsigned int get_value_word(unsigned int address) override;
+    void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
+
+    Port(InterfaceManager *im, EmulatorConfigDevice *cd);
+    emulator::Result load_config(SystemData *sd) override;
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+    void reset(bool cold) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+class PortAddress:public Port
+{
+protected:
+    bool store_on_read = false;
+public:
+    PortAddress(InterfaceManager *im, EmulatorConfigDevice *cd);
+    emulator::Result load_config(SystemData *sd) override;
+    unsigned int get_value(unsigned int address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    unsigned int get_value_word(unsigned int address) override;
+    void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
+    void reset(bool cold) override;
+};
+
+class DeviceManager
+{
+public:
+    DeviceManager();
+    ~DeviceManager();
+
+    unsigned int device_count;
+    ComputerDevice *error_device;
+    std::string error_message;
+    //Set by error(), cleared by whoever acts on it (Emulator::timer_proc stops
+    //the machine). The device and the message stay for the GUI to show
+    bool error_pending;
+
+    emulator::Result add_device(InterfaceManager *im, EmulatorConfigDevice *d); //
+    void clear(); //
+    emulator::Result load_devices_config(SystemData *sd); //
+    ComputerDevice *get_device_by_name(const std::string &name, bool required=true); //
+    unsigned int get_device_index(const std::string &name);
+    std::vector<ComputerDevice*> find_devices_by_class(const std::string &class_to_find);
+    void reset_devices(bool cold);
+    //Clocks the devices of one clock domain. A machine with a single processor
+    //has exactly one domain, number 0, and this is the old clock(counter)
+    void clock(unsigned int domain, unsigned int counter);
+    //The nearest ComputerDevice::clocks_to_event() among the devices clocked by
+    //this processor, UINT_MAX when none knows one
+    unsigned int clocks_to_event(const CPU * cpu) const;
+    void error(ComputerDevice *d, const std::string &message);
+    void error_clear();
+    DeviceDescription * get_device(unsigned int i); //
+    void register_device(const std::string &device_type, CreateDeviceFunc func); //
+
+    //The processors of the machine, in the order they are declared, with the
+    //one named "cpu" first: that one is the master and its clock is the time
+    //base of the whole machine. Filled by load_devices_config()
+    const std::vector<CPU*> & get_cpus() const { return cpus; }
+
+private:
+    DeviceDescription devices[MAX_DEVICES];
+    //Devices whose clock() does something, by clock domain and in device order,
+    //without the processors. Filled by load_devices_config(), walked once per
+    //instruction of the domain that owns them
+    struct ClockedDevice {
+        ComputerDevice * device;
+        bool direct;        //clock() itself: no divider, no system_clock() of its own
+    };
+    std::vector<std::vector<ClockedDevice>> clocked_devices;
+    //Per domain, the direct devices with has_clock_events()
+    std::vector<std::vector<ComputerDevice*>> event_devices;
+    std::vector<CPU*> cpus;
+    //Every device type the emulator knows. It was an array of 100 once, and
+    //the 101st type wrote past its end
+    std::vector<RegisteredDevice> registered_devices;
+
+};
+
+
+class InterfaceManager
+{
+public:
+    std::vector<Interface*> interfaces;
+    DeviceManager *dm;
+
+
+    InterfaceManager(DeviceManager *dm);
+    ~InterfaceManager();
+
+    void register_interface(Interface *i);
+    Interface * get_interface_by_name(const std::string &device_name, const std::string &interface_name, bool required=true);
+    void clear();
+    void interface_changes(Interface *i);
+
+
+private:
+};
+
+class CPU: public ComputerDevice
+{
+private:
+    std::vector<unsigned int> m_breakpoints;
+    unsigned int m_temp_mode;
+    unsigned int m_temp_pc;
+    unsigned int m_temp_sp;
+    unsigned int m_temp_from;       //PC when the debugger's stop was set
+    unsigned int m_last_pc;         //PC of the instruction just executed, while one is set
+    DisAsm * m_disasm;          //Made on first use, see disasm()
+    bool m_disasm_tried;        //A table that failed to load is not read again
+
+protected:
+    Interface i_address;
+    Interface i_data;
+    bool reset_mode;
+
+    //Cycles a bus master has taken away from the processor and not yet paid
+    //back to the emulator, and the running total of them
+    unsigned int m_hold_cycles;
+    uint64_t m_hold_total;
+
+public:
+    unsigned int clock;
+    MemoryMapper * mm;
+    unsigned int m_debug;
+    //Why the processor stopped itself in DEBUG_BRAKES, BREAK_*. Set by
+    //break_test(), cleared by whoever acts on it (Emulator::timer_proc())
+    unsigned int break_hit;
+
+    CPU(InterfaceManager *im, EmulatorConfigDevice *cd);
+    ~CPU() override;
+
+    emulator::Result load_config(SystemData *sd) override;
+    virtual unsigned int execute() = 0;
+
+    //True when execute() will return 0, i.e. the processor's emulated time
+    //stands still: stopped by the debugger. A processor that spends cycles
+    //even while stopped (a К1801ВМ1 held down by ~dclo) says false then
+    virtual bool frozen() const { return m_debug == DEBUG_STOPPED; }
+
+    //A device that takes the bus away from the processor (the ВТ57 fetching a
+    //character row for the ВГ75) calls hold() with the length of the transfer.
+    //execute() then hands those cycles back to Emulator::timer_proc() instead
+    //of running an instruction, so emulated time and every clocked device move
+    //on while the processor stands still - which is what HOLD/HLDA does.
+    void hold(unsigned int cycles) { m_hold_cycles += cycles; m_hold_total += cycles; }
+    unsigned int take_hold()
+    {
+        //Handed back whole: a burst is one continuous stall on the real bus,
+        //and splitting it would only cost the emulator loop extra passes
+        unsigned int r = m_hold_cycles;
+        m_hold_cycles = 0;
+        return r;
+    }
+    uint64_t hold_total() const { return m_hold_total; }
+    //The window reads the list from its own thread while a script may add to
+    //it: the vector has its room reserved and never grows past it, so a read
+    //sees an old or a new list, never freed memory
+    static const size_t MAX_BREAKPOINTS = 256;
+    bool has_breakpoint(unsigned int address) const;
+    void add_breakpoint(unsigned int address);
+    void remove_breakpoint(unsigned int address);
+    void clear_breakpoints();
+    const std::vector<unsigned int> & get_breakpoints() const { return m_breakpoints; }
+
+    //The debugger's own stop, checked with the breakpoints in DEBUG_BRAKES and
+    //forgotten when it is reached: at pc (TEMP_PC); when the stack pointer is
+    //back at sp or higher, after a return instruction or at pc (TEMP_RETURN:
+    //a call stepped over has returned, wherever to - JSR R5 returns past its
+    //arguments; an interrupt taken before the call returns to it, and a POP
+    //of the routine's own data is not a return); above sp after a return
+    //instruction (TEMP_OUT: the routine has returned). A processor without a
+    //stack pointer stops at pc for TEMP_RETURN. Nothing stops a processor
+    //waiting for an interrupt: its PC is not where it runs yet
+    void set_temp_break(unsigned int mode, unsigned int pc, unsigned int sp);
+    void clear_temp_break() { m_temp_mode = TEMP_NONE; }
+    bool has_temp_break() const { return m_temp_mode != TEMP_NONE; }
+
+    //Called by execute() around each instruction while m_debug is not
+    //DEBUG_OFF: the step ends, a breakpoint stops the processor
+    void debug_before() { if (m_temp_mode >= TEMP_RETURN) m_last_pc = get_pc(); }
+    void debug_after()
+    {
+        if (m_debug == DEBUG_STEP) m_debug = DEBUG_STOPPED;
+        else if (m_debug == DEBUG_BRAKES && break_test()) m_debug = DEBUG_STOPPED;
+    }
+    bool break_test();
+    bool returned();
+    //How far the stack pointer is above the debugger's level, counted in its
+    //own width: negative below it, whichever way the register wrapped
+    int sp_above(unsigned int sp) const;
+    void reset(bool cold) override;
+    virtual unsigned int get_pc() = 0;
+    virtual unsigned int get_command() = 0;
+
+    //Clocks from the start of the instruction just run to the moment its last
+    //write reached the bus, -1 when the processor does not know it. A display
+    //that follows the beam takes a register change from there
+    virtual int last_write_clocks() const { return -1; }
+
+    //The moment of the bus access in progress, in clocks of this processor
+    //since it started: the instructions done plus the bus cycles of the one
+    //being executed, the access included. false when the processor does not
+    //count them. Devices are clocked in batches; one that must see an access
+    //at its own clock (the Disk II sequencer of the Правец, apple2-disk2)
+    //runs itself up to this moment
+    virtual bool bus_time(uint64_t &t) const { (void)t; return false; }
+
+
+    virtual unsigned int read_mem(unsigned int address) = 0;
+    virtual void write_mem(unsigned int address, unsigned int data) = 0;
+
+    //A byte of this processor's address space as the debugger sees it: no bus
+    //cycle, so no strobe, no register cleared by the read, no cancelinit and
+    //no timeout left for the instruction being executed. read_mem() is the
+    //processor's own access and belongs to the emulation thread only
+    //A processor with its own address translation (the КМ1801ВМ3) overrides it
+    virtual unsigned int peek_mem(unsigned int address);
+    //The debugger's write to the same place: MemoryMapper::poke(), with the
+    //processor's own translation. Emulation thread
+    virtual bool poke_mem(unsigned int address, unsigned int value);
+    //Whether poke_mem() stores anything there: memory, not a register
+    virtual bool mem_writable(unsigned int address);
+
+    //The disassembler of this instruction set, for the debugger, which owns it.
+    //By default the table-driven one loaded from data_path + disasm_table(); a
+    //processor whose instructions are bit fields returns its own decoder. A
+    //table that fails to load comes back in res, with the (empty) decoder
+    virtual DisAsm * create_disasm(const std::string &data_path, emulator::Result &res);
+    //The processor's own decoder, for the core's debugging (step over, LOG
+    //cpu.disasm): null when it cannot be made. A window makes its own
+    DisAsm * disasm();
+    //The instruction at an address, read with peek_mem()
+    bool decode_at(unsigned int address, DisasmLine &line);
+    virtual std::string disasm_table() const { return ""; }
+
+    virtual std::vector<std::pair<std::string, std::string>> get_registers() = 0;
+    virtual std::vector<std::pair<std::string, std::string>> get_flags() = 0;
+
+    virtual void set_context_value(const std::string &name, unsigned int value) = 0;
+    //The names set_context_value() takes, for the debugger's register list. By
+    //default the registers get_registers() shows, without the separators, so
+    //every processor must accept each of those names
+    virtual std::vector<std::string> get_context_names();
+
+    //The registers of get_registers() as numbers, read back in the notation
+    //they are written in (register_radix()), as wide as their digits
+    virtual std::vector<CpuRegister> get_register_values();
+    virtual unsigned int register_radix() const { return 16; }
+    //One flag of get_flags(), false when the processor cannot set it
+    virtual bool set_flag(MAYBE_UNUSED const std::string &name, MAYBE_UNUSED bool value) { return false; }
+
+    //The stack for the debugger. The stack pointer register; the address of
+    //entry i, 0 the last one pushed, negative i the free space below it;
+    //the size of an entry. False when the processor has no stack
+    virtual bool get_sp(MAYBE_UNUSED unsigned int &sp) { return false; }
+    virtual bool stack_address(MAYBE_UNUSED int i, MAYBE_UNUSED unsigned int &address) { return false; }
+    virtual unsigned int stack_entry_bytes() const { return 2; }
+    //Width of the stack pointer: the 6502's S is a byte, and a stack that
+    //wraps past $00 is still above its level
+    virtual unsigned int sp_bits() const { return 16; }
+    //The 8051 pushes towards higher addresses: the step over and the step out
+    //measure a return by it
+    virtual bool stack_grows_up() const { return false; }
+    //A byte of the stack at an address of stack_address(): the 8051 keeps its
+    //stack in its own RAM, where peek_mem() does not reach
+    virtual unsigned int stack_peek(unsigned int address) { return peek_mem(address); }
+
+    //Waits for an interrupt (WAIT, HLT): a step goes on until it comes
+    virtual bool waiting() { return false; }
+
+    //Addresses of the last instructions executed, oldest first, for a
+    //processor that keeps them
+    virtual std::vector<unsigned int> get_history() { return std::vector<unsigned int>(); }
+
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+#ifdef ECAT_EMBEDDED
+//frank-ecat: the largest map of the shipped configurations has 36 ranges (УК-НЦ)
+#define MAPPER_MAX_RANGES 48
+#else
+#define MAPPER_MAX_RANGES 100
+#endif
+typedef MapperRange MapperArray[MAPPER_MAX_RANGES];
+
+class MemoryMapper: public AddressableDevice
+{
+private:
+    Interface       i_address;
+    Interface       i_config;
+
+    unsigned int    ranges_count;
+    unsigned int    ports_count;
+    bool            ports_to_mem;
+    unsigned int    ports_mask;
+    unsigned int    first_range;
+    unsigned int    cancel_init_mask;
+    MapperArray     ranges;
+    MapperArray     ports;
+
+    //A page of the address space per entry, filled on the first access and
+    //kept until the map changes. 512 bytes is the largest page that keeps the
+    //УК-НЦ ROM window (ending at 176777) whole and leaves the I/O registers
+    //(177000-177777) in one page of their own
+    //The table covers the address space the parameter address_bits gives (16
+    //by default, 20 for an 8088); an address above it takes the long way
+    enum { MM_PAGE_SHIFT = 9 };
+    std::vector<MapperPage> pages;
+    MapperPage *    m_pages;        //pages.data(), read on every access
+    unsigned int    m_page_count;
+    void            size_pages(unsigned int address_bits);
+    //Bumped by everything that changes the map: loading it, a reset and the
+    //cancelinit flip. Anything else that ever touches ranges[] or first_range
+    //has to bump it too
+    uint32_t        page_generation;
+
+    uint64_t page_tag() const { return ((uint64_t)page_generation << 32) | this->i_config.value; }
+    void invalidate_pages();
+    MapperPage * fill_page(unsigned int page, uint64_t tag);
+    //The entry for the address under this tag, or nullptr when the page does
+    //not resolve uniformly and the caller has to take the long way
+    MapperPage * find_page(unsigned int address, uint64_t tag)
+    {
+        const unsigned int page = address >> MM_PAGE_SHIFT;
+        if (page >= m_page_count) return nullptr;
+        MapperPage * e = &this->m_pages[page];
+        if (e->tag != tag) return fill_page(page, tag);
+        return e->uncached? nullptr : e;
+    }
+
+    AddressableDevice * map(
+        MapperArray * map_ranges,
+        unsigned int index_from,
+        unsigned int index_to,
+        unsigned int config,
+        unsigned int address,
+        unsigned int mode,
+        unsigned int * address_on_device,
+        unsigned int * range_index,
+        unsigned int * route = nullptr
+        );
+
+    // Where a write to the address read last goes. The read scan finds it for
+    // free when the range that answers the read takes writes too and no range
+    // before it matched the address in the other mode only - then it is also
+    // the first range a write would find. A read-modify-write instruction (INC,
+    // BIS, MOVB on a 1801) writes right back to where it read, and skips the
+    // second scan. The mapping depends only on the address, the config lines
+    // and first_range, so an entry never goes stale; it is simply overwritten
+    unsigned int        wm_address = ~0u;
+    unsigned int        wm_config = 0;
+    unsigned int        wm_first = 0;
+    AddressableDevice * wm_device = nullptr;
+    unsigned int        wm_offset = 0;
+    unsigned int        wm_range = 0;
+    AddressableDevice * map_read(unsigned int address, unsigned int * address_on_device, unsigned int * range_index, unsigned int * route = nullptr);
+    AddressableDevice * map_write(unsigned int address, unsigned int * address_on_device, unsigned int * range_index, unsigned int * route = nullptr);
+
+protected:
+
+public:
+    // Set by the last access when no device at all is mapped at that address.
+    // Machines whose bus reports a timeout use it to raise an exception, so a
+    // read-only range answering a write does not count as a missing device.
+    bool no_device = false;
+    // The device that answered the last access, null when none did. A
+    // processor that times its bus cycles asks it how it replies. Meaningful
+    // on the emulation thread only: a debugger window reading memory through
+    // read() from the GUI thread overwrites it (as it does no_device), which
+    // can hand one cycle a wrong reply while the machine runs
+    AddressableDevice * last_device = nullptr;
+    // The device a read of the address would reach, without touching it or
+    // anything else (no cancelinit flip): the timing of a prefetch the
+    // emulator does not perform
+    AddressableDevice * peek_read_device(unsigned int address);
+    // The device that answers a read of the address and the address on it,
+    // for the debugger: whoever is seen there. Null when nothing is mapped
+    AddressableDevice * peek_owner(unsigned int address, unsigned int &offset);
+    // The same in the ranges after the first range of the device covering the
+    // address, whatever that device routes it now: what a board leaves the
+    // address to when it does not answer it itself
+    AddressableDevice * peek_owner_below(AddressableDevice * above, unsigned int address, unsigned int &offset);
+    // What the debugger writes: the byte goes to the device peek_owner()
+    // finds, with force (a ROM takes it), and no bus cycle. Only to memory
+    // (AddressableDevice::debug_writable()): a register would act on it as on
+    // the processor's write. A memory a write would reach under it (RAM below
+    // a ROM) gets it too. False when no memory takes it
+    bool poke(unsigned int address, unsigned int value);
+    // Whether poke() stores anything at the address
+    bool writable(unsigned int address);
+
+    MemoryMapper(InterfaceManager *im, EmulatorConfigDevice *cd);
+    virtual emulator::Result load_config(SystemData *sd) override;
+    virtual void reset(bool cold) override;
+
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+    //The page cache and the write memo describe the map as it was before the
+    //restore. page_generation is deliberately not restored: a tag of the run
+    //the snapshot was taken in could match one of this run by accident
+    void state_restored() override;
+
+    bool responds(unsigned int address, unsigned int mode = MODE_RW);
+    bool goes_through(unsigned int range_index, unsigned int route) const;
+    bool reads_on(unsigned int range_index, unsigned int route) const;
+
+    //A routed device (AddressableDevice::route()) whose answers have changed -
+    //the СМК-512 switching its mode - drops the resolved pages, which are then
+    //resolved again through route() on their next access
+    void routing_changed() { invalidate_pages(); }
+    unsigned int read(unsigned int address);
+    void write(unsigned int address, unsigned int value);
+    unsigned int read_port(unsigned int address);
+    void write_port(unsigned int address, unsigned int value);
+
+    // Word access for word-oriented CPUs. The range is resolved once and the
+    // whole word is handed to the mapped device, so 16-bit registers stay atomic.
+    unsigned int read_word(unsigned int address);
+    void write_word(unsigned int address, unsigned int value);
+    // A word cycle of a 1801 processor at an odd address: the word at the even
+    // address, unless a byte-wide device answers there (see the definition)
+    unsigned int read_word_odd(unsigned int address);
+    void write_word_odd(unsigned int address, unsigned int value);
+
+    AddressableDevice * map_memory(
+        unsigned int config,
+        unsigned int address,
+        unsigned int mode,
+        unsigned int * address_on_device,
+        unsigned int * range_index
+        );
+
+    AddressableDevice * map_port(
+        unsigned int config,
+        unsigned int address,
+        unsigned int mode,
+        unsigned int * address_on_device,
+        unsigned int * range_index
+        );
+
+    //These functions are needed to use the MM as an addressable device
+    virtual unsigned int get_value(unsigned int address) override;
+    //What the debugger and LOG see: the mapped device's own get_direct, with
+    //no bus side effects (a register that clears on read, cancelinit)
+    unsigned get_direct(unsigned address) override;
+    virtual void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    virtual unsigned int get_value_word(unsigned int address) override;
+    virtual void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+};
+
+class GenericDisplay: public ComputerDevice
+{
+private:
+protected:
+    unsigned int sx = 0;
+    unsigned int sy;
+    int line_bytes;
+    // SURFACE * surface;
+    bool screen_valid;              //Means surface is correct
+    void * render_pixels;
+    VideoRenderer * renderer = nullptr;
+    bool m_renderer_valid;
+    compat_mutex m_surface_mutex;   // Guards render_pixels against concurrent resize
+
+    //The high precision mode: the picture follows the beam within a line
+    //rather than being laid out a line at a time. Set by a subclass that has
+    //it, in its constructor
+    bool m_precise_available = false;
+    bool m_precise = false;         //Asked for; a raster display takes it up at the next line
+
+    virtual void render_all(bool force_render = false) = 0;
+
+    //The rate a/b as the reduced fraction native_frame_rate() answers with
+    static bool reduced_rate(uint64_t a, uint64_t b, uint64_t &num, uint64_t &den);
+
+    //Called by a display at the end of the picture of every frame, on the
+    //emulation thread and outside the surface lock
+    void frame_complete()
+    {
+        m_frames_done.fetch_add(1, std::memory_order_release);
+        compat_event * event = m_frame_event.load(std::memory_order_acquire);
+        if (event) event->set();
+        if (m_frame_hook) m_frame_hook();
+    }
+
+private:
+    std::function<void()> m_frame_hook;
+    std::atomic<unsigned> m_frames_done{0};
+    //Set by the render thread, read by the emulation thread
+    std::atomic<compat_event *> m_frame_event{nullptr};
+
+public:
+    //Frames reported whole by frame_complete(): the render thread shows a
+    //frame when this moves, woken by the event it set here
+    unsigned frames_done() const { return m_frames_done.load(std::memory_order_acquire); }
+    void set_frame_event(compat_event * event) { m_frame_event.store(event, std::memory_order_release); }
+    //Whether the display reports its frames through frame_complete(). For one
+    //that does not (no raster in the model: the Орион, the Ириша) the
+    //emulator reports a frame every 20 ms of the machine's time, so that the
+    //render thread shows it on the machine's schedule, not the host's tick
+    virtual bool own_frames() const { return false; }
+    //Called by the emulator for a display that has no frames of its own
+    void machine_frame() { frame_complete(); }
+    bool was_updated;               //Means we need to send surface to screen
+
+    //The frame rate of the machine as an exact fraction, for a display that
+    //also reports the end of each frame through frame_complete()
+    virtual bool native_frame_rate(uint64_t &, uint64_t &) { return false; }
+    //Set and cleared on the emulation thread only (through Emulator::invoke)
+    void set_frame_hook(const std::function<void()> &hook) { m_frame_hook = hook; }
+
+    GenericDisplay(InterfaceManager *im, EmulatorConfigDevice *cd);
+    virtual void get_screen_constraints(unsigned int * sx, unsigned int * sy) = 0;
+    //How many lines the beam draws in a frame: a display that doubles its
+    //lines in the surface (the Агат in 512 mode, the КЦГД)
+    //answers less than sy. The tube look of the renderer draws this many
+    virtual unsigned int get_scan_lines() { return sy; }
+    virtual void reset(bool cold) override;
+    virtual void set_renderer(VideoRenderer &vr);
+    virtual void validate(bool force_render = false);
+
+    //A display that paints on every write to its video memory - the Орион,
+    //the Ириша - has a surface holding what the run that took the snapshot
+    //drew. The video memory has just been replaced under it, so the whole
+    //picture is laid out again from what is there now
+    void state_restored() override;
+    virtual void change_resolution(unsigned new_x, unsigned new_y);
+    virtual bool has_valid_renderer();
+    void lock_surface();
+    void unlock_surface();
+
+    bool precise_available() const { return m_precise_available; }
+    bool precise() const { return m_precise; }
+    //On the emulation thread (a window goes through Emulator::invoke). Not
+    //saved state: a setting of the frontend, like the speed
+    void set_precise(bool on) { m_precise = on && m_precise_available; }
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+class FDC: public AddressableDevice
+{
+public:
+    FDC(InterfaceManager *im, EmulatorConfigDevice *cd):AddressableDevice(im, cd){}
+    virtual bool get_busy() = 0;
+    virtual unsigned int get_selected_drive() = 0;
+
+    //Every controller can answer these two, so they are asked here once
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+
+protected:
+    //The "drives" parameter, "fdd0|fdd1": the drives this controller selects,
+    //from min to max of them, each one an fdd device. Written once here: five
+    //controllers used to parse it, and only one of them checked the count or
+    //the type - a third drive wrote past an array, a typo crashed on the first
+    //command. Defined in fdd.cpp, beside the class it returns
+    emulator::Result load_drives(unsigned int min, unsigned int max, std::vector<FDD*> &drives);
+};
+
+//----------------------- Creation functions -------------------------------//
+
+ComputerDevice * create_ram(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+//The memory controller of a machine as a processor that times its bus cycles
+//sees it (see BusReply). A device answers through it when its "bus_timing" parameter
+//names it; one controller serves every RAM chip behind it, as the ВП1-037 does
+class BusTiming: public ComputerDevice
+{
+public:
+    BusReply reply;
+    BusTiming(InterfaceManager *im, EmulatorConfigDevice *cd);
+    emulator::Result load_config(SystemData *sd) override;
+    void reset(bool cold) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    ConfigFields get_config_fields() override;
+private:
+    //The power-on variant and the ns between two of them, counted from the
+    //points at m_phase_offset ns of variant 0. With phase = random
+    //every cold reset (power-on) draws one of m_phases, as the dividers do
+    unsigned int m_phase = 0;
+    unsigned int m_phase_step = 0;
+    unsigned int m_phase_offset = 0;
+    bool m_phase_random = false;
+    std::vector<unsigned int> m_phases;
+    void set_phase(unsigned int phase);
+};
+ComputerDevice * create_bus_timing(InterfaceManager *im, EmulatorConfigDevice *cd);
+ComputerDevice * create_rom(InterfaceManager *im, EmulatorConfigDevice *cd);
+ComputerDevice * create_memory_mapper(InterfaceManager *im, EmulatorConfigDevice *cd);
+ComputerDevice * create_port(InterfaceManager *im, EmulatorConfigDevice *cd);
+ComputerDevice * create_port_address(InterfaceManager *im, EmulatorConfigDevice *cd);

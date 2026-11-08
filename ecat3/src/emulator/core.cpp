@@ -1,0 +1,3395 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Emulator core classes, source
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include "dsk_tools/core.h"
+// MSVC resolves the "utils.h" inside dsk_tools.h against the includer's directory,
+// where it finds emulator/utils.h. Pull in the real one explicitly.
+#include "libs/dsk_tools/src/utils.h"
+
+#ifdef RENDERER_SDL2
+    #include <SDL.h>
+#endif
+
+#include "core.h"
+#include "disasm.h"
+#include "emulator/utils.h"
+
+#define PORT_FLIP  1
+#define PORT_RESET 2
+#define PORT_INPUT 3
+
+//----------------------- class Interface -------------------------------//
+
+Interface::Interface(
+    ComputerDevice * device,
+    InterfaceManager * im,
+    unsigned int size,
+    const std::string &name,
+    unsigned int mode,
+    unsigned int callback_id
+):
+    size(size),
+    mode(mode),
+    old_value(-1),
+    edge_value(-1),
+    im(im),
+    callback_id(callback_id),
+    value(-1),
+    //Only set_size() used to fill it, so an interface whose size never
+    //changed carried whatever was on the stack. Nothing read it until a saved
+    //state needed the width of a line, and then the same machine wrote
+    //different files on two runs
+    mask(create_mask(size, 0)),
+    name(name),
+    linked(0),
+    linked_bits(0),
+    device(device)
+{
+    im->register_interface(this);
+}
+
+bool Interface::connect(LinkedInterface s, LinkedInterface d, bool invert)
+{
+    int index = -1;
+
+    //The same link seen from the other end stops the recursion below. Two
+    //lines of one pair of interfaces with other bits are two links: the
+    //Поиск-1 takes IR0 and IR6 of its 8259 from outputs 0 and 1 of one timer,
+    //and the second of them used to be dropped here without a word
+    for (unsigned int i=0; i < linked; i++)
+        if (linked_interfaces[i].d.i == d.i
+            && linked_interfaces[i].s.mask == s.mask && linked_interfaces[i].s.shift == s.shift
+            && linked_interfaces[i].d.mask == d.mask && linked_interfaces[i].d.shift == d.shift)
+            index = i;
+
+    if (index < 0)
+    {
+        if (linked >= MAX_LINKS) return false;
+        linked++;
+#ifdef ECAT_EMBEDDED
+        linked_interfaces.push_back(LinkData{s, d, invert?_FFFF:0});
+#else
+        linked_interfaces[linked-1].s = s;
+        linked_interfaces[linked-1].d = d;
+        linked_interfaces[linked-1].inversion = invert?_FFFF:0;
+#endif
+        //The other end has no room: no half of a link is left behind
+        if (!d.i->connect(d, s, invert)) {
+            linked--;
+#ifdef ECAT_EMBEDDED
+            linked_interfaces.pop_back();
+#endif
+            return false;
+        }
+        linked_bits |= s.mask;
+    }
+    return true;
+}
+
+void Interface::set_size(unsigned int new_size)
+{
+    size = new_size;
+    mask = create_mask(new_size, 0);
+}
+
+unsigned int Interface::Interface::get_size()
+{
+    return size;
+}
+
+void Interface::set_mode(unsigned int new_mode)
+{
+    unsigned int prev_mode = mode;
+    mode = new_mode;
+    //Если интерфейс переключился с вывода на ввод, нужно правильно
+    //установить его значение, если оно контролируется другим интерфейсом.
+    //Поэтому просматриваем все соединенные интерфейсы, и если один из них
+    //находится в режиме вывода, то имитируем установку его значения,
+    //чтобы правильно выставились значения на текущем интерфейсе
+    if (new_mode == MODE_R && prev_mode == MODE_W)
+    {
+        for (unsigned int i=0; i<linked; i++)
+        {
+            Interface * li = linked_interfaces[i].d.i;
+            if (li->mode == MODE_W) li->change(li->value);
+        }
+    }
+    if (new_mode == MODE_OFF) change(_FFFF);
+}
+
+unsigned int Interface::get_mode()
+{
+    return mode;
+}
+
+
+void Interface::change(unsigned int new_value)
+{
+    if (mode == MODE_W)
+    {
+        old_value = value;
+        value = new_value;
+        for (unsigned int i=0; i < linked; i++)
+        {
+            linked_interfaces[i].d.i->changed(linked_interfaces[i], new_value ^ linked_interfaces[i].inversion);
+        }
+    } else {
+        if (mode == MODE_OFF)
+        {
+            im->dm->error(device, "Interface '" + name + "' is in OFF state, writing is impossible");
+        }
+    }
+}
+
+void Interface::changed(const LinkData &link, unsigned int value)
+{
+    if (mode == MODE_R)
+    {
+        unsigned int new_value = this->value & ~link.d.mask; //Set expected bits to 0
+        new_value |=  ((value & link.s.mask) >> link.s.shift) << link.d.shift;
+        this->old_value = this->value;
+        this->value = new_value;
+
+        if (callback_id > 0) device->interface_callback(callback_id, new_value, this->old_value);
+    }
+}
+
+void Interface::clear()
+{
+    change(_FFFF);
+}
+
+bool Interface::pos_edge()
+{
+    bool result = ((value & 1) != 0) && ((edge_value & 1) == 0);
+    edge_value = value;
+    return result;
+}
+
+bool Interface::neg_edge()
+{
+    bool result = ((value & 1) == 0) && ((edge_value & 1) != 0);
+    edge_value = value;
+    return result;
+}
+
+void Interface::pull(unsigned int new_value)
+{
+    value = new_value;
+}
+
+//----------------------- class DeviceManager -------------------------------//
+
+DeviceManager::DeviceManager()
+{
+    registered_devices.clear();
+
+    device_count = 0;
+    error_message = "";
+    error_device = nullptr;
+    error_pending = false;
+
+}
+
+DeviceManager::~DeviceManager()
+{
+    clear();
+}
+
+void DeviceManager::clear()
+{
+    clocked_devices.clear();
+    event_devices.clear();
+    cpus.clear();
+
+    for (unsigned int i=0; i < device_count; i++)
+       devices[i].device.reset();  // unique_ptr handles deletion automatically
+
+    device_count = 0;
+
+    //memset(&devices, 0, sizeof(devices));
+}
+
+void DeviceManager::register_device(const std::string &device_type, CreateDeviceFunc func)
+{
+    RegisteredDevice r;
+    r.type = device_type;
+    r.create_func = func;
+    registered_devices.push_back(r);
+}
+
+emulator::Result DeviceManager::add_device(InterfaceManager *im, EmulatorConfigDevice *d)
+{
+    //Devices are kept in the order they are declared. The names "cpu" and
+    //"mapper" used to be forced into slots 0 and 1, which is what made a second
+    //processor impossible - and left a null slot behind whenever a config did
+    //not use both names
+    if (device_count >= MAX_DEVICES)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{DeviceManager|" + std::string(QT_TRANSLATE_NOOP("DeviceManager", "Too many devices")) + "} " + d->name);
+
+    CreateDeviceFunc create_func = nullptr;
+    for (size_t i=0; i < registered_devices.size(); i++)
+
+    {
+        if (registered_devices[i].type == d->type) create_func = registered_devices[i].create_func;
+    }
+
+    if (create_func != nullptr)
+    {
+        //Counted only once it exists: a slot without a device is a null
+        //pointer to everything that walks the list
+        unsigned int index = device_count;
+        devices[index].device_type = d->type;
+        devices[index].device_name = d->name;
+        devices[index].device.reset(create_func(im, d));  // Wrap raw pointer in unique_ptr
+        device_count++;
+    } else
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{DeviceManager|" + std::string(QT_TRANSLATE_NOOP("DeviceManager", "Can't create device")) + "} " + d->name + ":" + d->type);
+
+    return emulator::Result::ok();
+}
+
+DeviceDescription * DeviceManager::get_device(unsigned int i)
+{
+    return &(devices[i]);
+}
+
+emulator::Result DeviceManager::load_devices_config(SystemData *sd)
+{
+    for (unsigned int i=0; i < device_count; i++)
+    {
+        emulator::Result res = get_device(i)->device->load_config(sd);
+        if (!res) return res;
+    }
+
+    //The processors, in declaration order but with the master - the one named
+    //"cpu" - first. Its clock is the time base of the whole machine, so the
+    //order decides which frequency Emulator counts a time slice in
+    cpus.clear();
+    for (unsigned int i=0; i < device_count; i++)
+    {
+        CPU * c = dynamic_cast<CPU*>(devices[i].device.get());
+        if (c == nullptr) continue;
+        if (c->name == "cpu")
+            cpus.insert(cpus.begin(), c);
+        else
+            cpus.push_back(c);
+    }
+
+    if (cpus.empty())
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{DeviceManager|" + std::string(QT_TRANSLATE_NOOP("DeviceManager", "No processor found in config")) + "}");
+
+    //Every clocked device joins the domain of the processor it takes its clock
+    //from (clock_source, "cpu" by default). The processors are not in any of
+    //these lists: Emulator drives them itself
+    clocked_devices.assign(cpus.size(), std::vector<ClockedDevice>());
+    event_devices.assign(cpus.size(), std::vector<ComputerDevice*>());
+    for (unsigned int i=0; i < device_count; i++)
+    {
+        ComputerDevice * d = devices[i].device.get();
+        if (d->belongs_to_class("cpu")) continue;
+        if (!d->is_clocked()) continue;
+
+        size_t domain = 0;
+        for (size_t j=0; j < cpus.size(); j++)
+            if (cpus[j] == d->get_clock_source()) { domain = j; break; }
+
+        ClockedDevice c;
+        c.device = d;
+        c.direct = !d->own_system_clock() && d->clock_ratio_one();
+        clocked_devices[domain].push_back(c);
+        if (c.direct && d->has_clock_events()) event_devices[domain].push_back(d);
+    }
+
+    return emulator::Result::ok();
+}
+
+ComputerDevice * DeviceManager::get_device_by_name(const std::string &name, bool required)
+{
+    for (unsigned int i=0; i < device_count; i++)
+    {
+        if (devices[i].device->name == name) return devices[i].device.get();
+    }
+    if (required)
+        throw std::runtime_error("Device not found: " + name);
+    else
+        return nullptr;
+}
+
+unsigned int DeviceManager::get_device_index(const std::string &name)
+{
+    for (unsigned int i=0; i < device_count; i++)
+        if (devices[i].device->name == name)
+            return i;
+
+    error(nullptr, "Device " + name + " not found");
+    return (unsigned int)(-1);
+}
+
+void DeviceManager::reset_devices(bool cold)
+{
+    int devlist[MAX_DEVICES];
+    for (unsigned int i=0; i < device_count; i++)
+        devlist[i] = i;
+
+    for (unsigned int i=0; i < device_count; i++)
+        for (unsigned int j=0; j + i + 1 < device_count; j++)
+            if (devices[devlist[j]].device->reset_priority > devices[devlist[j+1]].device->reset_priority) {
+                int t = devlist[j];
+                devlist[j] = devlist[j+1];
+                devlist[j+1] = t;
+            }
+
+    for (unsigned int i=0; i < device_count; i++) {
+        ComputerDevice * d = devices[devlist[i]].device.get();
+        if (d->get_reset_behavior(cold)) d->reset(cold);
+    }
+}
+
+void DeviceManager::clock(unsigned int domain, unsigned int counter)
+{
+    if (domain >= clocked_devices.size()) return;
+
+    //Counted in the cycles of the domain's own processor; on a machine with
+    //one processor that is the master, so the number stays what it always was
+
+    //Only the devices that do something with a tick, in the order they are
+    //declared - the processors are clocked by their own execute()
+    std::vector<ClockedDevice> &list = clocked_devices[domain];
+    for (size_t i=0; i < list.size(); i++) {
+        if (list[i].direct) list[i].device->clock(counter);
+        else list[i].device->system_clock(counter);
+    }
+}
+
+unsigned int DeviceManager::clocks_to_event(const CPU * cpu) const
+{
+    unsigned int r = UINT_MAX;
+    for (size_t j = 0; j < cpus.size() && j < event_devices.size(); j++) {
+        if (cpus[j] != cpu) continue;
+        const std::vector<ComputerDevice*> &list = event_devices[j];
+        for (size_t i = 0; i < list.size(); i++) {
+            const unsigned int e = list[i]->clocks_to_event();
+            if (e < r) r = e;
+        }
+        break;
+    }
+    return r;
+}
+
+void DeviceManager::error(ComputerDevice *d, const std::string &message)
+{
+    //A fault of the emulator itself, reached from the emulation thread: a
+    //drive asked for a byte outside its sector, a device called through an
+    //interface it does not have. Something the guest is merely allowed to do
+    //and a device does not model (an i8255 mode, a register the i8257 does not
+    //have) is not one: that goes to ComputerDevice::note_unsupported() and the
+    //machine runs on. Throwing here ended the process - nothing catches an
+    //exception on that thread - and the line in cerr failed every test on its
+    //way out. The first error is kept instead, and Emulator::timer_proc stops
+    //the machine on it.
+    if (error_pending) return;
+    error_device = d;
+    error_message = message;
+    error_pending = true;
+}
+
+void DeviceManager::error_clear()
+{
+    error_device = nullptr;
+    error_message = "";
+    error_pending = false;
+}
+
+std::vector<ComputerDevice*> DeviceManager::find_devices_by_class(const std::string &class_to_find)
+{
+    std::vector<ComputerDevice*> found;
+
+    for (unsigned int i=0; i < device_count; i++)
+    {
+        if (devices[i].device->belongs_to_class(class_to_find)) found.push_back(devices[i].device.get());
+    }
+
+    return found;
+}
+
+//----------------------- class InterfaceManager -------------------------------//
+
+InterfaceManager::InterfaceManager(DeviceManager *dm): dm(dm){}
+
+InterfaceManager::~InterfaceManager()
+{
+    clear();
+}
+
+void InterfaceManager::register_interface(Interface *i)
+{
+    interfaces.push_back(i);
+}
+
+void InterfaceManager::clear()
+{
+    // Interfaces are now in std::vector, automatically cleaned up
+    interfaces.clear();
+}
+
+Interface * InterfaceManager::get_interface_by_name(const std::string &device_name, const std::string &interface_name, bool required)
+{
+    for (size_t i=0; i<interfaces.size(); i++)
+        if (interfaces[i]->device->name == device_name && interfaces[i]->name == interface_name)
+            return interfaces[i];
+    return nullptr;
+}
+
+//----------------------- class ComputerDevice -------------------------------//
+
+bool ComputerDevice::follow_port(Interface &line, const std::string &port_name)
+{
+    //A port's output is "value"; "data" is its input
+    Interface * data = im->get_interface_by_name(port_name, "value");
+    if (data == nullptr) return false;
+
+    LinkedInterface s, d;
+    s.i = &line;
+    s.shift = 0;
+    s.mask = create_mask(line.get_size(), 0);
+    d.i = data;
+    d.shift = 0;
+    d.mask = s.mask;
+    line.connect(s, d, false);
+
+    Interface * input = im->get_interface_by_name(port_name, "data");
+    Interface * reset = im->get_interface_by_name(port_name, "reset");
+    return (input == nullptr || input->linked == 0) && (reset == nullptr || reset->linked == 0);
+}
+
+ComputerDevice::ComputerDevice(InterfaceManager *im, EmulatorConfigDevice *cd):
+    type(cd->type),
+    name(cd->name),
+    device_class("generic_device"),
+    cd(cd),
+    im(im),
+    reset_priority(0)
+{
+    try {
+        std::string s = cd->get_parameter("clock").value;
+        if (s.empty())
+        {
+            throw std::runtime_error("Incorrect clock value for " + name);
+        } else {
+            size_t pos = s.find("/");
+            if (pos != std::string::npos) {
+                clock_miltiplier = parse_numeric_value(s.substr(0, pos));
+                clock_divider = parse_numeric_value(s.substr(pos + 1));
+            } else {
+                clock_miltiplier = parse_numeric_value(s);
+                clock_divider = 1;
+            }
+        }
+    } catch (std::exception &e) {
+        clock_miltiplier = 1;
+        clock_divider = 1;
+    }
+
+    clock_stored = 0;
+}
+
+void ComputerDevice::clock(MAYBE_UNUSED unsigned int counter)
+{
+    //Does nothing by default, but may be overridden
+}
+
+void ComputerDevice::system_clock(unsigned int counter)
+{
+    if (clock_miltiplier == clock_divider)
+        clock(counter);
+    else {
+        clock_stored += counter * clock_miltiplier;
+        unsigned int internal_clock = clock_stored / clock_divider;
+        if (internal_clock > 0)
+        {
+            clock(internal_clock);
+            clock_stored -= internal_clock * clock_divider;
+        }
+    }
+}
+
+emulator::Result ComputerDevice::load_config(MAYBE_UNUSED SystemData * sd)
+{
+    //Remembered so that devices can locate files (see find_file_location())
+    this->sd = sd;
+
+    for (size_t i = 0; i < cd->parameters.size(); i++)
+    {
+        const std::string &parameter_name = cd->parameters[i].name;
+        if (parameter_name[0] == '~')
+        {
+            std::string interface_name = parameter_name.substr(1);
+            if (interface_name.empty())
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect interface definition for")) + "} " + name);
+
+            std::string connection = cd->parameters[i].value;
+            Interface * interface = im->get_interface_by_name(name, interface_name);
+            if (interface == nullptr)
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Interface not found")) + "} " + name + ":" + interface_name);
+
+            try {
+                //A line tied to a fixed level carries a machine value
+                unsigned int pull_value = parse_numeric_value(connection);
+                interface->pull(pull_value);
+                continue;
+            } catch (std::exception &e) {}
+
+            LinkData ld;
+            bool inverted;
+
+            ld.s.i = interface;
+
+            if (connection.empty())
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect connection for")) + "} " + name + ":" + connection);
+
+            if (connection[0] == '!') {
+                connection = connection.substr(1);
+                inverted = true;
+            } else
+                inverted = false;
+
+            size_t p = connection.find('.');
+            if (p == std::string::npos)
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect connection for")) + "} " + name + ":" + connection);
+            std::string connected_device = connection.substr(0, p);
+            std::string connected_interface = connection.substr(p + 1);
+
+            ld.d.i = im->get_interface_by_name(connected_device, connected_interface);
+            if (ld.d.i == nullptr)
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Interface not found")) + "} " + connected_device + ":" + connected_interface);
+
+            const std::string &source_bits = cd->parameters[i].left_range;
+            if (source_bits.empty())
+            {
+                ld.s.shift = 0;
+                ld.s.mask = create_mask(ld.s.i->get_size(), 0);
+            } else {
+                std::string sb = source_bits.substr(1, source_bits.length()-2); //remove brackets
+                unsigned int bit_1, bit_2;
+                convert_range(sb, &bit_1, &bit_2);
+                ld.s.shift = bit_1;
+                ld.s.mask = create_mask(bit_2 - bit_1 + 1, bit_1);
+            }
+
+            const std::string &dest_bits = cd->parameters[i].right_range;
+            if (dest_bits.empty())
+            {
+                ld.d.shift = 0;
+                ld.d.mask = create_mask(ld.d.i->get_size(), 0);
+            } else {
+                std::string db = dest_bits.substr(1, dest_bits.length()-2); //remove brackets
+                unsigned int bit_1, bit_2;
+                convert_range(db, &bit_1, &bit_2);
+                ld.d.shift = bit_1;
+                ld.d.mask = create_mask(bit_2 - bit_1 + 1, bit_1);
+            }
+            if (!ld.s.i->connect(ld.s, ld.d, inverted))
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Too many links of an interface")) + "} " + name + ":" + interface_name);
+
+        }
+    }
+    //The processor this device counts time in. A machine with two processors
+    //running at different frequencies (the УК-НЦ) has devices on both, and
+    //everything that turns real units into cycles - a raster line, a baud rate,
+    //a sound step - has to use the frequency of its own side. The test is on
+    //the class, not on the name: a second processor called "ppu" would
+    //otherwise overwrite its own clock with the master's
+    if (!belongs_to_class("cpu")) {
+        const std::string clock_source = read_confg_value(cd, "clock_source", false, std::string("cpu"));
+        cpu = dynamic_cast<CPU*>(im->dm->get_device_by_name(clock_source, false));
+        if (cpu == nullptr)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Clock source is not a processor")) + "} " + name + ": " + clock_source);
+        m_system_clock = cpu->clock;
+    }
+
+    try {
+        m_cold_reset = read_confg_value(cd, "cold_reset", false, true);
+        m_soft_reset = read_confg_value(cd, "soft_reset", false, true);
+    } catch (std::exception &e) {
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect parameters for")) + "} " + name);
+    }
+
+    //Here and not in AddressableDevice::load_config(): many devices call
+    //ComputerDevice::load_config() directly
+    if (AddressableDevice * ad = dynamic_cast<AddressableDevice*>(this))
+        return ad->load_bus_reply();
+
+    return emulator::Result::ok();
+}
+
+emulator::Result AddressableDevice::load_bus_reply()
+{
+    wait_source = nullptr;
+    const std::string wait = cd->get_parameter("wait", false).value;
+    if (!wait.empty()) {
+        wait_source = dynamic_cast<WaitSource*>(im->dm->get_device_by_name(wait, false));
+        if (wait_source == nullptr)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Not a device that adds wait states")) + "} " + name + ": " + wait);
+    }
+
+    bus_reply = nullptr;
+    const std::string bus = cd->get_parameter("bus_timing", false).value;
+    if (bus.empty()) return emulator::Result::ok();
+    BusTiming * bt = dynamic_cast<BusTiming*>(im->dm->get_device_by_name(bus, false));
+    if (bt == nullptr)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Not a bus-timing device")) + "} " + name + ": " + bus);
+    bus_reply = &bt->reply;
+    return emulator::Result::ok();
+}
+
+BusTiming::BusTiming(InterfaceManager *im, EmulatorConfigDevice *cd):
+    ComputerDevice(im, cd)
+{
+}
+
+//Times in ns, rmw_extra in half clocks of the processor. The values are read
+//here and not in the constructor: a device must be free of side effects there,
+//and a mistyped number has to stop the load rather than silently mean "no window"
+emulator::Result BusTiming::load_config(SystemData *sd)
+{
+    emulator::Result res = ComputerDevice::load_config(sd);
+    if (!res) return res;
+    try {
+        reply.window_ns      = read_confg_value(cd, "window", false, (unsigned int)0);
+        reply.setup_read_ns  = read_confg_value(cd, "setup_read", false, (unsigned int)0);
+        reply.setup_write_ns = read_confg_value(cd, "setup_write", false, (unsigned int)0);
+        reply.setup_rmw_ns   = read_confg_value(cd, "setup_rmw", false, (unsigned int)0);
+        reply.reply_ns       = read_confg_value(cd, "reply", false, (unsigned int)0);
+        reply.rmw_extra      = read_confg_value(cd, "rmw_extra", false, (unsigned int)0);
+        //The power-on variant: phase steps of phase_step ns each, or a variant
+        //of the list phases drawn at every power-on
+        m_phase_step = read_confg_value(cd, "phase_step", false, (unsigned int)0);
+        m_phase_offset = read_confg_value(cd, "phase_offset", false, (unsigned int)0);
+        m_phases.clear();
+        for (const std::string &v : split_string(cd->get_parameter("phases", false).value, ',', true))
+            m_phases.push_back(parse_numeric_value(str_trim(v)));
+        m_phase_random = (str_tolower(cd->get_parameter("phase", false).value) == "random");
+        if (m_phase_random && m_phases.empty())
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect parameters for")) + "} " + name);
+        if (!m_phase_random) set_phase(read_confg_value(cd, "phase", false, (unsigned int)0));
+    } catch (std::exception &) {
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Incorrect parameters for")) + "} " + name);
+    }
+    return emulator::Result::ok();
+}
+
+std::string ComputerDevice::config_parameter(const std::string &parameter) const
+{
+    return (cd != nullptr) ? cd->get_parameter(parameter, false).value : std::string();
+}
+
+void BusTiming::set_phase(unsigned int phase)
+{
+    m_phase = phase;
+    reply.phase_ns = m_phase_offset + phase * m_phase_step;
+}
+
+void BusTiming::reset(bool cold)
+{
+    if (cold && m_phase_random)
+        set_phase(m_phases[getRandomNumber(0, (int)m_phases.size() - 1)]);
+}
+
+//The variant drawn at power-on is not in the configuration
+void BusTiming::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    w.n("phase", m_phase);
+}
+
+emulator::Result BusTiming::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    unsigned int phase = m_phase;
+    if (r.u("phase", phase)) set_phase(phase);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> BusTiming::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"phase", "Power-on variant of the phase of the points", false});
+    return r;
+}
+
+bool BusTiming::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "phase") {
+        out.numeric = true;
+        out.width = 16;
+        out.values.push_back(m_phase);
+        return true;
+    }
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+// The power-on variant, for a controller whose config lists them in phases:
+// those, the variant the config sets when it is not among them, and random.
+// A variant is titled by phase_title_<variant> when the config has one
+ConfigFields BusTiming::get_config_fields()
+{
+    std::vector<std::string> variants;
+    for (const std::string &v : split_string(cd->get_parameter("phases", false).value, ',', true))
+        if (!str_trim(v).empty()) variants.push_back(str_trim(v));
+    if (variants.empty()) return {};
+    ConfigField f;
+    f.name = "phase";
+    f.title = QT_TRANSLATE_NOOP("ConfigFields", "Power-on phase");
+    f.type = CONFIG_FIELD_CHOICE;
+    f.def = "0";
+    const std::string set = str_trim(cd->get_parameter("phase", false).value);
+    if (!set.empty() && str_tolower(set) != "random"
+        && std::find(variants.begin(), variants.end(), set) == variants.end())
+        variants.insert(variants.begin(), set);
+    for (const std::string &v : variants) {
+        const std::string title = str_trim(cd->get_parameter("phase_title_" + v, false).value);
+        f.values.push_back({v, title.empty() ? v : title});
+    }
+    f.values.push_back({"random", QT_TRANSLATE_NOOP("ConfigFields", "Random at power-on")});
+    return {f};
+}
+
+ComputerDevice * create_bus_timing(InterfaceManager *im, EmulatorConfigDevice *cd)
+{
+    return new BusTiming(im, cd);
+}
+
+bool ComputerDevice::get_reset_behavior(bool is_cold)
+{
+    return (is_cold)?m_cold_reset:m_soft_reset;
+}
+
+void ComputerDevice::interface_callback(MAYBE_UNUSED unsigned int callback_id, MAYBE_UNUSED unsigned int new_value, MAYBE_UNUSED unsigned int old_value)
+{
+    //Does nothing by default, but may be overridden
+}
+
+void ComputerDevice::memory_callback(MAYBE_UNUSED unsigned int callback_id, MAYBE_UNUSED unsigned int address)
+{
+    //Does nothing by default, but may be overridden
+}
+
+void ComputerDevice::reset(MAYBE_UNUSED bool cold)
+{
+    //Does nothing by default, but may be overridden
+}
+
+//--------------------------- Saved state -----------------------------------//
+
+void ComputerDevice::save_state(StateWriter &w)
+{
+    //The fractional part of a divided clock: a device whose clock is not the
+    //processor's stands between two of its own ticks, and that phase is state
+    if (clock_stored != 0) w.n("clock_stored", clock_stored);
+
+    //Every line of this device, found through Interface::device - so that no
+    //device ever writes about its own interfaces. The topology is rebuilt by
+    //load_config(); what cannot be is the value, the edge triggers and a mode
+    //the device changed while running
+    if (im == nullptr) return;
+    for (size_t i = 0; i < im->interfaces.size(); i++)
+        if (im->interfaces[i]->device == this) w.iface(*im->interfaces[i]);
+}
+
+emulator::Result ComputerDevice::load_state(const StateReader &r)
+{
+    r.u("clock_stored", clock_stored);
+
+    if (im != nullptr)
+        for (size_t i = 0; i < im->interfaces.size(); i++)
+        {
+            Interface * f = im->interfaces[i];
+            if (f->device != this) continue;
+            unsigned int value = 0, old_value = 0, edge_value = 0, mode = 0;
+            f->snapshot(value, old_value, edge_value, mode);
+            if (r.iface(f->name, value, old_value, edge_value, mode))
+                f->restore(value, old_value, edge_value, mode);
+        }
+    return emulator::Result::ok();
+}
+
+bool ComputerDevice::belongs_to_class(const std::string &class_to_check)
+{
+    return device_class == class_to_check;
+}
+
+DeviceOptions ComputerDevice::get_device_options()
+{
+    return {};
+}
+
+void ComputerDevice::set_device_option(unsigned option_id, unsigned value_id)
+{
+    // Does nothing by default
+}
+
+ConfigFields ComputerDevice::get_config_fields()
+{
+    return {};
+}
+
+//------------------- Introspection and control ----------------------------//
+
+std::vector<DeviceFieldInfo> ComputerDevice::get_device_fields()
+{
+    return {
+        {"name",        "Device name",                          false},
+        {"type",        "Device type",                          false},
+        {"class",       "Device class",                         false},
+        {"clock_source","Processor whose clock this device counts in", false},
+        {"interfaces",  "Values of all interfaces of a device", false},
+        {"unsupported", "Guest requests this device does not model, since start", false},
+        {"unsupported_last", "The last of them", false}
+    };
+}
+
+void ComputerDevice::note_unsupported(const std::string &what)
+{
+    m_unsupported++;
+    m_unsupported_last = what;
+}
+
+std::vector<DeviceCommandInfo> ComputerDevice::get_device_commands()
+{
+    return {
+        {"reset",   "[cold|soft]",  "Resets a device"},
+        {"option",  "id, value",    "Sets a device option, see set_device_option()"}
+    };
+}
+
+bool ComputerDevice::get_field(const std::string &field, MAYBE_UNUSED unsigned int from, MAYBE_UNUSED unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "name") {
+        out.text = name;
+        return true;
+    }
+    if (field == "type") {
+        out.text = type;
+        return true;
+    }
+    if (field == "class") {
+        out.text = device_class;
+        return true;
+    }
+    if (field == "unsupported") {
+        out.numeric = true;
+        out.width = 32;
+        out.values.push_back(m_unsupported);
+        return true;
+    }
+    if (field == "unsupported_last") {
+        out.text = m_unsupported_last;
+        return true;
+    }
+    //Which clock domain this device belongs to - the question a machine with
+    //more than one processor makes worth asking. A processor answers "-": it is
+    //a domain of its own
+    if (field == "clock_source") {
+        out.text = (cpu != nullptr)? cpu->name : std::string("-");
+        return true;
+    }
+    if (field == "interfaces") {
+        //Generic diagnostics for this bus-oriented architecture: dumps every
+        //interface belonging to this device with its current value
+        std::string s;
+        for (size_t i = 0; i < im->interfaces.size(); i++)
+        {
+            Interface * itf = im->interfaces[i];
+            if (itf->device != this) continue;
+            if (!s.empty()) s += ", ";
+            s += itf->name + "=" + ((itf->value == _FFFF)?"-":hex_str(itf->value, 2));
+        }
+        out.text = s;
+        return true;
+    }
+    return false;
+}
+
+std::string ComputerDevice::log_device(const std::string &field, std::pair<unsigned int, unsigned int> range, const LogFormat &fmt)
+{
+    std::string prefix = "[" + name + "." + field + "] ";
+
+    DeviceFieldValue v;
+    if (!get_field(field, range.first, range.second, v))
+        return prefix + "ERROR: unknown field";
+
+    if (!v.numeric) return prefix + v.text;
+
+    unsigned int width = (v.width != 0)?v.width:fmt.width;
+
+    std::string s;
+    if (v.has_start) {
+        //A 16-bit label as before, wider only where the address needs it:
+        //the 1 MB of the Поиск-1 would otherwise be labelled modulo 64 KB
+        const unsigned last = v.start + (unsigned)(v.values.empty() ? 0 : v.values.size() - 1);
+        const unsigned label = (last <= 0xFFFF) ? 16 : (last <= 0xFFFFF) ? 20 : 32;
+        s += format_number(v.start, fmt.base, label) + ":";
+    }
+
+    for (size_t i = 0; i < v.values.size(); i++)
+        s += ((s.empty())?"":" ") + format_number(v.values[i], fmt.base, width);
+
+    return prefix + s;
+}
+
+emulator::Result ComputerDevice::send_command(const std::string &command, const std::string &parameters)
+{
+    std::vector<std::string> p = split_params(parameters);
+
+    if (command == "reset") {
+        bool cold = p.empty() || str_tolower(p[0]) != "soft";
+        reset(cold);
+        return emulator::Result::ok();
+    }
+
+    if (command == "option") {
+        if (p.size() < 2)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Command 'option' expects an option id and a value")) + "}");
+        set_device_option(parse_numeric_value(p[0]), parse_numeric_value(p[1]));
+        return emulator::Result::ok();
+    }
+
+    return emulator::Result::error(emulator::ErrorCode::UnknownCommand,
+        "{ComputerDevice|" + std::string(QT_TRANSLATE_NOOP("ComputerDevice", "Unknown command")) + "} " + name + "." + command);
+}
+
+//----------------------- class AddressableDevice -------------------------------//
+
+unsigned AddressableDevice::get_direct(const unsigned address)
+{
+    return get_value(address);
+}
+
+unsigned int AddressableDevice::get_value_word(unsigned int address)
+{
+    return (get_value(address) & 0xFF) | ((get_value(address + 1) & 0xFF) << 8);
+}
+
+void AddressableDevice::set_value_word(unsigned int address, unsigned int value, bool force)
+{
+    set_value(address, value & 0xFF, force);
+    set_value(address + 1, (value >> 8) & 0xFF, force);
+}
+
+std::vector<DeviceFieldInfo> AddressableDevice::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"value",   "Stored value or a range of values",             true});
+    r.push_back({"value16", "The same range read as 16 bit words",           true});
+    r.push_back({"size",    "Addressable size of a device",                  false});
+    return r;
+}
+
+std::vector<DeviceCommandInfo> AddressableDevice::get_device_commands()
+{
+    std::vector<DeviceCommandInfo> r = ComputerDevice::get_device_commands();
+    r.push_back({"set",   "address, value [, value...]", "Writes bytes to consecutive addresses"});
+    r.push_back({"set16", "address, value [, value...]", "Writes words to consecutive even addresses"});
+    r.push_back({"fill",  "from, to, value",             "Fills an address range with a value"});
+    return r;
+}
+
+bool AddressableDevice::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "value")
+    {
+        unsigned int size = get_size();
+        out.numeric = true;
+
+        if (size <= 1) {
+            //Single register devices (ports, registers) ignore the range
+            out.values.push_back(get_direct(0));
+            return true;
+        }
+
+        if (to < from) to = from;
+        if (from >= size) from = (size > 0)?size - 1:0;
+        if (to >= size) to = (size > 0)?size - 1:0;
+
+        out.has_start = true;
+        out.start = from;
+        for (unsigned int a = from; a <= to; a++)
+            out.values.push_back(get_direct(a));
+        return true;
+    }
+
+    //The same range, read the way a 16 bit processor sees it. Without this a
+    //script could write words with set16 and only read them back as bytes
+    if (field == "value16")
+    {
+        unsigned int size = get_size();
+        out.numeric = true;
+        out.width = 16;
+
+        if (size <= 2) {
+            out.values.push_back(get_value_word(0));
+            return true;
+        }
+
+        if (to < from) to = from;
+        from &= ~1u;
+        if (from >= size) from = (size - 1) & ~1u;
+        if (to >= size) to = size - 1;
+
+        out.has_start = true;
+        out.start = from;
+        for (unsigned int a = from; a + 1 <= to; a += 2)
+            out.values.push_back(get_value_word(a));
+        if (out.values.empty()) out.values.push_back(get_value_word(from));
+        return true;
+    }
+
+    if (field == "size") {
+        out.numeric = true;
+        out.width = 32;
+        out.values.push_back(get_size());
+        return true;
+    }
+
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+emulator::Result AddressableDevice::send_command(const std::string &command, const std::string &parameters)
+{
+    std::vector<std::string> p = split_params(parameters);
+
+    //A list of values goes to consecutive addresses, so that a machine code
+    //fragment is one line per instruction instead of one line per byte
+    if (command == "set" || command == "set16") {
+        const bool words = (command == "set16");
+        const unsigned int step = words?2:1;
+
+        if (p.size() < 2)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{AddressableDevice|" + std::string(QT_TRANSLATE_NOOP("AddressableDevice", "Command 'set' expects an address and at least one value")) + "}");
+
+        const unsigned int address = parse_numeric_value(p[0]);
+        //Ports and registers report no addressable size at all; only a device
+        //that declares one (memory) can say what fits into it
+        const unsigned int size = get_size();
+
+        //An odd word address is a bus trap on the 16 bit machines this is for
+        if (words && (address & 1) != 0)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{AddressableDevice|" + std::string(QT_TRANSLATE_NOOP("AddressableDevice", "Command 'set16' expects an even address")) + "}");
+
+        //The whole list is checked before anything is written: half a fragment
+        //in memory is worse than none, and the value that failed is named
+        for (size_t i = 1; i < p.size(); i++)
+        {
+            const unsigned int a = address + static_cast<unsigned int>(i - 1) * step;
+            if (size != 0 && a + step > size)
+                return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                    "{AddressableDevice|" + std::string(QT_TRANSLATE_NOOP("AddressableDevice", "A value is written past the end of the device")) + "} "
+                    + name + ", #" + std::to_string(i));
+            try {
+                parse_numeric_value(p[i]);
+            } catch (const std::exception &) {
+                return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                    "{AddressableDevice|" + std::string(QT_TRANSLATE_NOOP("AddressableDevice", "Not a number")) + "} #"
+                    + std::to_string(i) + ": '" + p[i] + "'");
+            }
+        }
+
+        //force=true writes the internal state without driving the bus,
+        //the same way the memory dump editor does it
+        for (size_t i = 1; i < p.size(); i++)
+        {
+            const unsigned int a = address + static_cast<unsigned int>(i - 1) * step;
+            const unsigned int v = parse_numeric_value(p[i]);
+            if (words) set_value_word(a, v, true); else set_value(a, v, true);
+        }
+        return emulator::Result::ok();
+    }
+
+    if (command == "fill") {
+        if (p.size() < 3)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{AddressableDevice|" + std::string(QT_TRANSLATE_NOOP("AddressableDevice", "Command 'fill' expects a range and a value")) + "}");
+        unsigned int from = parse_numeric_value(p[0]);
+        unsigned int to = parse_numeric_value(p[1]);
+        unsigned int value = parse_numeric_value(p[2]);
+        unsigned int size = get_size();
+        for (unsigned int a = from; a <= to && a < size; a++)
+            set_value(a, value, true);
+        return emulator::Result::ok();
+    }
+
+    return ComputerDevice::send_command(command, parameters);
+}
+
+//----------------------- class Memory -------------------------------//
+
+Memory::Memory(InterfaceManager *im, EmulatorConfigDevice *cd):
+      AddressableDevice(im, cd)
+    , auto_output(false)
+    , buffer()
+    , fill(0)
+    , random_fill(false)
+    , read_callback(0)
+    , write_callback(0)
+    , i_address(this, im, 16, "address", MODE_R, 1)
+    , i_data(this, im, 8, "data", MODE_W)
+{
+}
+
+Memory::~Memory()
+{
+    // Automatic cleanup via std::vector destructor
+}
+
+unsigned int Memory::get_value(unsigned int address)
+{
+    if (read_callback != 0)
+        memory_callback_device->memory_callback(read_callback, address);
+
+    if (can_read && address < get_size())
+        return buffer[address];
+    else
+        return 0xFF;
+}
+
+unsigned int Memory::get_direct(unsigned int address)
+{
+    if (can_read && address < get_size()) return buffer[address];
+
+    return 0xFF;
+}
+
+
+void Memory::set_value(unsigned int address, unsigned int value, bool force)
+{
+    if ((can_write || force) && address < get_size())
+        buffer[address] = (uint8_t)value;
+
+    if (write_callback != 0)
+        memory_callback_device->memory_callback(write_callback, address);
+}
+
+void Memory::interface_callback(MAYBE_UNUSED unsigned int callback_id, unsigned int new_value, MAYBE_UNUSED unsigned int old_value)
+{
+    unsigned int address = new_value & create_mask(i_address.get_size(), 0);
+    if (address < get_size() and auto_output) i_data.change(buffer[address]);
+}
+
+void Memory::set_size(unsigned int value)
+{
+    buffer.resize(value);  // std::vector handles allocation and cleanup
+    addresable_size = value;
+
+    i_address.set_size(ceil(log2(addresable_size)));
+
+    // QRandomGenerator *rg = QRandomGenerator::global();
+    // for (unsigned int i=0; i < value; i++) buffer[i]=rg->bounded(255);
+
+    for (unsigned int i=0; i < value; i++) buffer[i] = getRandomNumber(0, 255);
+}
+
+void Memory::set_memory_callback(ComputerDevice * d, unsigned int callback_id, unsigned int mode)
+{
+    memory_callback_device = d;
+    if ((mode & MODE_R) != 0) read_callback = callback_id;
+    if ((mode & MODE_W) != 0) write_callback = callback_id;
+}
+
+uint8_t * Memory::get_buffer()
+{
+    return buffer.empty() ? nullptr : buffer.data();
+}
+
+void Memory::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    //Whole, never a "changed pages" shortcut: a cold reset may fill RAM with
+    //random bytes (RAM::reset with fill = random), so what is not written here
+    //can differ from run to run
+    if (can_write && !buffer.empty()) w.hex("data", buffer.data(), buffer.size());
+}
+
+emulator::Result Memory::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    if (!buffer.empty()) r.hex("data", buffer.data(), buffer.size());
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> Memory::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = AddressableDevice::get_device_fields();
+    r.push_back({"fill", "Byte used to fill the memory on a cold reset", false});
+    return r;
+}
+
+std::vector<DeviceCommandInfo> Memory::get_device_commands()
+{
+    std::vector<DeviceCommandInfo> r = AddressableDevice::get_device_commands();
+    r.push_back({"load", "\"file\" [, address]",     "Loads a binary file into the memory"});
+    r.push_back({"save", "\"file\" [, from, to]",    "Saves a memory range to a binary file"});
+    return r;
+}
+
+bool Memory::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "fill") {
+        out.numeric = true;
+        out.values.push_back(fill);
+        return true;
+    }
+    return AddressableDevice::get_field(field, from, to, out);
+}
+
+emulator::Result Memory::send_command(const std::string &command, const std::string &parameters)
+{
+    std::vector<std::string> p = split_params(parameters);
+
+    if (command == "load")
+    {
+        if (p.empty() || p[0].empty())
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Command 'load' expects a file name")) + "}");
+
+        std::string file = find_file_location(sd, p[0]);
+        if (file.empty()) file = p[0];
+
+        long long fsize = dsk_tools::utf8_file_size(file);
+        dsk_tools::UTF8_ifstream f(file, std::ios::binary);
+        if (fsize < 0 || !f.is_open())
+            return emulator::Result::error(emulator::ErrorCode::FileError,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Error reading")) + "} " + p[0]);
+
+        unsigned int address = (p.size() > 1)?parse_numeric_value(p[1]):0;
+        unsigned int size = get_size();
+        if (address >= size)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Address is out of the device range")) + "}");
+
+        unsigned int len = static_cast<unsigned int>(fsize);
+        if (address + len > size) len = size - address;
+
+        std::vector<uint8_t> data(len);
+        f.read(reinterpret_cast<char*>(data.data()), len);
+        f.close();
+
+        for (unsigned int i = 0; i < len; i++)
+            set_value(address + i, data[i], true);
+
+        return emulator::Result::ok();
+    }
+
+    if (command == "save")
+    {
+        if (p.empty() || p[0].empty())
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Command 'save' expects a file name")) + "}");
+
+        unsigned int size = get_size();
+        unsigned int from = (p.size() > 1)?parse_numeric_value(p[1]):0;
+        unsigned int to = (p.size() > 2)?parse_numeric_value(p[2]):((size > 0)?size - 1:0);
+        if (to >= size) to = (size > 0)?size - 1:0;
+        if (to < from)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Incorrect address range")) + "}");
+
+        const std::string file = resolve_output_path(sd, p[0]);
+        dsk_tools::UTF8_ofstream f(file, std::ios::binary);
+        if (!f.is_open())
+            return emulator::Result::error(emulator::ErrorCode::FileError,
+                "{Memory|" + std::string(QT_TRANSLATE_NOOP("Memory", "Error writing")) + "} " + file);
+
+        for (unsigned int a = from; a <= to; a++)
+        {
+            char b = static_cast<char>(get_direct(a));
+            f.write(&b, 1);
+        }
+        f.close();
+        return emulator::Result::ok();
+    }
+
+    return AddressableDevice::send_command(command, parameters);
+}
+
+//----------------------- class RAM -------------------------------//
+
+RAM::RAM(InterfaceManager *im, EmulatorConfigDevice *cd):
+    Memory(im, cd)
+{
+    this->can_read = true;
+    this->can_write = true;
+}
+
+emulator::Result RAM::load_config(SystemData *sd)
+{
+    emulator::Result res = Memory::load_config(sd);
+    if (!res) return res;
+
+    set_size(parse_numeric_value(this->cd->get_parameter("size").value));
+
+    try {
+        std::string s = str_tolower(cd->get_parameter("fill").value);
+        random_fill = (s == "random");
+        if (!random_fill) fill = parse_numeric_value(s);
+    } catch (std::exception &e) {
+        fill = 0;
+    }
+    //memset(buffer, fill, get_size());
+
+    reset(true);
+
+    return emulator::Result::ok();
+}
+
+void RAM::reset(bool cold)
+{
+    if (cold && !buffer.empty()) {
+        if (!random_fill) {
+            memset(buffer.data(), fill, get_size());
+        } else {
+            // QRandomGenerator *rg = QRandomGenerator::global();
+            // for (unsigned int i=0; i < get_size(); i++) buffer[i]=rg->bounded(255);
+            for (unsigned int i=0; i < get_size(); i++) buffer[i]=getRandomNumber(0, 255);
+        }
+    }
+}
+
+//----------------------- class ROM -------------------------------//
+
+ROM::ROM(InterfaceManager *im, EmulatorConfigDevice *cd):
+    Memory(im, cd)
+{
+    this->can_read = true;
+    this->can_write = false;
+    this->auto_output = true;
+}
+
+emulator::Result ROM::load_config(SystemData *sd)
+{
+    emulator::Result res = Memory::load_config(sd);
+    if (!res) return res;
+
+    try {
+        this->fill = parse_numeric_value(this->cd->get_parameter("fill").value);
+    } catch (std::exception &e) {
+        this->fill = 0xFF;
+    }
+
+    std::string image = cd->get_parameter("image", false).value;
+    m_partial = read_confg_value(cd, "partial", false, false);
+    m_image_length = 0;
+
+    // Сменные микросхемы гнезда: image_1, image_2, ... - список, из которого
+    // выбирают в редакторе конфигурации; выбранная пишется в image. Без него
+    // стоит первая
+    if (image.empty()) image = str_trim(cd->get_parameter("image_1", false).value);
+    m_image = str_trim(image);
+
+    if (!image.empty()) {
+        set_size(parse_numeric_value(cd->get_parameter("size").value));
+        res = load_image(image);
+        if (!res) return res;
+    } else if (!cd->get_parameter("data", false).right_extended.empty()) {
+        std::vector<std::string> values = split_string(cd->get_parameter("data").right_extended, ',', true);
+        set_size(values.size());
+        for (size_t i=0; i<values.size(); i++)
+            buffer[i] = parse_numeric_value(values[i]);
+    } else {
+        // Neither an image nor data: an empty socket of a cartridge, which
+        // answers its fill byte. The size is what the socket takes
+        set_size(parse_numeric_value(cd->get_parameter("size").value));
+        if (!buffer.empty()) memset(buffer.data(), fill, get_size());
+    }
+
+    try {
+        std::string s = str_tolower(cd->get_parameter("mode").value);
+        if ((s == "stream")) rom_mode = ROMMode::Stream;
+        else if ((s == "normal")) rom_mode = ROMMode::Normal;
+        else
+        {
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "Incorrect mode set for")) + "} " + this->name);
+        }
+    } catch (std::exception &e) {
+        rom_mode = ROMMode::Normal;
+    }
+
+    return emulator::Result::ok();
+}
+
+// The image fills the buffer the size already gave, the rest is the fill byte
+emulator::Result ROM::load_image(const std::string &image)
+{
+    const bool repeat = read_confg_value(cd, "repeat", false, false);
+    {
+        if (!buffer.empty()) memset(buffer.data(), fill, get_size());
+
+        std::string file_name = find_file_location(sd, image);
+        if (file_name.empty())
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "File not found")) + "} " + image);
+        else
+        if (dsk_tools::get_file_ext(file_name) == ".hex")
+        {
+            std::string content = dsk_tools::utf8_read_file(file_name);
+            if (content.empty()) {
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "Error reading HEX file")) + "} " + file_name);
+            }
+
+            unsigned int index = 0;
+            std::istringstream stream(content);
+            std::string line;
+            while (std::getline(stream, line))
+            {
+                if (line.size() < 9) continue;
+                unsigned int len = parse_numeric_value("$" + line.substr(1, 2));
+                unsigned int type = parse_numeric_value("$" + line.substr(7, 2));
+                if (type == 0)
+                {
+                    for (unsigned int j=0; j< len; j++)
+                        buffer[index+j] = parse_numeric_value("$" + line.substr(9+j*2, 2));
+                    index += len;
+                }
+            }
+        } else {
+            long long file_size = dsk_tools::utf8_file_size(file_name);
+            if (file_size < 0) {
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "Can't open ROM image file")) + "} " + file_name);
+            }
+            if (static_cast<unsigned int>(file_size) > this->get_size())
+            {
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "ROM image file is too big")) + "} " + this->name);
+            }
+            dsk_tools::UTF8_ifstream file(file_name, std::ios::binary);
+            if (file.is_open()){
+                file.read(reinterpret_cast<char*>(this->buffer.data()), file_size);
+                file.close();
+                m_image_length = static_cast<unsigned>(file_size);
+
+                // A chip smaller than the area it is mapped to repeats itself when
+                // the high address lines are left undecoded. That is a property of
+                // the machine, not of the image, so it is asked for in the config.
+                size_t chunk = static_cast<size_t>(file_size);
+                size_t total = static_cast<size_t>(this->get_size());
+                if (repeat && chunk > 0)
+                    for (size_t pos = chunk; pos < total; pos += chunk)
+                    {
+                        size_t left = total - pos;
+                        memcpy(buffer.data() + pos, buffer.data(), (left < chunk)?left:chunk);
+                    }
+            } else {
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{ROM|" + std::string(QT_TRANSLATE_NOOP("ROM", "Can't open ROM image file")) + "} " + file_name);
+            }
+        }
+    }
+    return emulator::Result::ok();
+}
+
+// Past the end of the image of a partial ROM the sockets are empty: the
+// address is left to the ranges after this one, and with none there the bus
+// times out
+unsigned int ROM::route(unsigned int address, unsigned int mode)
+{
+    (void)mode;
+    if (m_partial && address >= m_image_length) return ROUTE_PASS;
+    return ROUTE_ANSWER;
+}
+
+unsigned int ROM::get_value(unsigned int address)
+{
+    if (rom_mode == ROMMode::Normal) return Memory::get_value(address);
+    auto value = Memory::get_value(stream_counter);
+    stream_counter = (stream_counter + 1) % get_size();
+    return value;
+}
+
+// A socket with a list of chips (image_1, image_2, ... titled title_N, the
+// field called by label: written in the config and shown as it is, like the
+// title of a connector) offers that list; otherwise only a ROM the config
+// marks as replaceable, by giving the file dialog a filter: a cartridge slot,
+// not the firmware every machine has
+ConfigFields ROM::get_config_fields()
+{
+    const std::string first = str_trim(cd->get_parameter("image_1", false).value);
+    if (!first.empty()) {
+        ConfigField f;
+        f.name = "image";
+        const std::string label = str_trim(cd->get_parameter("label", false).value);
+        f.title = label.empty() ? std::string(QT_TRANSLATE_NOOP("ConfigFields", "ROM image")) : label;
+        f.type = CONFIG_FIELD_CHOICE;
+        f.def = first;
+        for (unsigned n = 1; ; n++) {
+            const std::string file = str_trim(cd->get_parameter("image_" + std::to_string(n), false).value);
+            if (file.empty()) break;
+            const std::string title = str_trim(cd->get_parameter("title_" + std::to_string(n), false).value);
+            f.values.push_back({file, title.empty() ? file : title});
+        }
+        return {f};
+    }
+    const std::string files = cd->get_parameter("files", false).value;
+    if (files.empty()) return {};
+    ConfigField f;
+    f.name = "image";
+    f.title = QT_TRANSLATE_NOOP("ConfigFields", "ROM image");
+    f.type = CONFIG_FIELD_FILE;
+    f.files = files;
+    return {f};
+}
+
+void ROM::set_value(unsigned int address, unsigned int value, bool force)
+{
+    if (rom_mode == ROMMode::Normal) Memory::set_value(address, value, force);
+    else stream_counter = 0;
+}
+
+void ROM::save_state(StateWriter &w)
+{
+    //ComputerDevice, not Memory: the contents come back from the image file,
+    //which a saved state carries in its archive. A stream ROM is read through
+    //a moving pointer, and that pointer is state
+    ComputerDevice::save_state(w);
+    if (rom_mode == ROMMode::Stream) w.n("stream_counter", stream_counter);
+}
+
+emulator::Result ROM::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    r.u("stream_counter", stream_counter);
+    return emulator::Result::ok();
+}
+
+//----------------------- class Port -------------------------------//
+
+Port::Port(InterfaceManager *im, EmulatorConfigDevice *cd):
+      AddressableDevice(im, cd)
+    , default_value(0)
+    , mask(_FFFF)
+    , alt_bit(-1)
+    , alt_value(0)
+    , alt_default(0)
+    , i_input(this, im, 8, "data", MODE_R, PORT_INPUT)
+    , i_data(this, im, 8, "value", MODE_W)
+    , i_access(this, im, 1, "access", MODE_W)
+    , i_flip(this, im, 1, "flip", MODE_R, PORT_FLIP)
+    , i_reset(this, im, 1, "reset", MODE_R, PORT_RESET)
+    , i_alt(this, im, 8, "alt", MODE_W)
+
+{
+    try {
+        size = parse_numeric_value(this->cd->get_parameter("size").value);
+    } catch (std::exception &e) {
+        size = 8;
+    }
+
+    i_input.set_size(size);
+    i_data.set_size(size);
+    i_alt.set_size(size);
+
+    //Everything a port holds is a machine value: it is what the programs of
+    //this machine read and write, and its documentation writes it in the
+    //machine's own radix. The width above and the bit numbers below are not,
+    //but they are read in the radix too: a config in another radix writes
+    //them with "_"
+    try {
+        default_value = parse_numeric_value(this->cd->get_parameter("default").value);
+    } catch (std::exception &e) {
+        default_value = 0;
+    }
+
+    try {
+        flip_mask = parse_numeric_value(cd->get_parameter("flipmask").value);
+    } catch (std::exception &e) {
+        flip_mask = _FFFF;
+    }
+
+    try {
+        mask = parse_numeric_value(cd->get_parameter("mask").value);
+    } catch (std::exception &e) {
+        mask = _FFFF;
+    }
+
+    try {
+        constant_value = parse_numeric_value(cd->get_parameter("constant_return").value);
+        has_constant_return = true;
+    } catch (std::exception &e) {
+        has_constant_return = false;
+    }
+
+    // Some registers are two registers behind one address, and one bit of the
+    // written value tells them apart. Reading always returns the main bank.
+    try {
+        alt_bit = (int)parse_numeric_value(cd->get_parameter("alt_bit").value);
+    } catch (std::exception &e) {
+        alt_bit = -1;
+    }
+
+    try {
+        alt_default = parse_numeric_value(cd->get_parameter("alt_default").value);
+    } catch (std::exception &e) {
+        alt_default = 0;
+    }
+
+    value = default_value;
+    alt_value = alt_default;
+}
+
+emulator::Result Port::load_config(SystemData *sd)
+{
+    emulator::Result res = AddressableDevice::load_config(sd);
+    if (!res) return res;
+
+    const std::string acc_mode = read_confg_value(cd, "access_mode", false, std::string("rw"));
+    if (acc_mode == "r") access_on_write = false;
+    else
+    if (acc_mode == "w") access_on_read = false;
+    else
+    if (acc_mode != "rw" and acc_mode != "wr")
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+        "{Port|" + std::string(QT_TRANSLATE_NOOP("Port", "Incorrect access mode")) + "} ");
+
+    return emulator::Result::ok();
+}
+
+
+void Port::interface_callback(MAYBE_UNUSED unsigned int callback_id, unsigned int new_value, unsigned int old_value)
+{
+    switch (callback_id) {
+        case PORT_FLIP:
+            if ((old_value & 1) != 0 && (new_value & 1) == 0) write_register(value ^ flip_mask);
+            break;
+        case PORT_INPUT:
+            // Bits driven from the outside replace their counterparts in the
+            // register, so a read returns the current state of those lines.
+            // Only the connected bits are touched, the rest keep what was
+            // written into the port.
+            this->value = (this->value & ~i_input.linked_bits) | (new_value & i_input.linked_bits);
+            break;
+        default: // PORT_RESET
+            if ((old_value & 1) != 0 && (new_value & 1) == 0) this->value = default_value;
+            break;
+    }
+}
+
+unsigned int Port::read_register()
+{
+    if (access_on_read) {
+        i_access.change(0);
+        i_access.change(1);
+    }
+    if (!has_constant_return) return value;
+    return constant_value;
+}
+
+void Port::write_register(unsigned int new_value)
+{
+    if (access_on_write) i_access.change(0);
+    if (alt_bit >= 0 && ((new_value >> alt_bit) & 1) != 0) {
+        alt_value = (new_value & mask) | (alt_value & ~mask);
+        i_alt.change(alt_value);
+    } else {
+        this->value = (new_value & mask) | (this->value & ~mask);
+        i_data.change(this->value);
+    }
+    if (access_on_write) i_access.change(1);
+}
+
+unsigned int Port::get_value(unsigned int address)
+{
+    unsigned int v = read_register();
+    // Ports wider than a byte expose two byte lanes selected by A0
+    if (size > 8) v = (address & 1)? ((v >> 8) & 0xFF) : (v & 0xFF);
+    return v;
+}
+
+unsigned int Port::get_direct(unsigned address)
+{
+    return value;
+}
+
+void Port::set_value(unsigned int address, unsigned int value, bool force)
+{
+    if (size > 8)
+        write_register((address & 1)? ((this->value & 0x00FF) | ((value & 0xFF) << 8))
+                                    : ((this->value & 0xFF00) | (value & 0xFF)));
+    else
+        write_register(value);
+}
+
+unsigned int Port::get_value_word(MAYBE_UNUSED unsigned int address)
+{
+    return read_register();
+}
+
+void Port::set_value_word(MAYBE_UNUSED unsigned int address, unsigned int value, MAYBE_UNUSED bool force)
+{
+    write_register(value);
+}
+
+void Port::reset(MAYBE_UNUSED bool cold)
+{
+    if (alt_bit >= 0)
+    {
+        alt_value = alt_default;
+        i_alt.change(alt_value);
+    }
+    write_register(default_value);
+}
+
+void Port::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    w.u("value", value, size > 8 ? 16 : 8);
+    if (alt_bit >= 0) w.u("alt_value", alt_value, size > 8 ? 16 : 8);
+}
+
+emulator::Result Port::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    //Assigned, not written through write_register(): that drives i_data and
+    //toggles the access strobe, which would reach devices that have not been
+    //restored yet
+    r.u("value", value);
+    r.u("alt_value", alt_value);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> Port::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = AddressableDevice::get_device_fields();
+    r.push_back({"default", "Value written on reset",   false});
+    r.push_back({"mask",    "Write mask of a port",     false});
+    return r;
+}
+
+bool Port::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "default") {
+        out.numeric = true;
+        out.values.push_back(default_value);
+        return true;
+    }
+    if (field == "mask") {
+        out.numeric = true;
+        out.values.push_back(mask);
+        return true;
+    }
+    return AddressableDevice::get_field(field, from, to, out);
+}
+
+//----------------------- class PortAddress -------------------------------//
+
+PortAddress::PortAddress(InterfaceManager *im, EmulatorConfigDevice *cd):
+    Port(im, cd)
+{
+}
+
+emulator::Result PortAddress::load_config(SystemData *sd)
+{
+    emulator::Result res = Port::load_config(sd);
+    if (!res) return res;
+
+    store_on_read = read_confg_value(cd, "store_on_read", false, false);
+
+    return emulator::Result::ok();
+}
+
+void PortAddress::set_value(unsigned int address, MAYBE_UNUSED unsigned int value, bool force)
+{
+    i_access.change(0);
+    this->value = (address & mask) | (this->value & ~mask);
+    i_data.change(this->value);
+    i_access.change(1);
+}
+
+unsigned int PortAddress::get_value(MAYBE_UNUSED unsigned int address)
+{
+    if (store_on_read) {
+        this->value = (address & mask) | (this->value & ~mask);
+        i_data.change(this->value);
+    }
+    return Port::get_value(address);
+}
+
+// A port-address encodes the command in the address itself, so word and byte
+// accesses store exactly the same thing; only the returned width differs.
+unsigned int PortAddress::get_value_word(unsigned int address)
+{
+    if (store_on_read) {
+        this->value = (address & mask) | (this->value & ~mask);
+        i_data.change(this->value);
+    }
+    return read_register();
+}
+
+void PortAddress::set_value_word(unsigned int address, unsigned int value, bool force)
+{
+    PortAddress::set_value(address, value, force);
+}
+
+
+void PortAddress::reset(MAYBE_UNUSED bool cold)
+{
+    set_value(default_value, 0);
+}
+
+
+//----------------------- class CPU -------------------------------//
+
+CPU::CPU(InterfaceManager *im, EmulatorConfigDevice *cd):
+      ComputerDevice(im, cd)
+    , m_temp_mode(TEMP_NONE)
+    , m_temp_pc(0)
+    , m_temp_sp(0)
+    , m_temp_from(0)
+    , m_last_pc(0)
+    , m_disasm(nullptr)
+    , m_disasm_tried(false)
+    , reset_mode(true)
+    , m_hold_cycles(0)
+    , m_hold_total(0)
+    , i_address(this, im, 16, "address", MODE_W, 1)
+    , i_data(this, im, 8, "data", MODE_RW)
+#ifdef CPU_STOPPED
+    , m_debug(DEBUG_STOPPED)
+#else
+    , m_debug(DEBUG_OFF)
+#endif
+    , break_hit(BREAK_NONE)
+{
+    device_class = "cpu";
+    m_breakpoints.reserve(MAX_BREAKPOINTS);
+
+    try {
+        clock = parse_numeric_value(this->cd->get_parameter("clock").value);
+    } catch (std::exception &e) {
+        clock = 0;
+    }
+
+    //"clock" means two different things and both constructors read it: for a
+    //processor it is the frequency in Hz, for every other device a ratio
+    //against the system clock. ComputerDevice has already taken 8000000 for a
+    //multiplier, which would be a disaster the moment a processor was handed
+    //to system_clock()
+    clock_miltiplier = 1;
+    clock_divider = 1;
+}
+
+emulator::Result CPU::load_config(SystemData *sd)
+{
+    emulator::Result res = ComputerDevice::load_config(sd);
+    if (!res) return res;
+
+    if (clock == 0)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{CPU|" + std::string(QT_TRANSLATE_NOOP("CPU", "No CPU clock value found")) + "} " + name);
+
+    std::string breaks = read_confg_value(cd, "breakpoints", false, std::string(""));
+    if (!breaks.empty()) {
+        // Addresses may be separated by commas, spaces or tabs
+        for (size_t i = 0; i < breaks.size(); i++)
+            if (breaks[i] == ',' || breaks[i] == '\t') breaks[i] = ' ';
+
+        const std::vector<std::string> items = split_string(breaks, ' ', true);
+        for (size_t i = 0; i < items.size(); i++)
+        {
+            const std::string item = str_trim(items[i]);
+            if (item.empty()) continue;
+            try {
+                add_breakpoint(parse_numeric_value(item));
+            } catch (std::exception &) {
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{CPU|" + std::string(QT_TRANSLATE_NOOP("CPU", "Invalid breakpoint address")) + "} " + name + ": " + item);
+            }
+        }
+    }
+
+    const bool stopped = read_confg_value(cd, "stopped", false, false);
+    const bool debug = read_confg_value(cd, "debug", false, false);
+    if (debug) m_debug = DEBUG_BRAKES;
+    if (stopped) m_debug = DEBUG_STOPPED;
+
+    //Each processor has its own address space. The default keeps every
+    //existing config working, where the one dispatcher is simply called "mapper"
+    const std::string mapper_name = read_confg_value(cd, "mapper", false, std::string("mapper"));
+    mm = dynamic_cast<MemoryMapper*>(im->dm->get_device_by_name(mapper_name, false));
+    if (mm == nullptr)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{CPU|" + std::string(QT_TRANSLATE_NOOP("CPU", "Memory mapper not found")) + "} " + name + ": " + mapper_name);
+
+    return emulator::Result::ok();
+}
+
+CPU::~CPU()
+{
+    delete m_disasm;
+}
+
+DisAsm * CPU::disasm()
+{
+    //Asked on every return instruction of a step over: a missing table is
+    //tried once, not read from the disk again each time
+    if (m_disasm == nullptr && !m_disasm_tried && sd != nullptr) {
+        m_disasm_tried = true;
+        emulator::Result res = emulator::Result::ok();
+        DisAsm * d = create_disasm(sd->data_path, res);
+        if (!res) delete d;
+        else m_disasm = d;
+    }
+    return m_disasm;
+}
+
+bool CPU::decode_at(unsigned int address, DisasmLine &line)
+{
+    DisAsm * d = disasm();
+    if (d == nullptr) return false;
+    uint8_t bytes[15];
+    const unsigned int n = (d->max_command_length < sizeof(bytes)) ? d->max_command_length : (unsigned int)sizeof(bytes);
+    for (unsigned int i = 0; i < sizeof(bytes); i++)
+        bytes[i] = (i < n) ? (uint8_t)peek_mem(address + i) : 0;
+    d->decode(&bytes, address, n, &line);
+    return line.length > 0;
+}
+
+unsigned int CPU::peek_mem(unsigned int address)
+{
+    return mm->get_direct(address) & 0xFF;
+}
+
+bool CPU::poke_mem(unsigned int address, unsigned int value)
+{
+    return mm->poke(address, value);
+}
+
+bool CPU::mem_writable(unsigned int address)
+{
+    return mm != nullptr && mm->writable(address);
+}
+
+DisAsm * CPU::create_disasm(const std::string &data_path, emulator::Result &res)
+{
+    DisAsm * d = new DisAsm();
+    res = d->load_file(data_path + disasm_table());
+    return d;
+}
+
+std::vector<std::string> CPU::get_context_names()
+{
+    std::vector<std::string> names;
+    for (const auto &p : get_registers())
+        if (!p.first.empty() && p.first[0] != '-') names.push_back(p.first);
+    return names;
+}
+
+std::vector<CpuRegister> CPU::get_register_values()
+{
+    const unsigned int radix = register_radix();
+    std::vector<CpuRegister> r;
+    for (const auto &p : get_registers()) {
+        CpuRegister reg;
+        reg.value = 0;
+        reg.bits = 0;
+        if (!p.first.empty() && p.first[0] != '-') {
+            reg.name = p.first;
+            const unsigned int digits = (unsigned int)p.second.size();
+            reg.value = (unsigned int)std::strtoul(p.second.c_str(), nullptr, (int)radix);
+            //Octal words take 6 digits for 16 bits, bytes 3 for 8
+            if (radix == 8) reg.bits = (digits == 6)? 16 : (digits == 3)? 8 : digits * 3;
+            else reg.bits = digits * 4;
+        }
+        r.push_back(reg);
+    }
+    return r;
+}
+
+bool CPU::has_breakpoint(unsigned int address) const
+{
+    for (size_t i = 0; i < m_breakpoints.size(); i++)
+        if (m_breakpoints[i] == address) return true;
+    return false;
+}
+
+void CPU::add_breakpoint(unsigned int address)
+{
+    if (!has_breakpoint(address) && m_breakpoints.size() < MAX_BREAKPOINTS) m_breakpoints.push_back(address);
+}
+
+void CPU::remove_breakpoint(unsigned int address)
+{
+    for (size_t i = 0; i < m_breakpoints.size(); i++)
+        if (m_breakpoints[i] == address) {
+            m_breakpoints.erase(m_breakpoints.begin() + i);
+            return;
+        }
+}
+
+void CPU::clear_breakpoints()
+{
+    m_breakpoints.clear();
+}
+
+void CPU::set_temp_break(unsigned int mode, unsigned int pc, unsigned int sp)
+{
+    m_temp_mode = mode;
+    m_temp_pc = pc;
+    m_temp_sp = sp;
+    m_temp_from = get_pc();
+    m_last_pc = m_temp_from;
+}
+
+int CPU::sp_above(unsigned int sp) const
+{
+    const unsigned int bits = sp_bits();
+    const unsigned int mask = (bits >= 32) ? 0xFFFFFFFFu : ((1u << bits) - 1);
+    const unsigned int d = (stack_grows_up() ? m_temp_sp - sp : sp - m_temp_sp) & mask;
+    //More than half the range up is the other way round: below
+    return (d & ~(mask >> 1)) ? -(int)((mask - d) + 1) : (int)d;
+}
+
+//The instruction just executed was a return. Decoded only once the stack is
+//back at the level asked for, so a run with a stop set costs nothing more
+bool CPU::returned()
+{
+    DisasmLine l;
+    return decode_at(m_last_pc, l) && l.flow == FLOW_RET;
+}
+
+//A processor waiting for an interrupt (WAIT, HLT) already has PC at the next
+//instruction, which runs only after the interrupt: it stops there when it
+//gets there, not on every idle step before. waiting() is asked only on a hit
+bool CPU::break_test()
+{
+    const unsigned int pc = get_pc();
+    if (m_temp_mode != TEMP_NONE) {
+        unsigned int sp = 0;
+        bool hit = false;
+        switch (m_temp_mode) {
+        case TEMP_PC:
+            hit = (pc == m_temp_pc);
+            break;
+        case TEMP_RETURN:
+            //Back where the call leads, or the stack back at its level by a
+            //return - not by an interrupt that came before the call, which
+            //returns to the call itself. Either at the level of the call: a
+            //recursive call of the same routine comes back to the same
+            //address deeper in the stack
+            if (!get_sp(sp)) hit = (pc == m_temp_pc);
+            else if (sp_above(sp) >= 0) hit = (pc == m_temp_pc) || (pc != m_temp_from && returned());
+            break;
+        case TEMP_OUT:
+            hit = get_sp(sp) && sp_above(sp) > 0 && returned();
+            break;
+        default:
+            break;
+        }
+        if (hit && !waiting()) {
+            m_temp_mode = TEMP_NONE;
+            break_hit = BREAK_TEMP;
+            return true;
+        }
+    }
+    if (!m_breakpoints.empty() && has_breakpoint(pc) && !waiting()) {
+        break_hit = BREAK_POINT;
+        return true;
+    }
+    return false;
+}
+
+void CPU::reset(bool cold)
+{
+    this->reset_mode = true;
+    this->m_hold_cycles = 0;
+    this->m_hold_total = 0;
+}
+
+void CPU::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    if (m_hold_cycles) w.n("hold_cycles", m_hold_cycles);
+    if (m_hold_total)  w.n64("hold_total", m_hold_total);
+    //Breakpoints and the step mode belong to the debugging session, not to
+    //the machine. Restoring m_debug would hand back a snapshot that loads
+    //already stopped, which is not what "continue from here" means
+}
+
+emulator::Result CPU::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+
+    //The state is applied after reset(true), and a reset is deferred: every
+    //execute() checks reset_mode and resets the core on the first
+    //instruction. Left set, it would throw away everything restored below
+    reset_mode = false;
+
+    r.u("hold_cycles", m_hold_cycles);
+    r.n64("hold_total", m_hold_total);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> CPU::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"pc",          "Program counter",              false});
+    r.push_back({"command",     "Current command code",         false});
+    r.push_back({"registers",   "All registers as name=value",  false});
+    r.push_back({"flags",       "All flags as name=value",      false});
+    r.push_back({"clock",       "CPU frequency, Hz",            false});
+    r.push_back({"debug",       "Debug mode of a CPU",          false});
+    r.push_back({"hold",        "Cycles taken by bus masters since reset", false});
+    r.push_back({"disasm",      "Instructions starting in an address range: disasm(from, to)", true});
+    return r;
+}
+
+std::vector<DeviceCommandInfo> CPU::get_device_commands()
+{
+    std::vector<DeviceCommandInfo> r = ComputerDevice::get_device_commands();
+    r.push_back({"stop",        "",                 "Stops the execution"});
+    r.push_back({"run",         "",                 "Resumes the execution, stopping at the breakpoints if any are set"});
+    r.push_back({"step",        "",                 "Executes one command"});
+    r.push_back({"breakpoint",  "[address]",        "Adds a breakpoint, without an address removes them all"});
+    r.push_back({"setreg",      "name, value",      "Sets a register or a flag"});
+    //Carried out by the script engine, which reaches the emulator: they move
+    //the whole machine, see Emulator::debug_step()
+    r.push_back({"pause",       "",                 "Pauses the whole machine, as the debugger does; a breakpoint of any processor then pauses it too"});
+    r.push_back({"go",          "",                 "Resumes the paused machine, stopping at the breakpoints"});
+    r.push_back({"tstep",       "[count]",          "Executes commands of this processor, the others running for the same time"});
+    r.push_back({"over",        "",                 "Steps over a call: runs until it returns"});
+    r.push_back({"out",         "",                 "Runs until the current routine returns"});
+    r.push_back({"until",       "address",          "Runs until this processor reaches the address"});
+    return r;
+}
+
+//Renders the name/value pairs already provided by every CPU implementation
+static std::string pairs_to_string(const std::vector<std::pair<std::string, std::string>> &pairs)
+{
+    std::string s;
+    for (size_t i = 0; i < pairs.size(); i++) {
+        //Names starting with a dash are the blank lines the register area
+        //draws between register groups, not values
+        if (!pairs[i].first.empty() && pairs[i].first[0] == '-') continue;
+        s += ((s.empty())?"":" ") + pairs[i].first + "=" + pairs[i].second;
+    }
+    return s;
+}
+
+bool CPU::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "pc") {
+        out.numeric = true;
+        //As wide as the address space: 20 bits on an 8088, whose PC is the
+        //linear address of CS:IP
+        unsigned int bits = 16;
+        while (mm != nullptr && bits < 32 && (1ull << bits) < mm->get_size()) bits++;
+        out.width = bits;
+        out.values.push_back(get_pc());
+        return true;
+    }
+    if (field == "command") {
+        out.numeric = true;
+        out.values.push_back(get_command());
+        return true;
+    }
+    if (field == "registers") {
+        out.text = pairs_to_string(get_registers());
+        return true;
+    }
+    if (field == "flags") {
+        out.text = pairs_to_string(get_flags());
+        return true;
+    }
+    if (field == "clock") {
+        out.numeric = true;
+        out.width = 32;
+        out.values.push_back(clock);
+        return true;
+    }
+    if (field == "hold") {
+        out.numeric = true;
+        out.width = 32;
+        out.values.push_back(static_cast<unsigned int>(m_hold_total));
+        return true;
+    }
+    if (field == "debug") {
+        out.numeric = true;
+        out.values.push_back(m_debug);
+        return true;
+    }
+    if (field == "disasm") {
+        DisAsm * d = disasm();
+        if (d == nullptr) return false;
+        const bool octal = register_radix() == 8;
+        //The instructions that start from the first address up to the last,
+        //one when there is only one address
+        unsigned int address = from;
+        for (unsigned int i = 0; i < 1000 && (i == 0 || address <= to); i++) {
+            DisasmLine l;
+            if (!decode_at(address, l)) l.length = d->unit_bytes();
+            if (!out.text.empty()) out.text += "; ";
+            out.text += (octal ? oct_str(address, 6) : hex_str(address, 4)) + ": " + l.text;
+            address += l.length;
+        }
+        return true;
+    }
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+emulator::Result CPU::send_command(const std::string &command, const std::string &parameters)
+{
+    std::vector<std::string> p = split_params(parameters);
+
+    if (command == "stop") {
+        m_debug = DEBUG_STOPPED;
+        return emulator::Result::ok();
+    }
+    if (command == "run") {
+        // Breakpoints are only tested in DEBUG_BRAKES, so resuming has to keep
+        // that mode as long as at least one breakpoint is set
+        m_debug = (!m_breakpoints.empty())? DEBUG_BRAKES : DEBUG_OFF;
+        return emulator::Result::ok();
+    }
+    if (command == "step") {
+        m_debug = DEBUG_STEP;
+        return emulator::Result::ok();
+    }
+    if (command == "breakpoint") {
+        if (p.empty()) {
+            // No address means "forget them all" and stop watching
+            clear_breakpoints();
+            if (m_debug == DEBUG_BRAKES) m_debug = DEBUG_OFF;
+            return emulator::Result::ok();
+        }
+        add_breakpoint(parse_numeric_value(p[0]));
+        if (m_debug == DEBUG_OFF) m_debug = DEBUG_BRAKES;
+        return emulator::Result::ok();
+    }
+    if (command == "setreg") {
+        if (p.size() < 2)
+            return emulator::Result::error(emulator::ErrorCode::BadParameters,
+                "{CPU|" + std::string(QT_TRANSLATE_NOOP("CPU", "Command 'setreg' expects a name and a value")) + "}");
+        //A register by that name first, then a flag (the 8086 takes both)
+        const std::vector<std::string> names = get_context_names();
+        const unsigned int v = parse_numeric_value(p[1]);
+        if (std::find(names.begin(), names.end(), p[0]) == names.end() && set_flag(p[0], v != 0))
+            return emulator::Result::ok();
+        set_context_value(p[0], v);
+        return emulator::Result::ok();
+    }
+
+    return ComputerDevice::send_command(command, parameters);
+}
+
+//----------------------- class MemoryMapper -------------------------------//
+
+MemoryMapper::MemoryMapper(InterfaceManager *im, EmulatorConfigDevice *cd):
+      AddressableDevice(im, cd)
+    , ranges_count(0)
+    , ports_count(0)
+    , ports_to_mem(false)
+    , first_range(1)
+    , cancel_init_mask(0)
+    , i_address(this, im, 16, "address", MODE_R)
+    , i_config(this, im, 8, "config", MODE_R, MM_CONFIG)
+
+{
+
+    //A tag of 0 never matches, so an empty table needs no other marker
+    this->page_generation = 1;
+    size_pages(16);
+}
+
+void MemoryMapper::size_pages(unsigned int address_bits)
+{
+    addresable_size = 1u << address_bits;
+    m_page_count = addresable_size >> MM_PAGE_SHIFT;
+    MapperPage empty;
+    memset(&empty, 0, sizeof(empty));
+    pages.assign(m_page_count, empty);
+    m_pages = pages.data();
+}
+
+void MemoryMapper::invalidate_pages()
+{
+    if (++this->page_generation == 0) {
+        //A tag of 0 means "empty", so the counter never stands on 0
+        this->page_generation = 1;
+        memset(m_pages, 0, m_page_count * sizeof(MapperPage));
+    }
+}
+
+//Resolves a whole page at once, or marks it as one the scan has to walk every
+//time. Cacheable means: of the ranges that match this configuration, at most
+//one intersects the page, and if there is one it covers the page completely,
+//filters no addresses of its own (address_mask) and neither continues a read
+//(or_read) nor a write (through).
+//
+//With no range at all, a read and a write both answer nothing and report a bus
+//timeout, exactly as map() plus responds() would. With one range, it is the
+//only candidate for every address of the page, so the answer per direction is
+//the device when the mode fits, and otherwise a timeout when the range is
+//strict - which is what responds() says
+MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
+{
+    MapperPage * e = &this->m_pages[page];
+    const unsigned int p_begin = page << MM_PAGE_SHIFT;
+    const unsigned int p_end = p_begin + (1u << MM_PAGE_SHIFT) - 1;
+    const unsigned int config = this->i_config.value;
+
+    e->tag = tag;
+    e->uncached = false;
+    e->device_r = e->device_w = nullptr;
+    e->offset = 0;
+    e->timeout_r = e->timeout_w = true;
+
+    const MapperRange * found = nullptr;
+    for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
+    {
+        const MapperRange * mr = &(this->ranges[i]);
+        if ((config & mr->config_mask) != mr->config_value) continue;
+        if (mr->range_end < p_begin || mr->range_begin > p_end) continue;
+        if (mr->routed && found == nullptr) {
+            //A routed range is asked once for the whole page: its device keeps
+            //route() constant over a page except where it answers THROUGH or
+            //OR, and calls routing_changed() when the answers change. It is
+            //asked at both ends of the page, both ways. One that takes a
+            //single direction is left to map(), which skips it for the other
+            if (mr->range_begin > p_begin || mr->range_end < p_end || mr->address_mask != 0
+                || mr->mode != MODE_RW) {
+                e->uncached = true;
+                return nullptr;
+            }
+            const unsigned int a0 = p_begin - mr->range_begin + mr->base;
+            const unsigned int a1 = p_end - mr->range_begin + mr->base;
+            const unsigned int r = mr->device->route(a0, MODE_R);
+            const unsigned int w = mr->device->route(a0, MODE_W);
+            if (r != mr->device->route(a1, MODE_R) || w != mr->device->route(a1, MODE_W)
+                || r == ROUTE_OR || r == ROUTE_THROUGH || w == ROUTE_OR || w == ROUTE_THROUGH
+                || (r == ROUTE_PASS) != (w == ROUTE_PASS)) {
+                e->uncached = true;
+                return nullptr;
+            }
+            //Left to the ranges after it both ways: as if it were not there
+            if (r == ROUTE_PASS) continue;
+            //It decides the page; what follows it is shadowed
+            e->offset = mr->base - mr->range_begin;
+            if (r == ROUTE_ANSWER) { e->device_r = mr->device; e->timeout_r = false; }
+            else e->timeout_r = true;
+            if (w == ROUTE_ANSWER) { e->device_w = mr->device; e->timeout_w = false; }
+            else e->timeout_w = true;
+            return e;
+        }
+        if (found != nullptr) {
+            //More than one range of this configuration in the page: which one
+            //answers depends on the address
+            e->uncached = true;
+            return nullptr;
+        }
+        found = mr;
+    }
+
+    if (found == nullptr) return e;         //nothing is mapped here
+
+    if (found->address_mask != 0 || found->or_read || found->through || found->routed
+        || found->range_begin > p_begin || found->range_end < p_end) {
+        e->uncached = true;
+        return nullptr;
+    }
+
+    e->offset = found->base - found->range_begin;
+    if ((found->mode & MODE_R) != 0) { e->device_r = found->device; e->timeout_r = false; }
+    else e->timeout_r = found->strict;
+    if ((found->mode & MODE_W) != 0) { e->device_w = found->device; e->timeout_w = false; }
+    else e->timeout_w = found->strict;
+    return e;
+}
+
+emulator::Result MemoryMapper::load_config(SystemData *sd)
+{
+    LinkData ld;
+
+    emulator::Result res = ComputerDevice::load_config(sd);
+    if (!res) return res;
+
+    std::string config_device = this->cd->get_parameter("config", false).value;
+
+    if (!config_device.empty())
+    {
+        Interface * i_cfg = im->get_interface_by_name(config_device, "out", false);
+        if (i_cfg == nullptr)
+            i_cfg = im->get_interface_by_name(config_device, "value");
+        if (i_cfg == nullptr)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{MemoryMapper|" + std::string(QT_TRANSLATE_NOOP("MemoryMapper", "Interface not found")) + "} " + config_device);
+
+        ld.d.i = i_cfg;
+        ld.d.shift = 0;
+        ld.d.mask = create_mask(ld.d.i->get_size(), 0);
+
+        ld.s.i = this->im->get_interface_by_name(this->name, "config");
+        ld.s.i->set_size(ld.d.i->get_size());
+        ld.s.shift = 0;
+        ld.s.mask = create_mask(ld.s.i->get_size(), 0);
+
+        ld.s.i->connect(ld.s, ld.d);
+    } else
+        this->i_config.change(0);
+
+    this->ports_to_mem = this->cd->get_parameter("portstomemory", false).value == "1";
+
+    this->ports_mask = (this->cd->get_parameter("wideports", false).value == "1")?(unsigned int)(-1):0xFF;
+
+    //The width of the address space, in bits and in decimal whatever the
+    //machine's radix: 16 for the 8-bit processors and the БК, 20 for an 8088
+    const std::string bits = this->cd->get_parameter("address_bits", false).value;
+    if (!bits.empty()) {
+        unsigned int n;
+        try {
+            n = parse_numeric_value(bits, 10);
+        } catch (std::exception &) {
+            n = 0;
+        }
+        if (n < 16 || n > 24)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{MemoryMapper|" + std::string(QT_TRANSLATE_NOOP("MemoryMapper", "Incorrect parameters for")) + "} " + name + ": address_bits");
+        size_pages(n);
+        i_address.set_size(n);
+    }
+
+    std::string m = this->cd->get_parameter("cancelinit", false).value;
+    this->cancel_init_mask = (!m.empty())?parse_numeric_value(m):0;
+
+    //Loading ranges
+    for (size_t i = 0; i < this->cd->parameters.size(); i++)
+    {
+        const std::string &parameter_name = this->cd->parameters[i].name;
+        if (parameter_name == "@memory" || parameter_name == "@port")
+        {
+            MapperRange mr;
+            std::string mask, c, a;
+            unsigned int index;
+
+            const std::string &range = this->cd->parameters[i].left_range;
+            size_t p = range.find("][");
+            if (p != std::string::npos)
+            {
+                c = range.substr(1, p - 1);
+                a = range.substr(p + 2, range.length() - p - 3);
+                size_t cp = c.find(':');
+                if (cp != std::string::npos)
+                {
+                    mask = c.substr(cp + 1);
+                    c = c.substr(0, cp);
+                } else
+                    mask = "";
+            } else {
+                c = "";
+                a = range.substr(1, range.length() - 2);
+                mask = "";
+            }
+
+            //Only a memory range takes a slot in ranges[]: counting the
+            //ports in as well used to leave a hole of uninitialised memory
+            //per @port line inside 1..ranges_count, which map() then walked
+            //on every single access
+            if (c == "*")
+            {
+                index = 0;
+                this->first_range = 0;
+                c = "";
+            } else if (parameter_name == "@memory") {
+                index = ++this->ranges_count;
+#ifdef ECAT_EMBEDDED
+                if (index >= MAPPER_MAX_RANGES)
+                    return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                        "Memory mapper '" + this->name + "': more than " + std::to_string(MAPPER_MAX_RANGES - 1) + " ranges");
+#endif
+            } else {
+                index = 0;
+            }
+
+            try {
+                mr.config_mask = parse_numeric_value(mask);
+            } catch (std::exception &) {
+                mr.config_mask = create_mask(this->i_config.get_size(), 0);
+            }
+
+            try {
+                mr.config_value = parse_numeric_value(c);
+            } catch (std::exception &) {
+                mr.config_value = 0;
+                mr.config_mask = 0;
+            }
+
+            p = a.find('-');
+            if (p != std::string::npos)
+            {
+                mr.range_begin = parse_numeric_value(a.substr(0, p));
+                mr.range_end = parse_numeric_value(a.substr(p + 1));
+            } else {
+                if (parameter_name == "@port")
+                {
+                    mr.range_begin = parse_numeric_value(a);
+                    mr.range_end = mr.range_begin;
+                } else
+                    return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                        "{MemoryMapper|" + std::string(QT_TRANSLATE_NOOP("MemoryMapper", "Incorrect range for")) + "} " + parameter_name);
+            }
+
+            //Downcast once, here, rather than on every access through map()
+            mr.device = dynamic_cast<AddressableDevice*>(this->im->dm->get_device_by_name(this->cd->parameters[i].value));
+            if (mr.device == nullptr)
+                return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                    "{MemoryMapper|" + std::string(QT_TRANSLATE_NOOP("MemoryMapper", "Device is not addressable")) + "} " + this->cd->parameters[i].value);
+
+            const std::string &right_range = this->cd->parameters[i].right_range;
+            try {
+               mr.base = parse_numeric_value(right_range.substr(1, right_range.length() - 2));
+            } catch (std::exception &) {
+                mr.base = 0;
+            }
+
+            m = this->cd->extended_parameter(i, "mode");
+            if (m == "r") mr.mode = MODE_R;
+            else if (m == "w") mr.mode = MODE_W;
+            else mr.mode = MODE_RW;
+
+            try {
+                mr.address_mask = parse_numeric_value(this->cd->extended_parameter(i, "addr_mask"));
+                mr.address_value = parse_numeric_value(this->cd->extended_parameter(i, "addr_value"));
+            } catch (std::exception &) {
+                mr.address_mask = 0;
+                mr.address_value = 0;
+            }
+
+            // A strict range answers only accesses of its own mode: a register
+            // that exists for reading only times out when written, which is how
+            // some firmware tells machines apart
+            mr.strict = (this->cd->extended_parameter(i, "strict") == "1");
+
+            // A write to a through range goes on to the next ranges that match:
+            // several devices listen to one address, like the AY and the output
+            // register of the БК parallel port
+            mr.through = (this->cd->extended_parameter(i, "through") == "1");
+
+            // A read of an or_read range goes on the same way, and what the
+            // ranges return is OR-ed together: the УК-НЦ enables ROM and RAM in
+            // one window at once and both drive the bus. It makes such a window
+            // effectively write-only for the RAM behind it, which is exactly how
+            // the real machine behaves
+            mr.or_read = (this->cd->extended_parameter(i, "or_read") == "1");
+
+            // A routed range asks its device, address by address, whether it
+            // answers, passes the address on or leaves the bus without a reply
+            // (AddressableDevice::route): a board that covers or switches off
+            // the machine's own memory by its mode, the СМК of the БК
+            mr.routed = (this->cd->extended_parameter(i, "routed") == "1");
+
+            if (parameter_name == "@memory")
+                this->ranges[index] = mr;
+            else {
+#ifdef ECAT_EMBEDDED
+                if (this->ports_count >= MAPPER_MAX_RANGES)
+                    return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                        "Memory mapper '" + this->name + "': more than " + std::to_string(MAPPER_MAX_RANGES) + " port ranges");
+#endif
+                this->ports[this->ports_count++] = mr;
+            }
+        }
+    }
+
+    invalidate_pages();
+
+    return emulator::Result::ok();
+}
+
+void MemoryMapper::reset(MAYBE_UNUSED bool cold)
+{
+    if (this->cancel_init_mask != 0) this->first_range = 0;
+    invalidate_pages();
+}
+
+void MemoryMapper::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    //One number that changes the whole visible map: with cancelinit, range 0
+    //answers only until the processor reads an address under the mask
+    w.n("first_range", first_range);
+    w.b("no_device", no_device);
+}
+
+emulator::Result MemoryMapper::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    r.u("first_range", first_range);
+    r.b("no_device", no_device);
+    return emulator::Result::ok();
+}
+
+void MemoryMapper::state_restored()
+{
+    //first_range and the config line have just changed under the cache
+    invalidate_pages();
+}
+
+AddressableDevice * MemoryMapper::map(
+                                        MapperArray * map_ranges,
+                                        unsigned int index_from,
+                                        unsigned int index_to,
+                                        unsigned int config,
+                                        unsigned int address,
+                                        unsigned int mode,
+                                        unsigned int * address_on_device,
+                                        unsigned int * range_index,
+                                        unsigned int * route
+                                    )
+{
+    for (unsigned int i = index_from; i <= index_to; i++)
+    {
+        MapperRange * mr = &(*map_ranges)[i];
+        if (
+            ( (config & mr->config_mask) == mr->config_value )
+            &&
+            (address >= mr->range_begin)
+            &&
+            (address <= mr->range_end)
+            &&
+            ( (address & mr->address_mask) == mr->address_value)
+            &&
+            ( (mr->mode & mode) != 0)
+            )
+        {
+            * address_on_device = address - mr->range_begin + mr->base;
+            * range_index = i;
+            unsigned int r = ROUTE_ANSWER;
+            if (mr->routed) {
+                r = mr->device->route(* address_on_device, mode);
+                if (r == ROUTE_PASS) continue;
+                if (r == ROUTE_TIMEOUT) return nullptr;
+            }
+            if (route != nullptr) * route = r;
+            return mr->device;
+        }
+    }
+    return nullptr;
+}
+
+AddressableDevice * MemoryMapper::map_memory(
+                                                unsigned int config,
+                                                unsigned int address,
+                                                unsigned int mode,
+                                                unsigned int * address_on_device,
+                                                unsigned int * range_index
+                                            )
+{
+    return this->map(&(this->ranges), this->first_range, this->ranges_count, config, address, mode, address_on_device, range_index);
+}
+
+AddressableDevice * MemoryMapper::map_port(
+                                                unsigned int config,
+                                                unsigned int address,
+                                                unsigned int mode,
+                                                unsigned int * address_on_device,
+                                                unsigned int * range_index
+                                            )
+{
+    if (this->ports_count == 0) return nullptr;
+    return this->map(&(this->ports), 0, this->ports_count-1, config, address, mode, address_on_device, range_index);
+}
+
+AddressableDevice * MemoryMapper::map_read(unsigned int address, unsigned int * address_on_device, unsigned int * range_index, unsigned int * route)
+{
+    const unsigned int config = this->i_config.value;
+    bool clean = true;
+    for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
+    {
+        MapperRange * mr = &(this->ranges[i]);
+        if (
+            ( (config & mr->config_mask) == mr->config_value )
+            && (address >= mr->range_begin) && (address <= mr->range_end)
+            && ( (address & mr->address_mask) == mr->address_value)
+            )
+        {
+            if ((mr->mode & MODE_R) == 0) { clean = false; continue; }
+            * address_on_device = address - mr->range_begin + mr->base;
+            * range_index = i;
+            unsigned int r = ROUTE_ANSWER;
+            if (mr->routed) {
+                //A routed device may answer a write differently from a read,
+                //so the write of a read-modify-write is not remembered past it
+                clean = false;
+                r = mr->device->route(* address_on_device, MODE_R);
+                if (r == ROUTE_PASS) continue;
+                if (r == ROUTE_TIMEOUT) return nullptr;
+            }
+            if (route != nullptr) * route = r;
+            if (clean && (mr->mode & MODE_W) != 0) {
+                wm_address = address;
+                wm_config = config;
+                wm_first = this->first_range;
+                wm_device = mr->device;
+                wm_offset = * address_on_device;
+                wm_range = i;
+            }
+            return mr->device;
+        }
+    }
+    return nullptr;
+}
+
+AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int * address_on_device, unsigned int * range_index, unsigned int * route)
+{
+    if (address == wm_address && this->i_config.value == wm_config && this->first_range == wm_first) {
+        * address_on_device = wm_offset;
+        * range_index = wm_range;
+        if (route != nullptr) * route = ROUTE_ANSWER;   //never a routed range
+        return wm_device;
+    }
+    return this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value, address, MODE_W, address_on_device, range_index, route);
+}
+
+
+unsigned int MemoryMapper::read(unsigned int address)
+{
+    if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
+        this->first_range = 1;
+        invalidate_pages();
+    }
+
+    //The page this address falls into, resolved once per configuration
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        this->last_device = e->device_r;
+        if (e->device_r != nullptr) {
+            this->no_device = false;
+            return e->device_r->get_value(address + e->offset);
+        }
+        this->no_device = e->timeout_r;
+        return _FFFF;
+    }
+
+    unsigned int address_on_device, range_index;
+    this->no_device = false;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * d = map_read(address, &address_on_device, &range_index, &route);
+    this->last_device = d;
+    if (d != nullptr)
+    {
+        unsigned int v = d->get_value(address_on_device);
+
+        //Several devices answering one address, their outputs wired together
+        while (reads_on(range_index, route) && range_index < this->ranges_count) {
+            d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_R, &address_on_device, &range_index, &route);
+            if (d == nullptr) break;
+            v |= d->get_value(address_on_device);
+        }
+        return v;
+
+    } else {
+        this->no_device = !this->responds(address, MODE_R);
+        return _FFFF;
+    }
+}
+
+// The device a read of the address would reach, without touching it
+AddressableDevice * MemoryMapper::peek_read_device(unsigned int address)
+{
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) return e->device_r;
+    unsigned int address_on_device, range_index;
+    return this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value,
+                     address, MODE_R, &address_on_device, &range_index);
+}
+
+AddressableDevice * MemoryMapper::peek_owner(unsigned int address, unsigned int &offset)
+{
+    unsigned int range_index;
+    unsigned int route = ROUTE_ANSWER;
+    return this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value,
+                     address, MODE_R, &offset, &range_index, &route);
+}
+
+AddressableDevice * MemoryMapper::peek_owner_below(AddressableDevice * above, unsigned int address, unsigned int &offset)
+{
+    const unsigned int config = this->i_config.value;
+    for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
+    {
+        const MapperRange & mr = this->ranges[i];
+        if (mr.device == above
+            && (config & mr.config_mask) == mr.config_value
+            && address >= mr.range_begin && address <= mr.range_end
+            && (address & mr.address_mask) == mr.address_value
+            && (mr.mode & MODE_R) != 0)
+        {
+            if (i == this->ranges_count) return nullptr;
+            unsigned int range_index;
+            unsigned int route = ROUTE_ANSWER;
+            return this->map(&(this->ranges), i + 1, this->ranges_count, config, address, MODE_R, &offset, &range_index, &route);
+        }
+    }
+    return peek_owner(address, offset);
+}
+
+bool MemoryMapper::writable(unsigned int address)
+{
+    unsigned int offset;
+    AddressableDevice * r = peek_owner(address, offset);
+    if (r != nullptr && r->debug_writable(offset)) return true;
+    unsigned int w_offset, range_index;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * w = this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value,
+                                      address, MODE_W, &w_offset, &range_index, &route);
+    return w != nullptr && w->debug_writable(w_offset);
+}
+
+//Where a ROM is read over a RAM (Орион F800, the shadow areas), the byte goes
+//to both: the ROM shows it, and the RAM below gets what a program writing
+//there would have put. A device that is not memory there (a register) is
+//left alone: its set_value() would act on the value
+bool MemoryMapper::poke(unsigned int address, unsigned int value)
+{
+    unsigned int offset;
+    AddressableDevice * r = peek_owner(address, offset);
+    if (r != nullptr && !r->debug_writable(offset)) r = nullptr;
+
+    unsigned int w_offset, range_index;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * w = this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value,
+                                      address, MODE_W, &w_offset, &range_index, &route);
+    if (w != nullptr && (w == r || !w->debug_writable(w_offset))) w = nullptr;
+
+    if (w != nullptr) w->set_value(w_offset, value & 0xFF, true);
+    if (r != nullptr) r->set_value(offset, value & 0xFF, true);
+    return r != nullptr || w != nullptr;
+}
+
+//A read goes on past this range, the answers OR-ed: always for an "or_read"
+//one, and for a routed one when its device said so for this address - the
+//answer map() reported, so route() is not asked twice
+bool MemoryMapper::reads_on(unsigned int range_index, unsigned int route) const
+{
+    const MapperRange & mr = this->ranges[range_index];
+    return mr.or_read || (mr.routed && route == ROUTE_OR);
+}
+
+//A write goes on past this range: always for a "through" one, and for a
+//routed one when its device says so for this address
+bool MemoryMapper::goes_through(unsigned int range_index, unsigned int route) const
+{
+    const MapperRange & mr = this->ranges[range_index];
+    return mr.through || (mr.routed && route == ROUTE_THROUGH);
+}
+
+// Whether anything is mapped at the address at all: a range of the other
+// mode still counts, unless it is strict
+bool MemoryMapper::responds(unsigned int address, unsigned int mode)
+{
+    unsigned int config = this->i_config.value;
+    for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
+    {
+        MapperRange * mr = &(this->ranges[i]);
+        if (
+            ( (config & mr->config_mask) == mr->config_value )
+            && (address >= mr->range_begin) && (address <= mr->range_end)
+            && ( (address & mr->address_mask) == mr->address_value)
+            && ( ((mr->mode & mode) != 0) || !mr->strict )
+            )
+        {
+            if (mr->routed) {
+                const unsigned int r = mr->device->route(address - mr->range_begin + mr->base,
+                                                         ((mode & MODE_R) != 0) ? MODE_R : MODE_W);
+                if (r == ROUTE_PASS) continue;
+                if (r == ROUTE_TIMEOUT) return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void MemoryMapper::write(unsigned int address, unsigned int value)
+{
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        this->last_device = e->device_w;
+        if (e->device_w != nullptr) {
+            this->no_device = false;
+            e->device_w->set_value(address + e->offset, value);
+        } else
+            this->no_device = e->timeout_w;
+        return;
+    }
+
+    unsigned int address_on_device, range_index;
+    this->no_device = false;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * d = map_write(address, &address_on_device, &range_index, &route);
+    this->last_device = d;
+    if (d == nullptr) {
+        this->no_device = !this->responds(address, MODE_W);
+        return;
+    }
+    d->set_value(address_on_device, value);
+    while (goes_through(range_index, route) && range_index < this->ranges_count) {
+        d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
+        if (d == nullptr) break;
+        d->set_value(address_on_device, value);
+    }
+}
+
+unsigned int MemoryMapper::read_word(unsigned int address)
+{
+    if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
+        this->first_range = 1;
+        invalidate_pages();
+    }
+
+    //A word is resolved by its own address, as below: a device composes the
+    //two bytes itself, so a word across a page boundary needs nothing special
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        this->last_device = e->device_r;
+        if (e->device_r != nullptr) {
+            this->no_device = false;
+            return e->device_r->get_value_word(address + e->offset);
+        }
+        this->no_device = e->timeout_r;
+        return _FFFF;
+    }
+
+    unsigned int address_on_device, range_index;
+    this->no_device = false;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * d = map_read(address, &address_on_device, &range_index, &route);
+    this->last_device = d;
+    if (d != nullptr) {
+        unsigned int v = d->get_value_word(address_on_device);
+
+        //See read(): ranges wired together answer at once, OR-ed
+        while (reads_on(range_index, route) && range_index < this->ranges_count) {
+            d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_R, &address_on_device, &range_index, &route);
+            if (d == nullptr) break;
+            v |= d->get_value_word(address_on_device);
+        }
+        return v;
+    } else {
+        this->no_device = !this->responds(address, MODE_R);
+        return _FFFF;
+    }
+}
+
+// A word cycle of a 1801 processor at an odd address. The processor puts the
+// address on the bus as it is: a memory ignores A0 and moves the word at the
+// even address, but a device on the low byte that decodes A0 itself (a ВВ55)
+// answers with the register at the odd address, and nobody drives the high
+// byte, which reads 0. The УК-НЦ printer driver of RBTRON.SAV tests the
+// printer status port of the ВВ55 with BIT #2,@#177101 and BIT #200,@#177101.
+// MemoryMapper::read_word() itself is left as it is: an x86 reads a word at an
+// odd address as two bytes, and it calls read_word() with it
+unsigned int MemoryMapper::read_word_odd(unsigned int address)
+{
+    if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
+        this->first_range = 1;
+        invalidate_pages();
+    }
+    //Who answers, from the page cache like any access (a page is uniform, so
+    //the odd address finds the same device the even one does). A byte-wide
+    //device gets the byte cycle read() makes, with the ranges OR-ed to it
+    AddressableDevice * d;
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        d = e->device_r;
+    } else {
+        unsigned int address_on_device, range_index;
+        unsigned int route = ROUTE_ANSWER;
+        d = map_read(address, &address_on_device, &range_index, &route);
+    }
+    if (d != nullptr && d->byte_wide()) return read(address) & 0xFF;
+    return read_word(address & ~1u);
+}
+
+//As read_word_odd(); write() also passes the byte on through a "through" range
+void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
+{
+    AddressableDevice * d;
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        d = e->device_w;
+    } else {
+        unsigned int address_on_device, range_index;
+        unsigned int route = ROUTE_ANSWER;
+        d = map_write(address, &address_on_device, &range_index, &route);
+    }
+    if (d != nullptr && d->byte_wide()) {
+        write(address, value & 0xFF);
+        return;
+    }
+    write_word(address & ~1u, value);
+}
+
+void MemoryMapper::write_word(unsigned int address, unsigned int value)
+{
+    MapperPage * e = find_page(address, page_tag());
+    if (e != nullptr) {
+        this->last_device = e->device_w;
+        if (e->device_w != nullptr) {
+            this->no_device = false;
+            e->device_w->set_value_word(address + e->offset, value);
+        } else
+            this->no_device = e->timeout_w;
+        return;
+    }
+
+    unsigned int address_on_device, range_index;
+    this->no_device = false;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * d = map_write(address, &address_on_device, &range_index, &route);
+    this->last_device = d;
+    if (d == nullptr) {
+        this->no_device = !this->responds(address, MODE_W);
+        return;
+    }
+    d->set_value_word(address_on_device, value);
+    while (goes_through(range_index, route) && range_index < this->ranges_count) {
+        d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
+        if (d == nullptr) break;
+        d->set_value_word(address_on_device, value);
+    }
+}
+
+unsigned int MemoryMapper::read_port(unsigned int address)
+{
+    if (this->ports_to_mem) {
+        return(this->read(address));
+    } else {
+        //A machine may declare no port at all: ports_count-1 below would then
+        //be the whole unsigned range and the scan would walk off the array
+        if (this->ports_count == 0) return _FFFF;
+        unsigned int a = address & this->ports_mask;
+        unsigned int address_on_device, range_index;
+        AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_R, &address_on_device, &range_index);
+        if (d != nullptr)
+        {
+            return d->get_value(address_on_device);
+
+        } else
+            return _FFFF;
+    }
+}
+
+void MemoryMapper::write_port(unsigned int address, unsigned int value)
+{
+    if (this->ports_to_mem) {
+        this->write(address, value);
+    } else {
+        if (this->ports_count == 0) return;
+        unsigned int a = address & this->ports_mask;
+        unsigned int address_on_device, range_index;
+        //MODE_W: a range declared write-only has to be reachable for a write,
+        //and a read-only one must not be. Copied from read_port() as MODE_R
+        AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_W, &address_on_device, &range_index);
+        if (d != nullptr)
+        {
+            d->set_value(address_on_device, value);
+        }
+    }
+}
+
+std::vector<DeviceFieldInfo> MemoryMapper::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = AddressableDevice::get_device_fields();
+    r.push_back({"map",     "Current memory and port mapping",       false});
+    r.push_back({"config",  "Value of the mapper configuration bus", false});
+    return r;
+}
+
+bool MemoryMapper::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "config") {
+        out.numeric = true;
+        out.values.push_back(i_config.value);
+        return true;
+    }
+
+    if (field == "map")
+    {
+        //Dumps the ranges the way they are matched at run time. Ranges before
+        //first_range are the ones disabled by cancelinit.
+        //Ranges are stored from index 1 up; index 0 exists only when the
+        //config declares a [*] range, and shows as [off] once it is gone.
+        std::string s;
+        for (unsigned int i = (cancel_init_mask != 0)?0:1; i <= ranges_count; i++)
+        {
+            const MapperRange &r = ranges[i];
+            s += "\n  ";
+            s += (i < first_range)?"[off] ":"      ";
+            s += hex_str(r.range_begin, 4) + "-" + hex_str(r.range_end, 4);
+            s += " -> " + ((r.device != nullptr)?r.device->name:std::string("-"));
+            s += "[" + hex_str(r.base, 4) + "]";
+            s += " mode=";
+            s += ((r.mode & MODE_R) != 0)?"r":"";
+            s += ((r.mode & MODE_W) != 0)?"w":"";
+            if (r.config_mask != 0)
+                s += " cfg=" + hex_str(r.config_value, 2) + ":" + hex_str(r.config_mask, 2);
+            if (r.address_mask != 0)
+                s += " addr=" + hex_str(r.address_value, 4) + ":" + hex_str(r.address_mask, 4);
+            if (r.through) s += " through";
+            if (r.or_read) s += " or_read";
+            if (r.routed) s += " routed";
+        }
+        for (unsigned int i = 0; i < ports_count; i++)
+        {
+            const MapperRange &r = ports[i];
+            s += "\n  port " + hex_str(r.range_begin, 2);
+            s += " -> " + ((r.device != nullptr)?r.device->name:std::string("-"));
+        }
+        out.text = s;
+        return true;
+    }
+
+    return AddressableDevice::get_field(field, from, to, out);
+}
+
+unsigned int MemoryMapper::get_value(unsigned int address)
+{
+    return read(address);
+}
+
+unsigned MemoryMapper::get_direct(unsigned address)
+{
+    unsigned int address_on_device, range_index;
+    unsigned int route = ROUTE_ANSWER;
+    AddressableDevice * d = this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value, address, MODE_R, &address_on_device, &range_index, &route);
+    if (d == nullptr) return _FFFF;
+    unsigned int v = d->get_direct(address_on_device);
+    while (reads_on(range_index, route)) {
+        d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_R, &address_on_device, &range_index, &route);
+        if (d == nullptr) break;
+        v |= d->get_direct(address_on_device);
+    }
+    return v;
+}
+
+void MemoryMapper::set_value(unsigned int address, unsigned int value, bool force)
+{
+    write(address, value);
+}
+
+unsigned int MemoryMapper::get_value_word(unsigned int address)
+{
+    return read_word(address);
+}
+
+void MemoryMapper::set_value_word(unsigned int address, unsigned int value, bool force)
+{
+    write_word(address, value);
+}
+
+
+//----------------------- class Display -------------------------------//
+
+GenericDisplay::GenericDisplay(InterfaceManager *im, EmulatorConfigDevice *cd):
+      ComputerDevice(im, cd)
+    , sx(0)
+    , sy(0)
+    , screen_valid(false)
+    , was_updated(true)
+    , m_renderer_valid(false)
+{}
+
+void GenericDisplay::set_renderer(VideoRenderer & vr)
+{
+    renderer = &vr;
+    render_pixels = vr.get_buffer();
+    line_bytes = vr.get_line_bytes();
+    m_renderer_valid = true;
+    //A new surface is blank: a display that draws only the lines that changed
+    //(the Поиск-1 redraws the whole picture once a second) would leave it so
+    screen_valid = false;
+    was_updated = true;
+}
+
+
+void GenericDisplay::state_restored()
+{
+    //Redrawn by the render thread on its next pass, under the surface lock -
+    //not here, where the emulation thread has no claim on the surface
+    screen_valid = false;
+    was_updated = true;
+}
+
+void GenericDisplay::validate(bool force_render)
+{
+    // Rendering has to be locked against the resize done by the render thread,
+    // otherwise a repaint arriving from the interface thread keeps drawing into
+    // a surface that has just been deleted.
+    lock_surface();
+
+    // A device may change its resolution at any moment, and the surface only
+    // follows on the next frame. Until it does, the buffer is still the old,
+    // possibly narrower one, so drawing would run past its end.
+    if (m_renderer_valid && render_pixels != nullptr && (int)(sx * sizeof(ecat_pixel_t)) <= line_bytes) {
+        if (!screen_valid || force_render) render_all(force_render);
+    }
+
+    unlock_surface();
+}
+
+void GenericDisplay::reset(bool cold)
+{
+    screen_valid = false;
+    was_updated = true;
+}
+
+std::vector<DeviceFieldInfo> GenericDisplay::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"resolution", "Current screen resolution", false});
+    r.push_back({"precise_available", "1 when the display has the high precision mode", false});
+    r.push_back({"precise", "1 when the high precision mode is on", false});
+    return r;
+}
+
+bool GenericDisplay::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "resolution") {
+        out.text = std::to_string(sx) + "x" + std::to_string(sy);
+        return true;
+    }
+    if (field == "precise_available" || field == "precise") {
+        out.numeric = true;
+        out.values.push_back(((field == "precise") ? m_precise : m_precise_available) ? 1 : 0);
+        return true;
+    }
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+std::vector<DeviceCommandInfo> GenericDisplay::get_device_commands()
+{
+    std::vector<DeviceCommandInfo> r = ComputerDevice::get_device_commands();
+    r.push_back({"precise", "[0|1]", "Turns the high precision mode on (without a value too) or off"});
+    return r;
+}
+
+emulator::Result GenericDisplay::send_command(const std::string &command, const std::string &parameters)
+{
+    if (command == "precise") {
+        std::vector<std::string> p = split_params(parameters);
+        //Ignored by a display without the mode, as the menu has no item there
+        set_precise(p.empty() || parse_numeric_value(p[0]) != 0);
+        return emulator::Result::ok();
+    }
+    return ComputerDevice::send_command(command, parameters);
+}
+
+void GenericDisplay::change_resolution(unsigned new_x, unsigned new_y)
+{
+    if (sx != new_x || sy != new_y) {
+        m_renderer_valid = false;
+        sx = new_x;
+        sy = new_y;
+    }
+}
+
+bool GenericDisplay::has_valid_renderer()
+{
+    return m_renderer_valid;
+}
+
+bool GenericDisplay::reduced_rate(uint64_t a, uint64_t b, uint64_t &num, uint64_t &den)
+{
+    if (a == 0 || b == 0) return false;
+    uint64_t x = a, y = b;
+    while (y != 0) { const uint64_t t = x % y; x = y; y = t; }
+    num = a / x;
+    den = b / x;
+    return true;
+}
+
+void GenericDisplay::lock_surface()
+{
+    m_surface_mutex.lock();
+}
+
+void GenericDisplay::unlock_surface()
+{
+    m_surface_mutex.unlock();
+}
+
+//----------------------- Creation functions -------------------------------//
+
+ComputerDevice * create_ram(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new RAM(im, cd);
+}
+
+ComputerDevice * create_rom(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new ROM(im, cd);
+}
+
+ComputerDevice * create_memory_mapper(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new MemoryMapper(im, cd);
+}
+
+ComputerDevice * create_port(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new Port(im, cd);
+}
+
+ComputerDevice * create_port_address(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new PortAddress(im, cd);
+}
+
+//------------------------------- FDC --------------------------------------//
+
+std::vector<DeviceFieldInfo> FDC::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = AddressableDevice::get_device_fields();
+    r.push_back({"busy",  "1 while the controller is working",  false});
+    r.push_back({"drive", "Index of the drive it is talking to", false});
+    return r;
+}
+
+bool FDC::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "busy" || field == "drive")
+    {
+        out.numeric = true;
+        out.values.push_back((field == "busy") ? (get_busy() ? 1u : 0u) : get_selected_drive());
+        return true;
+    }
+
+    return AddressableDevice::get_field(field, from, to, out);
+}

@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: SDL2 renderer
+
+#pragma once
+
+#include <qdebug.h>
+#include <qlogging.h>
+
+#include <algorithm>
+
+#include <SDL.h>
+
+#include "emulator/core.h"
+#include "emulator/renderer.h"
+#include "emulator/thread_compat.h"
+#include "qt_utils.h"
+
+class SDL2Renderer: public VideoRenderer
+{
+private:
+    SDL_Window * SDLWindowRef = nullptr;
+    SDL_Renderer * SDLRendererRef = nullptr;
+    SDL_Texture * SDLTexture = nullptr;
+    SDL_Surface * device_surface = nullptr;
+    SDL_Texture * black_box = nullptr;
+    SDL_Rect render_rect;
+    int cached_window_w = 0;
+    int cached_window_h = 0;
+    int filtering = SCREEN_FILTERING_NONE;
+    //The sharp mode: the frame enlarged by whole numbers without filtering,
+    //as the page does it; only the rest of the scale is linear
+    SDL_Texture * sharp_target = nullptr;
+    int sharp_w = 0;
+    int sharp_h = 0;
+    //The picture shown when frames are blended, made with the first such frame.
+    //The render thread writes it, and the GUI reads it for a screenshot or a
+    //video "as on screen" (get_blended()): both under blend_mutex
+    SDL_Surface * blend_surface = nullptr;
+    bool blend_shown = false;           //the last frame shown was blend_surface
+    compat_mutex blend_mutex;
+
+    void destroy_blend_surface()
+    {
+        compat_lock_guard lock(blend_mutex);
+        if (blend_surface != nullptr) SDL_FreeSurface(blend_surface);
+        blend_surface = nullptr;
+        blend_shown = false;
+    }
+
+    void destroy_sharp_target()
+    {
+        if (sharp_target != nullptr) SDL_DestroyTexture(sharp_target);
+        sharp_target = nullptr;
+        sharp_w = 0;
+        sharp_h = 0;
+    }
+
+    void create_black_box()
+    {
+        black_box = SDL_CreateTexture(SDLRendererRef, SDL_PIXELFORMAT_RGBA8888,
+                                      SDL_TEXTUREACCESS_STREAMING, 100, 100);
+        if (black_box == nullptr) return;
+        unsigned char* black_bytes = nullptr;
+        int pitch = 0;
+        SDL_LockTexture(black_box, nullptr, reinterpret_cast<void**>(&black_bytes), &pitch);
+        memset(black_bytes, 0, 100*100*4);
+        SDL_UnlockTexture(black_box);
+    }
+
+    void recreate_renderer()
+    {
+        destroy_sharp_target();
+        if (black_box != nullptr) { SDL_DestroyTexture(black_box); black_box = nullptr; }
+        if (SDLRendererRef != nullptr) SDL_DestroyRenderer(SDLRendererRef);
+        SDLRendererRef = SDL_CreateRenderer(SDLWindowRef, -1, SDL_RENDERER_ACCELERATED);
+        if (SDLRendererRef != nullptr) {
+            create_black_box();
+            SDL_RenderClear(SDLRendererRef);
+        }
+    }
+
+public:
+    SDL2Renderer():
+        VideoRenderer()
+    {};
+
+    std::string get_name() override
+    {
+        return "SDL2";
+    }
+
+    virtual ~SDL2Renderer() override
+    {
+        destroy_sharp_target();
+        destroy_blend_surface();
+        if (black_box != nullptr) SDL_DestroyTexture(black_box);
+        if (device_surface != nullptr) SDL_FreeSurface(device_surface);
+        if (SDLRendererRef != nullptr) SDL_DestroyRenderer(SDLRendererRef);
+        if (SDLWindowRef != nullptr) SDL_DestroyWindow(SDLWindowRef);
+    };
+
+    void init_screen(void *p, int sx, int sy, double ss, double ps) override
+    {
+        VideoRenderer::init_screen(p, sx, sy, ss, ps);
+
+        if (SDLWindowRef == nullptr)
+            SDLWindowRef = SDL_CreateWindowFrom(p);
+        if (!SDLWindowRef) {
+            qWarning() << "SDL error:" << SDL_GetError();
+            return;
+        }
+
+        recreate_renderer();
+        if (!SDLRendererRef) return;
+
+        SDL_RenderCopy(SDLRendererRef, black_box, NULL, NULL);
+        render_rect.w = sx * ss * ps;
+        render_rect.h = sy * ss;
+
+        SDL_GetWindowSize(SDLWindowRef, &cached_window_w, &cached_window_h);
+
+        device_surface = SDL_CreateRGBSurfaceWithFormat(0, screen_x, screen_y, 32, SDL_PIXELFORMAT_RGBA8888);
+    }
+
+    void stop() override
+    {
+        destroy_sharp_target();
+        destroy_blend_surface();
+        if (black_box != nullptr) SDL_DestroyTexture(black_box);
+        if (device_surface != nullptr) SDL_FreeSurface(device_surface);
+        if (SDLRendererRef != nullptr) SDL_DestroyRenderer(SDLRendererRef);
+
+        black_box = nullptr;
+        device_surface = nullptr;
+        SDLRendererRef = nullptr;
+        cached_window_w = 0;
+        cached_window_h = 0;
+    }
+
+    //The hint is read when a texture is created, and render() creates the
+    //frame's texture anew every time, so it sets the hint itself
+    void set_filtering(int value) override
+    {
+        filtering = value;
+    }
+
+    uint8_t * get_buffer() override
+    {
+        return reinterpret_cast<uint8_t *>(device_surface->pixels);
+    }
+
+    int get_line_bytes() override
+    {
+        return screen_x * 4;
+    }
+
+    void fill(uint32_t c) override
+    {
+        SDL_FillRect(device_surface, NULL, c);
+    }
+
+    void resize(int sx, int sy, double ss, double ps) override
+    {
+        SDL_FreeSurface(device_surface);
+        screen_x = sx;
+        screen_y = sy;
+        screen_ss = ss;
+        screen_ps = ps;
+        device_surface = SDL_CreateRGBSurfaceWithFormat(0, screen_x, screen_y, 32, SDL_PIXELFORMAT_RGBA8888);
+        SDL_RenderCopy(SDLRendererRef, black_box, NULL, NULL);
+    }
+
+    void render() override
+    {
+        if (SDLRendererRef == nullptr || device_surface == nullptr) return;
+
+        int rx, ry;
+        SDL_GetWindowSize(SDLWindowRef, &rx, &ry);
+        if (rx <= 0 || ry <= 0) return;
+
+        // Recreate the renderer when the window has been resized externally.
+        // SDL_CreateWindowFrom windows don't pump events, so the renderer's
+        // internal backbuffer and D3D device state become stale after resize.
+        if (rx != cached_window_w || ry != cached_window_h) {
+            cached_window_w = rx;
+            cached_window_h = ry;
+            recreate_renderer();
+            if (SDLRendererRef == nullptr) return;
+        }
+
+        if (screen_ss == 0) {
+            int border = 20;
+            int rx2 = rx - 2*border;
+            int ry2 = ry - 2*border;
+            if (rx2 <= 0 || ry2 <= 0) return;
+            float screen_aspect = (float)rx2 / ry2;
+            float image_aspect = (float)screen_x / screen_y * screen_ps;
+
+            if (screen_aspect > image_aspect) {
+                // The window is wider than the picture, the height is the limit
+                render_rect.h = ry2;
+                render_rect.w = (float)ry2 * image_aspect;
+            } else {
+                // The width is the limit
+                render_rect.w = rx2;
+                render_rect.h = (float)rx2 / image_aspect;
+            }
+        } else {
+            render_rect.w = screen_x * screen_ss * screen_ps;
+            render_rect.h = screen_y * screen_ss;
+        }
+        render_rect.x = (rx - render_rect.w) / 2;
+        render_rect.y = (ry - render_rect.h) / 2;
+
+        const bool sharp = filtering == SCREEN_FILTERING_SHARP
+                           && SDL_RenderTargetSupported(SDLRendererRef);
+        const std::string quality = sharp ? std::string("0") : std::to_string(filtering);
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, quality.c_str());
+
+        SDL_Surface * frame = device_surface;
+        if (blend_surface != nullptr && (!frame_processing()
+                                         || blend_surface->w != screen_x || blend_surface->h != screen_y))
+            destroy_blend_surface();
+        {
+            compat_lock_guard lock(blend_mutex);
+            if (blend_surface == nullptr && frame_processing())
+                blend_surface = SDL_CreateRGBSurfaceWithFormat(0, screen_x, screen_y, 32, SDL_PIXELFORMAT_RGBA8888);
+            blend_shown = blend_surface != nullptr
+                && blend_frame(static_cast<const uint8_t *>(device_surface->pixels),
+                               static_cast<uint8_t *>(blend_surface->pixels));
+            if (blend_shown) frame = blend_surface;
+            if (blend_surface == nullptr) blend_off();
+        }
+
+        SDLTexture = SDL_CreateTextureFromSurface(SDLRendererRef, frame);
+        if (SDLTexture == nullptr) {
+            // Renderer may be in a bad state (e.g. D3D device lost), try recovery
+            recreate_renderer();
+            if (SDLRendererRef == nullptr) return;
+            SDLTexture = SDL_CreateTextureFromSurface(SDLRendererRef, frame);
+            if (SDLTexture == nullptr) return;
+        }
+
+        SDL_Texture * picture = SDLTexture;
+        if (sharp) {
+            const int kx = std::max(1, render_rect.w / screen_x);
+            const int ky = std::max(1, render_rect.h / screen_y);
+            const int tw = screen_x * kx;
+            const int th = screen_y * ky;
+            if (sharp_target == nullptr || tw != sharp_w || th != sharp_h) {
+                destroy_sharp_target();
+                SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+                sharp_target = SDL_CreateTexture(SDLRendererRef, SDL_PIXELFORMAT_RGBA8888,
+                                                 SDL_TEXTUREACCESS_TARGET, tw, th);
+                if (sharp_target != nullptr) {
+                    sharp_w = tw;
+                    sharp_h = th;
+                }
+            }
+            //Without the target the frame goes to the window unfiltered
+            if (sharp_target != nullptr && SDL_SetRenderTarget(SDLRendererRef, sharp_target) == 0) {
+                SDL_RenderCopy(SDLRendererRef, SDLTexture, NULL, NULL);
+                SDL_SetRenderTarget(SDLRendererRef, NULL);
+                picture = sharp_target;
+            }
+        }
+
+        SDL_RenderClear(SDLRendererRef);
+        SDL_RenderCopy(SDLRendererRef, picture, NULL, &render_rect);
+        SDL_RenderPresent(SDLRendererRef);
+
+        SDL_DestroyTexture(SDLTexture);
+    }
+
+    //The size the picture is drawn at in the window, set by render()
+    void get_render_size(int * w, int * h) const
+    {
+        *w = render_rect.w;
+        *h = render_rect.h;
+    }
+
+    uint32_t MapRGB(uint8_t R, uint8_t G, uint8_t B) override
+    {
+        return SDL_MapRGB(device_surface->format, R, G, B);
+    }
+
+    //The blended picture the window showed last, as RGBA bytes, for a
+    //screenshot or a video "as on screen" from the GUI thread: the window
+    //itself cannot be read back from there. False when the frame shown was
+    //the surface itself (blending off), which get_screenshot() gives
+    bool get_blended(std::vector<uint8_t> &image, unsigned int &sx, unsigned int &sy)
+    {
+        compat_lock_guard lock(blend_mutex);
+        if (!blend_shown || blend_surface == nullptr) return false;
+        sx = (unsigned int)blend_surface->w;
+        sy = (unsigned int)blend_surface->h;
+        image.resize((size_t)sx * sy * 4);
+        //RGBA8888 is a packed format: R is the high byte of the pixel
+        uint8_t * out = image.data();
+        for (unsigned int y = 0; y < sy; y++) {
+            const uint32_t * row = reinterpret_cast<const uint32_t *>(
+                static_cast<const uint8_t *>(blend_surface->pixels) + (size_t)y * blend_surface->pitch);
+            for (unsigned int x = 0; x < sx; x++) {
+                const uint32_t p = row[x];
+                *out++ = (uint8_t)(p >> 24);
+                *out++ = (uint8_t)(p >> 16);
+                *out++ = (uint8_t)(p >> 8);
+                *out++ = (uint8_t)p;
+            }
+        }
+        return true;
+    }
+
+    std::vector<uint8_t> get_screenshot() override
+    {
+        std::vector<uint8_t> image;
+
+        unsigned int bitmap_size = screen_x * screen_y * 4 + 200;
+
+        std::vector<uint8_t> bmp;
+        bmp.resize(bitmap_size);
+
+        SDL_RWops *rw;
+        rw = SDL_RWFromMem(bmp.data(), bitmap_size);
+        SDL_SaveBMP_RW(device_surface, rw, 0);
+        unsigned error = decodeBMP(image, (unsigned&)screen_x, (unsigned&)screen_y, bmp);
+
+        return image;
+    }
+
+
+};

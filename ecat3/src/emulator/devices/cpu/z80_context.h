@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Common definitions for the Z80 CPU core
+
+#pragma once
+
+#include <cstdint>
+
+#pragma pack(1)
+
+struct z80context
+{
+    union {
+        struct{
+            uint8_t  C,B,E,D,L,H,F,A,IXL,IXH,IYL,IYH,I,R;
+            uint16_t SP, PC, AF_, BC_, DE_, HL_;
+        } regs;
+        struct {
+            uint16_t BC, DE, HL, AF, IX, IY;
+        } reg_pairs;
+        uint8_t reg_array_8[12];
+        uint16_t reg_array_16[6];
+    } registers;
+    unsigned int IFF1;
+    unsigned int IFF2;
+    unsigned int IM;
+    bool halted;
+    unsigned int NMI;
+    unsigned int INT;
+    unsigned int debug_mode;
+
+    unsigned int global_prefix;
+    unsigned int index8_inc;
+
+    //MEMPTR (WZ): the internal address register. Nothing reads it but BIT
+    //n,(HL), which takes its flags 3 and 5 from the high byte - see the rules
+    //in "memptr_eng.txt" (Boo-boo, Vladimir Kladov) that z80core follows
+    uint16_t memptr;
+};
+
+#pragma pack()
+
+namespace Z80
+{
+    const uint8_t F_CARRY      = 1;
+    const uint8_t F_SUB        = (1 << 1); //0x02
+    const uint8_t F_PARITY     = (1 << 2); //0x04
+    const uint8_t F_OVERFLOW   = (1 << 2); //0x04
+    const uint8_t F_B3         = (1 << 3); //0x08
+    const uint8_t F_HALF_CARRY = (1 << 4); //0x10
+    const uint8_t F_B5         = (1 << 5); //0x20
+    const uint8_t F_ZERO       = (1 << 6); //0x40
+    const uint8_t F_SIGN       = (1 << 7); //0x80
+    const uint8_t F_ALL        = 0xFF;
+}

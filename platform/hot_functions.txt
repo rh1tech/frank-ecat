@@ -1,0 +1,55 @@
+# frank-ecat — the eCat3 functions that run from SRAM (tools/hot_sections.py)
+#
+# One demangled name a line, without the argument list; every overload and
+# every clone (.constprop, .isra) of it is taken. Inline functions (next_byte,
+# find_page) come with the functions they are inlined into. From the sampling profiler
+# (~C prof~ on the console): what the emulation loop spends its time in.
+# Flash goes through the 16 KB XIP cache, shared with PSRAM, and a miss is a
+# QSPI transfer, so a hot function in flash costs more than its instructions.
+
+# the loop
+Emulator::timer_proc
+DeviceManager::clock
+ComputerDevice::system_clock
+
+# memory and ports
+MemoryMapper::read
+MemoryMapper::write
+MemoryMapper::map_read
+MemoryMapper::map_write
+MemoryMapper::fill_page
+MemoryMapper::reads_on
+MemoryMapper::map
+Memory::get_value
+Memory::set_value
+ROM::get_value
+Interface::change
+Interface::changed
+
+# 8080
+i8080core::execute
+I8080Core::read_mem
+I8080Core::write_mem
+I8080Core::read_port
+I8080Core::write_port
+i8080::execute
+
+# sound
+GenericSound::clock
+GenericSound::push_frame
+GenericSound::store_frame
+Speaker::calc_sound_value
+
+# ВГ75 / ВТ57 / ВВ55 / keyboard / tape
+I8275::clock
+I8275::dma_tick
+I8275Display::draw_row
+I8275Display::font_address
+I8275Display::set_attr
+AudioRateMatch::cubic
+I8257::dma_next
+I8255::set_value
+I8255::get_value
+ScanKeyboard::interface_callback
+ScanKeyboard::calculate_out
+TapeRecorder::clock

@@ -1,0 +1,537 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: AY-3-8910 programmable sound generator
+
+#include <cstring>
+
+#include "ay8910.h"
+#include "emulator/utils.h"
+
+// Host bus protocols
+#define AY_BUS_DIRECT   0   // even address: register select, odd address: data
+#define AY_BUS_BK       1   // БК, port 0177714: a word write selects a register,
+                            // a byte write sends data; both are inverted by the port
+#define AY_BUS_WORD     2   // УК-НЦ sound module: a word write selects a register,
+                            // a byte write sends data, the board's buffers undo
+                            // the inversion of the bus; reads answer 0
+#define AY_BUS_PINS     3   // no bus: BDIR, BC1 and the data lines are interfaces
+
+#define AY_CB_PINS      1
+// БК sound boards run the chip from 12 MHz / 7
+#define AY_DEFAULT_FREQUENCY    1714286
+
+// Output level of the 16 volume steps, 0..1000 (logarithmic DAC of the 8910)
+static const unsigned int AY_VOLUME[16] = {
+    0, 14, 21, 29, 42, 62, 85, 137, 169, 265, 353, 450, 570, 728, 869, 1000
+};
+
+// Bits actually stored by each register
+static const uint8_t AY_REG_MASK[AY_REGS] = {
+    0xFF, 0x0F, 0xFF, 0x0F, 0xFF, 0x0F, 0x1F, 0xFF,
+    0x1F, 0x1F, 0x1F, 0xFF, 0xFF, 0x0F, 0xFF, 0xFF
+};
+
+AY8910::AY8910(InterfaceManager *im, EmulatorConfigDevice *cd):
+      AddressableDevice(im, cd)
+    , i_porta(this, im, 8, "porta", MODE_W)
+    , i_portb(this, im, 8, "portb", MODE_W)
+    , i_bdir(this, im, 1, "bdir", MODE_R, AY_CB_PINS)
+    , i_bc1(this, im, 1, "bc1", MODE_R, AY_CB_PINS)
+    , i_da(this, im, 8, "da", MODE_R, AY_CB_PINS)
+    , i_da_out(this, im, 8, "da_out", MODE_W)
+    , m_bus(AY_BUS_DIRECT)
+    , m_frequency(AY_DEFAULT_FREQUENCY)
+    , m_step(0)
+    , m_acc(0)
+    , m_used(false)
+    , m_idle_ticks(0)
+    , m_latch(0)
+{
+    m_clocked = true;   //clock() is overridden here
+    addresable_size = 2;
+    can_read = true;
+    can_write = true;
+    memset(m_regs, 0, sizeof(m_regs));
+    reset(true);
+}
+
+emulator::Result AY8910::load_config(SystemData *sd)
+{
+    emulator::Result res = AddressableDevice::load_config(sd);
+    if (!res) return res;
+
+    std::string bus = str_tolower(cd->get_parameter("bus", false).value);
+    if (bus.empty() || bus == "direct")
+        m_bus = AY_BUS_DIRECT;
+    else if (bus == "bk")
+        m_bus = AY_BUS_BK;
+    else if (bus == "word")
+        m_bus = AY_BUS_WORD;
+    else if (bus == "pins")
+        m_bus = AY_BUS_PINS;
+    else
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{AY8910|" + std::string(QT_TRANSLATE_NOOP("AY8910", "Unknown bus protocol")) + "} " + bus);
+
+    m_frequency = read_confg_value(cd, "frequency", false, (unsigned int)AY_DEFAULT_FREQUENCY);
+    if (m_frequency == 0 || m_system_clock == 0)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{AY8910|" + std::string(QT_TRANSLATE_NOOP("AY8910", "Incorrect clock frequency")) + "}");
+
+    // Tone ticks per system clock, 16.16
+    m_step = (uint32_t)(((uint64_t)m_frequency << 16) / 8 / m_system_clock);
+
+    // A chip of a 2xAY board, see ay8910.h
+    m_board_chip = read_confg_value(cd, "chip", false, (unsigned int)0);
+    if (m_board_chip > 2 || (m_board_chip != 0 && m_bus != AY_BUS_BK))
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{AY8910|" + std::string(QT_TRANSLATE_NOOP("AY8910", "Incorrect chip number")) + "}");
+    m_selected = (m_board_chip != 2);
+    const std::string pair = cd->get_parameter("pair", false).value;
+    if (!pair.empty()) {
+        m_pair = dynamic_cast<AY8910*>(im->dm->get_device_by_name(pair, false));
+        if (m_pair == nullptr || m_pair == this)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{AY8910|" + std::string(QT_TRANSLATE_NOOP("AY8910", "Not an AY-3-8910")) + "} " + pair);
+        m_pair->m_partner = this;
+    }
+
+    return emulator::Result::ok();
+}
+
+void AY8910::reset(MAYBE_UNUSED bool cold)
+{
+    memset(m_regs, 0, sizeof(m_regs));
+    m_latch = 0;
+    m_active = true;
+    m_acc = 0;
+    m_used = false;
+    m_idle_ticks = 0;
+    for (unsigned int c = 0; c < AY_TONE_CHANNELS; c++) {
+        m_tone_count[c] = 0;
+        m_tone_out[c] = 0;
+    }
+    m_prescale = 0;
+    m_noise_count = 0;
+    m_rng = 1;
+    m_selected = (m_board_chip != 2);
+    restart_envelope();
+    output_ports();
+    //Not used any more: the second chip of a 2xAY board leaves the mix, and
+    //the mixer may have been reset before this device
+    sound_mode_changed();
+}
+
+//------------------- Registers --------------------------------------------//
+
+void AY8910::select(unsigned int reg)
+{
+    m_latch = reg & 0x0F;
+}
+
+void AY8910::write_reg(unsigned int reg, unsigned int value)
+{
+    if (reg >= AY_REGS) return;
+    if (!m_used) {
+        catch_up();
+        m_used = true;
+        sound_mode_changed();
+    }
+    m_regs[reg] = (uint8_t)(value & AY_REG_MASK[reg]);
+    switch (reg) {
+    case 13:
+        restart_envelope();
+        break;
+    case 7:
+    case 14:
+    case 15:
+        output_ports();
+        break;
+    default:
+        break;
+    }
+}
+
+// A port is an output while its bit of the mixer register (6 for A, 7 for B)
+// is set; an input is pulled up, $FF to whatever is wired to it. After a
+// reset both are inputs
+void AY8910::output_ports()
+{
+    const unsigned a = (m_regs[7] & 0x40) ? m_regs[14] : 0xFF;
+    const unsigned b = (m_regs[7] & 0x80) ? m_regs[15] : 0xFF;
+    if (a != i_porta.value) i_porta.change(a);
+    if (b != i_portb.value) i_portb.change(b);
+}
+
+unsigned int AY8910::read_reg(unsigned int reg)
+{
+    return (reg < AY_REGS) ? m_regs[reg] : 0xFF;
+}
+
+void AY8910::restart_envelope()
+{
+    unsigned int shape = m_regs[13];
+    m_env_attack = (shape & 0x04) ? 0x0F : 0x00;
+    if ((shape & 0x08) == 0) {
+        // Shapes 0-7: one slope, then silence
+        m_env_hold = true;
+        m_env_alternate = (m_env_attack != 0);
+    } else {
+        m_env_hold = (shape & 0x01) != 0;
+        m_env_alternate = (shape & 0x02) != 0;
+    }
+    m_env_count = 0;
+    m_env_step = 15;
+    m_env_holding = false;
+    m_env_volume = (unsigned int)m_env_step ^ m_env_attack;
+}
+
+//------------------- Generators -------------------------------------------//
+
+// One tone tick, eight chip clocks
+void AY8910::tick()
+{
+    for (unsigned int c = 0; c < AY_TONE_CHANNELS; c++) {
+        unsigned int period = m_regs[c * 2] | (m_regs[c * 2 + 1] << 8);
+        if (period == 0) period = 1;
+        if (++m_tone_count[c] >= period) {
+            m_tone_count[c] = 0;
+            m_tone_out[c] ^= 1;
+        }
+    }
+
+    // Noise and envelope are clocked at half the tone rate
+    m_prescale ^= 1;
+    if (m_prescale) return;
+
+    unsigned int noise_period = m_regs[6];
+    if (noise_period == 0) noise_period = 1;
+    if (++m_noise_count >= noise_period) {
+        m_noise_count = 0;
+        // 17-bit LFSR with taps at bits 0 and 3
+        m_rng ^= (((m_rng & 1) ^ ((m_rng >> 3) & 1)) << 17);
+        m_rng >>= 1;
+    }
+
+    if (!m_env_holding) {
+        unsigned int env_period = m_regs[11] | (m_regs[12] << 8);
+        if (env_period == 0) env_period = 1;
+        if (++m_env_count >= env_period) {
+            m_env_count = 0;
+            m_env_step--;
+            if (m_env_step < 0) {
+                if (m_env_hold) {
+                    if (m_env_alternate) m_env_attack ^= 0x0F;
+                    m_env_holding = true;
+                    m_env_step = 0;
+                } else {
+                    if (m_env_alternate) m_env_attack ^= 0x0F;
+                    m_env_step = 15;
+                }
+            }
+            m_env_volume = (unsigned int)m_env_step ^ m_env_attack;
+        }
+    }
+}
+
+// The ticks a chip with every register at 0 has been counting instead of
+// running. With all periods 0 (taken as 1) the tone outputs flip on every
+// tick, and noise and envelope step on every other one: the noise LFSR comes
+// round every 131071 steps, and envelope shape 0 holds after its one slope
+void AY8910::catch_up()
+{
+    const uint64_t n = m_idle_ticks;
+    m_idle_ticks = 0;
+    if (n == 0) return;
+
+    if (n & 1)
+        for (unsigned int c = 0; c < AY_TONE_CHANNELS; c++) m_tone_out[c] ^= 1;
+
+    // Noise and envelope step when the prescaler comes back to 0
+    const uint64_t steps = m_prescale ? (n + 1) / 2 : n / 2;
+    m_prescale ^= (unsigned int)(n & 1);
+
+    for (uint64_t i = steps % 131071; i > 0; i--) {
+        m_rng ^= (((m_rng & 1) ^ ((m_rng >> 3) & 1)) << 17);
+        m_rng >>= 1;
+    }
+
+    for (uint64_t i = 0; i < steps && !m_env_holding; i++) {
+        m_env_step--;
+        if (m_env_step < 0) {
+            if (m_env_alternate) m_env_attack ^= 0x0F;
+            if (m_env_hold) {
+                m_env_holding = true;
+                m_env_step = 0;
+            } else
+                m_env_step = 15;
+        }
+        m_env_volume = (unsigned int)m_env_step ^ m_env_attack;
+    }
+}
+
+void AY8910::clock(unsigned int counter)
+{
+    if (!plugged()) return;
+    m_acc += counter * m_step;
+    if (!m_used) {
+        m_idle_ticks += m_acc >> 16;
+        m_acc &= 0xFFFF;
+        return;
+    }
+    while (m_acc >= 0x10000) {
+        m_acc -= 0x10000;
+        tick();
+    }
+}
+
+// Sum of the three channels, 0..3000
+unsigned int AY8910::level()
+{
+    unsigned int mixer = m_regs[7];
+    unsigned int noise = m_rng & 1;
+    unsigned int sum = 0;
+    for (unsigned int c = 0; c < AY_TONE_CHANNELS; c++) {
+        // Mixer bits are active low: a set bit disables the source
+        unsigned int tone_on  = m_tone_out[c] | ((mixer >> c) & 1);
+        unsigned int noise_on = noise | ((mixer >> (c + 3)) & 1);
+        if (tone_on && noise_on) {
+            unsigned int volume = m_regs[8 + c];
+            unsigned int step = (volume & 0x10) ? m_env_volume : (volume & 0x0F);
+            sum += AY_VOLUME[step];
+        }
+    }
+    return sum;
+}
+
+int32_t AY8910::sound_sample(int64_t amplitude)
+{
+    return (int32_t)((int64_t)level() * amplitude / 1500 - amplitude);
+}
+
+bool AY8910::sound_active()
+{
+    // The second chip of a 2xAY board joins the mix once it is played
+    if (m_pair != nullptr) return plugged() && m_used;
+    return m_plugged;
+}
+
+//------------------- Connector --------------------------------------------//
+
+void AY8910::plug_changed()
+{
+    // A board taken out and put back starts from power-on, and one that is
+    // out keeps no half-played note that would sound on its return
+    reset(true);
+    if (m_partner != nullptr) {
+        m_partner->reset(true);
+        m_partner->sound_mode_changed();
+    }
+}
+
+const char * AY8910::plug_title() const
+{
+    return QT_TRANSLATE_NOOP("DeviceOptions", "AY-3-8910");
+}
+
+//------------------- Bus --------------------------------------------------//
+
+unsigned int AY8910::get_value(unsigned int address)
+{
+    if (!plugged()) return _FFFF;
+    if (m_bus == AY_BUS_BK) return 0xFF;
+    if (m_bus == AY_BUS_WORD) return 0;
+    return (address & 1) ? read_reg(m_latch) : m_latch;
+}
+
+void AY8910::set_value(unsigned int address, unsigned int value, bool force)
+{
+    // Out of its connector the chip is not on the bus: the writes of a
+    // program for another board (the samples of a Covox) must not reach it.
+    // A forced write is the debugger's and still sets the register
+    if (!plugged() && !force) return;
+    if (m_bus == AY_BUS_BK) {
+        // A byte write to the port: only the low byte reaches the data lines.
+        // On a 2xAY board only the selected chip takes it
+        if (!m_selected) return;
+        if ((address & 1) == 0) write_reg(m_latch, (value ^ 0xFF) & 0xFF);
+        return;
+    }
+    if (m_bus == AY_BUS_WORD) {
+        // A byte write of either half carries data
+        write_reg(m_latch, value & 0xFF);
+        return;
+    }
+    if (address & 1)
+        write_reg(m_latch, value);
+    else
+        select(value);
+}
+
+// bus = pins: the cycle the control lines name, taken whenever they or the
+// data lines move. BDIR BC1 = 1 1 latches the address, 1 0 writes, 0 1 reads
+// (the chip drives the data lines), 0 0 leaves the bus alone. The VIA of the
+// Oric moves BC1 (CA2) and BDIR (CB2) one after the other, so on the way
+// from the address cycle to rest the chip sees a write of the address byte
+// to the register just latched - MAME does the same; the program's data
+// write comes after it anyway
+void AY8910::pin_cycle()
+{
+    if (!plugged()) return;
+    const bool bdir = (i_bdir.value & 1) != 0, bc1 = (i_bc1.value & 1) != 0;
+    const unsigned da = i_da.value & 0xFF;
+    if (bdir && bc1) {
+        m_active = (da >> 4) == 0;
+        if (m_active) select(da);
+    } else if (bdir) {
+        if (m_active) write_reg(m_latch, da);
+    } else if (bc1) {
+        i_da_out.change(m_active ? read_reg(m_latch) : 0xFF);
+        return;
+    }
+    if (i_da_out.value != 0xFF) i_da_out.change(0xFF);
+}
+
+void AY8910::interface_callback(unsigned int callback_id, MAYBE_UNUSED unsigned int new_value, MAYBE_UNUSED unsigned int old_value)
+{
+    if (callback_id == AY_CB_PINS && m_bus == AY_BUS_PINS) pin_cycle();
+}
+
+unsigned int AY8910::get_value_word(unsigned int address)
+{
+    if (!plugged()) return _FFFF;
+    if (m_bus == AY_BUS_BK) return 0xFFFF;
+    if (m_bus == AY_BUS_WORD) return 0;
+    return get_value(address & ~1) | (get_value(address | 1) << 8);
+}
+
+void AY8910::set_value_word(unsigned int address, unsigned int value, bool force)
+{
+    if (!plugged() && !force) return;
+    if (m_bus == AY_BUS_BK) {
+        // A word write to the port: the low byte selects the register
+        if (m_board_chip != 0) {
+            // On a 2xAY board the word may choose the chip instead: register
+            // 0377 or 0376 (TurboSound) or bits 15 and 14 (GryphonSound), as
+            // the BK emulator of bk-catalog (Ivan Kalininskiy) decodes it
+            const unsigned int v = (value ^ 0xFFFF) & 0xFFFF;
+            const unsigned int reg = v & 0xFF;
+            if (reg == 0xFF) { m_selected = (m_board_chip == 1); return; }
+            if (reg == 0xFE) { m_selected = (m_board_chip == 2); return; }
+            if (v & 0xC000) m_selected = (v & (m_board_chip == 1 ? 0x8000u : 0x4000u)) != 0;
+            if (!m_selected) return;
+        }
+        select(value ^ 0xFF);
+        return;
+    }
+    if (m_bus == AY_BUS_WORD) {
+        select(value & 0xFF);
+        return;
+    }
+    set_value(address & ~1, value & 0xFF, force);
+    set_value(address | 1, (value >> 8) & 0xFF, force);
+}
+
+unsigned int AY8910::get_direct(unsigned int address)
+{
+    return (address & 1) ? read_reg(m_latch) : m_latch;
+}
+
+//------------------- Introspection ----------------------------------------//
+
+void AY8910::save_state(StateWriter &w)
+{
+    AddressableDevice::save_state(w);
+    w.array("regs", m_regs, AY_REGS);
+    w.n("latch", m_latch);
+    w.b("used", m_used);
+    w.n64("idle_ticks", m_idle_ticks);
+    w.n("acc", m_acc);
+    w.array("tone_count", m_tone_count, AY_TONE_CHANNELS);
+    w.array("tone_out", m_tone_out, AY_TONE_CHANNELS);
+    w.n("prescale", m_prescale);
+    w.n("noise_count", m_noise_count);
+    //A 17 bit shift register. Left out, the noise comes back in a different
+    //place - inaudible, but a reference screenshot of a noise driven effect
+    //would fail and look like a random fault
+    w.u("rng", m_rng, 32);
+    w.n("env_count", m_env_count);
+    w.n("env_step", static_cast<uint32_t>(m_env_step));
+    w.n("env_attack", m_env_attack);
+    w.b("env_hold", m_env_hold);
+    w.b("env_alternate", m_env_alternate);
+    w.b("env_holding", m_env_holding);
+    w.n("env_volume", m_env_volume);
+    if (m_board_chip != 0) w.b("selected", m_selected);
+    if (m_bus == AY_BUS_PINS) w.b("active", m_active);
+}
+
+emulator::Result AY8910::load_state(const StateReader &r)
+{
+    emulator::Result res = AddressableDevice::load_state(r);
+    if (!res) return res;
+    r.array("regs", m_regs, AY_REGS);
+    r.u("latch", m_latch);
+    r.b("used", m_used);
+    r.n64("idle_ticks", m_idle_ticks);
+    r.u("acc", m_acc);
+    r.array("tone_count", m_tone_count, AY_TONE_CHANNELS);
+    r.array("tone_out", m_tone_out, AY_TONE_CHANNELS);
+    r.u("prescale", m_prescale);
+    r.u("noise_count", m_noise_count);
+    r.u("rng", m_rng);
+    r.u("env_count", m_env_count);
+    r.u("env_step", m_env_step);
+    r.u("env_attack", m_env_attack);
+    r.b("env_hold", m_env_hold);
+    r.b("env_alternate", m_env_alternate);
+    r.b("env_holding", m_env_holding);
+    r.u("env_volume", m_env_volume);
+    if (m_board_chip != 0) r.b("selected", m_selected);
+    if (m_bus == AY_BUS_PINS) r.b("active", m_active);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> AY8910::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"regs",     "Registers 0-15; without a range all of them",  true});
+    r.push_back({"register", "Selected register",                           false});
+    r.push_back({"level",    "Output level, 0-3000",                        false});
+    r.push_back({"envelope", "Current envelope volume, 0-15",               false});
+    r.push_back({"plugged",  "1 if the chip is plugged in",                 false});
+    r.push_back({"selected", "1 if the chip takes the data writes (a chip of a 2xAY board)", false});
+    return r;
+}
+
+bool AY8910::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (!m_used) catch_up();
+    out.numeric = true;
+    if (field == "regs") {
+        if (from == 0 && to == 0) to = AY_REGS - 1;
+        if (to >= AY_REGS) to = AY_REGS - 1;
+        if (from > to) from = to;
+        out.width = 8;
+        out.has_start = true;
+        out.start = from;
+        for (unsigned int i = from; i <= to; i++) out.values.push_back(m_regs[i]);
+        return true;
+    }
+    if (field == "register") { out.values.push_back(m_latch);       return true; }
+    out.width = 16;
+    if (field == "level")    { out.values.push_back(level());       return true; }
+    out.width = 0;
+    if (field == "envelope") { out.values.push_back(m_env_volume);  return true; }
+    if (field == "plugged")  { out.values.push_back(plugged()?1:0); return true; }
+    if (field == "selected") { out.values.push_back(m_selected?1:0); return true; }
+
+    out.numeric = false;
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+ComputerDevice * create_ay8910(InterfaceManager *im, EmulatorConfigDevice *cd)
+{
+    return new AY8910(im, cd);
+}

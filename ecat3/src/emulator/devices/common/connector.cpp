@@ -1,0 +1,212 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: A socket that one of several devices is plugged into
+
+#include "connector.h"
+#include "emulator/utils.h"
+
+#define CONNECTOR_OPTION_DEVICE 0
+
+//----------------------- Pluggable -----------------------------------------//
+
+void Pluggable::set_plugged(bool on)
+{
+    if (on == m_plugged) return;
+    m_plugged = on;
+    plug_changed();
+}
+
+PluggableDevice::PluggableDevice(InterfaceManager *im, EmulatorConfigDevice *cd):
+    ComputerDevice(im, cd)
+{
+}
+
+//----------------------- Connector -----------------------------------------//
+
+Connector::Connector(InterfaceManager *im, EmulatorConfigDevice *cd):
+    ComputerDevice(im, cd)
+    , m_selected(0)
+    , m_title(QT_TRANSLATE_NOOP("DeviceOptions", "Input device"))
+{
+    device_class = "connector";
+}
+
+emulator::Result Connector::load_config(SystemData *sd)
+{
+    emulator::Result res = ComputerDevice::load_config(sd);
+    if (!res) return res;
+
+    std::vector<std::string> names = split_string(cd->get_parameter("devices", false).value, '|', true);
+    if (names.empty())
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{Connector|" + std::string(QT_TRANSLATE_NOOP("Connector", "A list of devices is expected for")) + "} " + name);
+
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string n = str_trim(names[i]);
+        Pluggable * d = dynamic_cast<Pluggable*>(im->dm->get_device_by_name(n, false));
+        if (d == nullptr)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{Connector|" + std::string(QT_TRANSLATE_NOOP("Connector", "Not a device that can be plugged in")) + "} " + n);
+        m_devices.push_back(d);
+        m_names.push_back(n);
+        m_titles.push_back(plug_title_of(n, d));
+    }
+
+    // What the socket is for, which only names the option list: a socket of
+    // input devices or a sound board slot
+    const std::string kind = str_tolower(str_trim(cd->get_parameter("kind", false).value));
+    if (kind.empty() || kind == "input")
+        m_title = QT_TRANSLATE_NOOP("DeviceOptions", "Input device");
+    else if (kind == "sound")
+        m_title = QT_TRANSLATE_NOOP("DeviceOptions", "Sound");
+    else
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{Connector|" + std::string(QT_TRANSLATE_NOOP("Connector", "Unknown connector kind")) + "} " + kind);
+
+    // A name of its own overrides the kind: it is what the tooltip of the
+    // toolbar icon and the row of the extension editor say. It is written in
+    // the config, so it goes to the screen as it is, without translation
+    const std::string label = str_trim(cd->get_parameter("label", false).value);
+    if (!label.empty()) m_title = label;
+
+    // A file found the way other machine files are: next to the config, in files/, in data/
+    m_icon = str_trim(cd->get_parameter("icon", false).value);
+
+    // What is plugged in until the user picks something else
+    const std::string def = str_trim(cd->get_parameter("default", false).value);
+    m_selected = 0;
+    if (!def.empty() && str_tolower(def) != "none") {
+        for (size_t i = 0; i < m_names.size(); i++)
+            if (m_names[i] == def) m_selected = static_cast<unsigned int>(i + 1);
+        if (m_selected == 0)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{Connector|" + std::string(QT_TRANSLATE_NOOP("Connector", "The default device is not in the list")) + "} " + def);
+    }
+
+    apply();
+    return emulator::Result::ok();
+}
+
+// What the option list calls a device: its "title" when the config gives one
+// (the board, not the chip: "2xAY TurboSound" for the ay8910 of a БК), taken
+// as it is, without translation; otherwise the device's own translated name
+std::string Connector::plug_title_of(const std::string &device, Pluggable * d)
+{
+    ComputerDevice * cd_owner = im->dm->get_device_by_name(device, false);
+    const std::string title = (cd_owner != nullptr) ? str_trim(cd_owner->config_parameter("title")) : std::string();
+    if (!title.empty()) return title;
+    return (d != nullptr) ? std::string(d->plug_title()) : device;
+}
+
+// The device being unplugged goes first: it stops driving the shared lines
+// before the new one puts its own state on them
+void Connector::apply()
+{
+    for (size_t i = 0; i < m_devices.size(); i++)
+        if (i + 1 != m_selected) m_devices[i]->set_plugged(false);
+    if (m_selected > 0) m_devices[m_selected - 1]->set_plugged(true);
+}
+
+DeviceOptions Connector::get_device_options()
+{
+    DeviceOption opt;
+    opt.id = CONNECTOR_OPTION_DEVICE;
+    opt.type = DEVICE_OPTION_DROPDOWN;
+    opt.title = m_title;
+    // Without one the GUI draws a picture of its own
+    opt.icon = m_icon;
+    opt.values.push_back({0, QT_TRANSLATE_NOOP("DeviceOptions", "None")});
+    for (size_t i = 0; i < m_devices.size(); i++)
+        opt.values.push_back({static_cast<unsigned>(i + 1), m_titles[i]});
+    // "default" of the config may plug in something other than the first entry
+    opt.current = m_selected;
+    return {opt};
+}
+
+void Connector::set_device_option(unsigned option_id, unsigned value_id)
+{
+    if (option_id != CONNECTOR_OPTION_DEVICE) return;
+    if (value_id > m_devices.size()) return;
+    m_selected = value_id;
+    apply();
+}
+
+ConfigFields Connector::get_config_fields()
+{
+    //From the config, not m_devices: the editor never loads the device. The
+    //devices it names are constructed by then, and their titles are constant
+    ConfigField f;
+    f.name = "default";
+    const std::string label = str_trim(cd->get_parameter("label", false).value);
+    f.title = !label.empty()? label
+            : (str_tolower(str_trim(cd->get_parameter("kind", false).value)) == "sound"
+               ? QT_TRANSLATE_NOOP("DeviceOptions", "Sound")
+               : QT_TRANSLATE_NOOP("DeviceOptions", "Input device"));
+    f.type = CONFIG_FIELD_CHOICE;
+    f.def = "none";
+    f.values.push_back({"none", QT_TRANSLATE_NOOP("DeviceOptions", "None")});
+    std::vector<std::string> names = split_string(cd->get_parameter("devices", false).value, '|', true);
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string n = str_trim(names[i]);
+        Pluggable * d = dynamic_cast<Pluggable*>(im->dm->get_device_by_name(n, false));
+        f.values.push_back({n, plug_title_of(n, d)});
+    }
+    return {f};
+}
+
+std::vector<DeviceFieldInfo> Connector::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"device", "Name of the plugged device, none if the socket is empty", false});
+    r.push_back({"devices", "The devices of the list and what the option list calls them", false});
+    return r;
+}
+
+bool Connector::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "device") {
+        out.text = (m_selected > 0)?m_names[m_selected - 1]:std::string("none");
+        return true;
+    }
+    if (field == "devices") {
+        for (size_t i = 0; i < m_names.size(); i++) {
+            if (!out.text.empty()) out.text += "\n";
+            out.text += "        " + m_names[i] + ": " + m_titles[i];
+        }
+        return true;
+    }
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+std::vector<DeviceCommandInfo> Connector::get_device_commands()
+{
+    std::vector<DeviceCommandInfo> r = ComputerDevice::get_device_commands();
+    r.push_back({"plug", "device|none", "Plugs a device from the list in, unplugging the one there"});
+    return r;
+}
+
+emulator::Result Connector::send_command(const std::string &command, const std::string &parameters)
+{
+    if (command == "plug") {
+        std::vector<std::string> p = split_params(parameters);
+        const std::string n = p.empty()?std::string():str_trim(p[0]);
+        if (n.empty() || str_tolower(n) == "none") {
+            set_device_option(CONNECTOR_OPTION_DEVICE, 0);
+            return emulator::Result::ok();
+        }
+        for (size_t i = 0; i < m_names.size(); i++)
+            if (m_names[i] == n) {
+                set_device_option(CONNECTOR_OPTION_DEVICE, static_cast<unsigned>(i + 1));
+                return emulator::Result::ok();
+            }
+        return emulator::Result::error(emulator::ErrorCode::BadParameters,
+            "{Connector|" + std::string(QT_TRANSLATE_NOOP("Connector", "The device is not in the list")) + "} " + n);
+    }
+    return ComputerDevice::send_command(command, parameters);
+}
+
+ComputerDevice * create_connector(InterfaceManager *im, EmulatorConfigDevice *cd)
+{
+    return new Connector(im, cd);
+}

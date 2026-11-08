@@ -1,0 +1,186 @@
+# Агат-7: нативная таблица клавиш машины, та же, которой пользуется экранная
+# клавиатура. Имена начинаются с "key_" и обозначают клавишу самого Агата,
+# а не хоста, поэтому перекладка ЙЦУКЕН -> ЯВЕРТЫ к ним не применяется.
+#
+# У Агата один код на клавишу: РУС/ЛАТ переключает знакогенератор, а не
+# кодировку, поэтому записей /R в agat.keys нет. Проверяется то, чего
+# хостовая таблица не выражает: РЕГ дает вторую половину набора, УПР -
+# управляющий код, а СБР и ПВТ кода не имеют вовсе.
+#
+# Между нажатием и снятием кода время не идет: LOG выполняется в том же
+# такте, что и KEYDOWN, поэтому ПЗУ не успевает вычитать порт.
+# @timeout 45
+
+MACHINE "agat/Agat-7.cfg"
+WAIT 9000
+
+LOGDEFS 8,16
+
+# Начальный алфавит машина берет с Caps Lock хоста (ruslat = caps), поэтому
+# прогон начинается с ЛАТ: иначе эталон зависел бы от клавиатуры хоста
+KEYDOWN key_lat
+KEYUP key_lat
+
+PRINT "=== исходное состояние: защелка алфавита ==="
+LOG keyboard.rus
+LOG keyboard.pressed
+
+# СБР кода не шлет: он перезапускает машину, как Break в окне эмулятора, но
+# только вместе с УПР, как на самом Агате. Проверяется первым, пока ИКП
+# крутит свой цикл выбора: после сброса процессор уходит на вектор в ПЗУ,
+# а монитор возвращает меню на место.
+# PC до нажатия не снимается: в сессии MCP машина успевает поработать до
+# первой команды, и где ее застанет сценарий, от прогона не зависит.
+# Сброс виден по дну стека: он ставит S = $FF, и первый же вызов монитора
+# пишет адрес возврата в $01FE-$01FF, куда цикл меню не достает.
+PRINT "=== СБР без УПР машину не трогает ==="
+COMMAND ram0.set($01FE,$00,$00)
+KEYDOWN key_sbr
+LOG port-kbd.value
+LOG keyboard.pressed
+KEYUP key_sbr
+WAIT 10
+LOG keyboard.pressed
+LOG ram0.value($01FE,$01FF)
+
+# Сброс отпускает и УПР: с экранной клавиатуры он защелкнут, и пережившая
+# сброс защелка отправляла бы следующую клавишу управляющим кодом. KEYUP
+# key_upr не шлется нарочно - так ее и оставляет экранная клавиатура.
+# keyboard.pressed здесь не снимается: лампа алфавита в нем уже взята с
+# Caps Lock хоста. Что УПР не держится, видно в следующем разделе, после ЛАТ.
+PRINT "=== УПР+СБР перезапускает машину, не шлет кода и отпускает УПР ==="
+KEYDOWN key_upr
+KEYDOWN key_sbr
+LOG port-kbd.value
+KEYUP key_sbr
+LOG keyboard.ctrl
+WAIT 10
+LOG cpu.pc
+LOG ram0.value($01FE,$01FF)
+WAIT 2000
+# Алфавит после сброса снова берется с Caps Lock хоста, поэтому ЛАТ явно
+KEYDOWN key_lat
+KEYUP key_lat
+
+PRINT "=== буква: сама, с РЕГ и с УПР ==="
+KEYDOWN key_a
+LOG port-kbd.value
+LOG keyboard.pressed
+KEYUP key_a
+KEYDOWN key_reg_1
+KEYDOWN key_a
+LOG port-kbd.value
+KEYUP key_a
+KEYUP key_reg_1
+KEYDOWN key_upr
+KEYDOWN key_a
+LOG port-kbd.value
+KEYUP key_a
+KEYUP key_upr
+
+PRINT "=== цифровой ряд: верхняя и нижняя надписи ==="
+KEYDOWN key_1
+LOG port-kbd.value
+KEYUP key_1
+KEYDOWN key_reg_2
+KEYDOWN key_1
+LOG port-kbd.value
+KEYUP key_1
+KEYUP key_reg_2
+
+PRINT "=== знаки, которых на хосте нет отдельной клавишей ==="
+KEYDOWN key_backsl
+LOG port-kbd.value
+KEYUP key_backsl
+KEYDOWN key_reg_1
+KEYDOWN key_backsl
+LOG port-kbd.value
+KEYUP key_backsl
+KEYUP key_reg_1
+KEYDOWN key_rbr
+LOG port-kbd.value
+KEYUP key_rbr
+KEYDOWN key_reg_1
+KEYDOWN key_rbr
+LOG port-kbd.value
+KEYUP key_rbr
+KEYUP key_reg_1
+
+PRINT "=== управление ==="
+KEYDOWN key_red
+LOG port-kbd.value
+KEYUP key_red
+KEYDOWN key_left
+LOG port-kbd.value
+KEYUP key_left
+KEYDOWN key_f1
+LOG port-kbd.value
+KEYUP key_f1
+# функц 5 правого блока - свой код $94 (приложение 2 ТО Агата-9), не цифра
+KEYDOWN key_num_5
+LOG port-kbd.value
+KEYUP key_num_5
+
+# ПВТ своего кода не имеет: он повторяет последний посланный
+PRINT "=== ПВТ повторяет последний посланный код ==="
+KEYDOWN key_space
+LOG port-kbd.value
+KEYUP key_space
+KEYDOWN key_pvt
+LOG port-kbd.value
+LOG keyboard.pressed
+KEYUP key_pvt
+
+# РУС и ЛАТ кода не шлют: они дергают бит 7 порта port-kbd-ruslat, по
+# которому знакогенератор выбирает половину набора
+PRINT "=== РУС и ЛАТ переключают знакогенератор ==="
+KEYDOWN key_rus
+KEYUP key_rus
+LOG keyboard.rus
+LOG port-kbd-ruslat.value
+LOG keyboard.pressed
+KEYDOWN key_lat
+KEYUP key_lat
+LOG keyboard.rus
+LOG port-kbd-ruslat.value
+
+# Хостовая таблица: скобки и стрелка вверх верхнего регистра. В agat.map
+# правая фигурная скобка была объявлена левой, поэтому "}" не набиралась
+# вовсе, а УПР со стрелкой вверх давал код клавиши Ь.
+PRINT "=== скобки и ^ с хостовой клавиатуры ==="
+KEYDOWN shift
+KEYDOWN {
+LOG port-kbd.value
+KEYUP {
+KEYDOWN }
+LOG port-kbd.value
+KEYUP }
+KEYDOWN ^
+LOG port-kbd.value
+KEYUP ^
+KEYUP shift
+KEYDOWN ctrl
+KEYDOWN ^
+LOG port-kbd.value
+KEYUP ^
+KEYUP ctrl
+
+# Холодный перезапуск обязан отпустить модификаторы. Пережившая его защелка
+# выглядит как отказавшая клавиатура: каждая клавиша уходит управляющим кодом,
+# а нажатой не числится ни одна -- экранная клавиатура при этом показывает,
+# что все отпущено, и лечилось это только закрытием ее окна.
+PRINT "=== холодный перезапуск отпускает модификаторы ==="
+KEYDOWN key_upr
+LOG keyboard.ctrl
+RESET cold
+WAIT 100
+# Алфавит после сброса снова берется с Caps Lock хоста, поэтому ЛАТ явно
+KEYDOWN key_lat
+KEYUP key_lat
+LOG keyboard.ctrl
+LOG keyboard.pressed
+KEYDOWN key_a
+LOG port-kbd.value
+KEYUP key_a
+
+EXIT

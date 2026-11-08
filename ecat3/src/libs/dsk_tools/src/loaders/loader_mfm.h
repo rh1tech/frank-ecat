@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: A top level abstract class for different physical format loaders
+#pragma once
+
+
+#include "loader.h"
+
+namespace dsk_tools {
+
+    class LoaderMFM:public Loader
+    {
+    public:
+        LoaderMFM(const std::string & file_name, const std::string & format_id, const std::string & type_id);
+        std::string file_info() override;
+        Result load(BYTES & buffer, const DiskFormatParams &format = DiskFormatParams()) override;
+
+    protected:
+        int m_track_offsets[200];
+        int m_track_lengths[200];
+        int m_tracks_count;
+        int m_sectors_count;
+        int m_track_len;
+
+        using TrackInfoFunc = std::string (LoaderMFM::*)(BYTES&, int);
+        using LoadTrackFunc = void (LoaderMFM::*)(int, BYTES&, const BYTES&, int);
+        TrackInfoFunc track_info_func = nullptr;
+        LoadTrackFunc load_track_func = nullptr;
+
+        virtual int get_tracks_count() {return m_tracks_count;};
+        virtual int get_sectors_count() {return m_sectors_count;};
+        virtual int get_track_offset(int track) {return m_track_offsets[track];};
+        virtual int get_track_len(int track) {return m_track_lengths[track];};
+        virtual std::string get_header_info(BYTES & in) {return "";};
+        virtual Result prepare_tracks_list(BYTES & in);
+        Result tracks_fit(const BYTES & in);
+        std::string agat140_track_info(BYTES & in, int track_len);
+        std::string agat840_track_info(BYTES & in, int track_len);
+        void load_agat140_track(int track, BYTES & buffer, const BYTES & in, int track_len);
+        void load_agat840_track(int track, BYTES & buffer, const BYTES & in, int track_len);
+    };
+
+}

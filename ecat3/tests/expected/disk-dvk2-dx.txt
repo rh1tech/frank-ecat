@@ -1,0 +1,28 @@
+[dx.writes] &000300
+[dx.rxes] &000204
+=== Экран ===
+[display.text] 
+SL V08.00 [SW] Сторожевых С.В. 1988
+
+RT-11SJ (Y) V05.04 G
+
+.SET TT SCOPE
+
+.SET EM ON
+
+.SET SL ON
+
+.DAY
+Время           Дата
+00:00:11        10-Апр-2013, Среда
+
+.COPY SWAP.SYS TEST.SYS
+?PIP-W-Reboot
+
+.DIR TEST.SYS
+ 10-Apr-2013
+TEST  .SYS    30  25-Mar-2003
+ 1 Files, 30 Blocks
+ 72 Free blocks
+
+.

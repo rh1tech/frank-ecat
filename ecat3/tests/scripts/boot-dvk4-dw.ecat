@@ -1,0 +1,26 @@
+# ДВК-4: загрузка RT-11 с винчестера DW монитором 134 (BDW0).
+#
+# Контроллер DW - на странице ввода-вывода по физическому адресу 17774000.
+# Монитор 134 грузит так же, как 279: сброс, сектор 1, чтение, проверка NOP.
+# @timeout 150
+MACHINE "../../tests/files/dvk4-ksm.ext"
+COMMAND dw.load("../library/dvk/rt11-dw.dsk")
+COMMAND dw.volatile(1)
+WAIT _12000
+# Тумблер «Прерывания» - после теста памяти монитора: часы RT-11 идут от него
+COMMAND panel.option(1,1)
+TYPE "BDW0"
+WAIT _30000
+# Стартовый файл кончается DAY - часы, которые идут на экране до нажатия
+# клавиши
+KEY _100,_50,ret
+WAIT _3000
+TYPE "DIR TE*.*"
+KEY _100,_50,ret
+WAIT _5000
+
+LOGDEFS _16,_8
+PRINT "=== Экран ==="
+LOG display.text
+SCREEN "../results/boot-dvk4-dw.png"
+EXIT

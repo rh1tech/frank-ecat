@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Abstract class for raster displays, which need frame/line events for working
+
+
+#include "raster_display.h"
+#include <iostream>
+
+RasterDisplay::RasterDisplay(InterfaceManager *im, EmulatorConfigDevice *cd):
+      GenericDisplay(im, cd)
+    , m_current_line(0)
+    , m_standart("625/50")
+    , m_screen_line(0)
+    , m_line_counter(0)
+    , m_hsync_counter(0)
+    , m_hsync_active(false)
+{}
+
+emulator::Result RasterDisplay::load_config(SystemData *sd)
+{
+    m_clocked = true;   //clock() is overridden here
+    emulator::Result res = GenericDisplay::load_config(sd);
+    if (!res) return res;
+
+    if (m_standart == "625/50") {
+        m_lines = 625;
+        m_half_frame_lines = m_lines / 2;
+        m_frame_rate = 50;
+        m_interlaced = true;
+        m_top_blank = 23;
+        m_bottom_blank = 4;
+        m_hsync_length_ms = 12;
+        // Two fields of exactly 1/50 s: at 1.021 MHz (Агат-9) a line is 65.34
+        // clocks, and the remainder is spread over the lines below
+        m_frame_clocks = 2 * m_system_clock / m_frame_rate;
+        m_counts_per_line = m_frame_clocks / m_lines;
+    } else if (m_standart == "vp1-037") {
+        // К1801ВП1-037 of the БК: 256 picture lines and 64 service ones, no
+        // interlace. A line is 48 words of the 750 kHz video clock, 64 us, so the
+        // frame is 20.48 ms rather than 20 and its rate is 48.8 Hz.
+        m_lines = 320;
+        m_half_frame_lines = m_lines;
+        m_frame_rate = 48;
+        m_interlaced = false;
+        m_top_blank = 0;
+        m_bottom_blank = 0;
+        // A line starts where the picture of the one before ends (va_037.v:
+        // TV51 steps the line counter), then come 16 words of blanking and the
+        // 32 picture words. The "sync" event at 21 us is the picture's start,
+        // which is where a line is sampled
+        m_hsync_length_ms = 21;
+        m_counts_per_line = m_system_clock / 1000 * 64 / 1000;
+        m_frame_clocks = m_counts_per_line * m_lines;
+        // The horizontal sync pulse (VTSYN) ends 68 CLKIN into the line: the
+        // clock edge that ends PC = 3 of word 8 sets it (VA[3:1] = 0). The
+        // event is on the first processor clock at or after it, and
+        // m_sync_end_delay clocks later
+        m_counts_sync_end = (m_counts_per_line * 68 + 383) / 384 + m_sync_end_delay;
+    } else if (m_standart == "uknc") {
+        // Видеоконтроллер УК-НЦ: 312 строк по 64 мкс без чересстрочности,
+        // 288 из них видимые (строки 19..306), по 640 точек в строке.
+        // Тактируется от периферийного процессора, который им и владеет.
+        m_lines = 312;
+        m_half_frame_lines = m_lines;
+        m_frame_rate = 50;
+        m_interlaced = false;
+        m_top_blank = 19;
+        m_bottom_blank = 5;
+        m_hsync_length_ms = 21;
+        // 400 clocks of 6.25 MHz, 64 us: the frame is 19.968 ms, 50.08 Hz
+        m_counts_per_line = m_system_clock / m_lines / m_frame_rate;
+        m_frame_clocks = m_counts_per_line * m_lines;
+    } else if (m_standart == "apple-pal" || m_standart == "apple-ntsc") {
+        // Apple //e and its clones (Правец-8А/8С): a line is 65 processor
+        // clocks, 40 of them the picture, whatever the clock exactly is (the
+        // long cycle stretches one of them, not the count). 312 lines of the
+        // PAL //e (the 14.25045 MHz crystal of the Правец-8А) or 262 of the NTSC
+        // one, without interlace; the 192 picture lines come first
+        const bool pal = m_standart == "apple-pal";
+        m_lines = pal ? 312 : 262;
+        m_half_frame_lines = m_lines;
+        m_frame_rate = pal ? 50 : 60;
+        m_interlaced = false;
+        m_top_blank = 0;
+        m_bottom_blank = m_lines - 192;
+        m_hsync_length_ms = 0;
+        m_counts_per_line = 65;
+        m_frame_clocks = m_counts_per_line * m_lines;
+    } else if (m_standart == "oric") {
+        // The ULA of the Oric (Правец-8Д): lines of 64 clocks of 1 MHz, 224
+        // of them the picture; 312 lines a frame at 50 Hz, the subclass makes
+        // it 264 for 60 Hz at the start of a frame
+        m_lines = 312;
+        m_half_frame_lines = m_lines;
+        m_frame_rate = 50;
+        m_interlaced = false;
+        m_top_blank = 0;
+        m_bottom_blank = m_lines - 224;
+        m_hsync_length_ms = 0;
+        m_counts_per_line = 64;
+        m_frame_clocks = m_counts_per_line * m_lines;
+    } else {
+        return emulator::Result::error(emulator::ErrorCode::ConfigError, "{RasterDisplay|" + std::string(QT_TRANSLATE_NOOP("RasterDisplay", "Unknown video standard")) + "}");
+    }
+
+    m_counts_hsync = m_system_clock * m_hsync_length_ms / 1000000;
+    // The Apple line is sampled at its end, after the 40 picture clocks
+    if (m_standart == "apple-pal" || m_standart == "apple-ntsc" || m_standart == "oric")
+        m_counts_hsync = m_counts_per_line - 1;
+    m_line_rem = m_frame_clocks % m_lines;
+    m_rem_acc = 0;
+    m_line_length = m_counts_per_line;
+
+    return emulator::Result::ok();
+}
+
+void RasterDisplay::clock(unsigned int counter)
+{
+    const unsigned int start = m_line_counter;
+    m_line_counter += counter;
+    // One step may cover several lines: the pultovaya normalization 000030 of
+    // the ВМ2 takes 3110 clocks, eight lines of the УК-НЦ. Every one of them is
+    // started, and the ones the step runs past get their events at once. Taking
+    // a single line a step left the beam behind the time, and a loop of such
+    // commands put together a frame of lines from different passes
+    bool several = false;
+    while (m_line_counter >= m_line_length) {
+        // The line ending here still gets the events the step ran past. A lost
+        // sync pulse is a descriptor the УК-НЦ controller never takes: the rest
+        // of the frame came one line late, its top line from address 0
+        if (m_hsync_active) HSYNC(m_screen_line, 1);
+        m_hsync_active = false;
+        if (m_counts_sync_end != 0 && (several || start < m_counts_sync_end))
+            HSYNC(m_screen_line, 2);
+        m_line_counter -= m_line_length;
+        // The next line is one clock longer whenever the remainder has built
+        // up to a whole clock: a frame of exactly m_frame_clocks
+        m_rem_acc += m_line_rem;
+        m_line_length = m_counts_per_line;
+        if (m_rem_acc >= m_lines) {
+            m_rem_acc -= m_lines;
+            m_line_length++;
+        }
+        if (m_interlaced) {
+            m_screen_line = (m_current_line <= 312) ? (2 * m_current_line) : (2 * (m_current_line - 313) + 1);
+        } else {
+            m_screen_line = m_current_line;
+        }
+
+        if (m_current_line == 0)
+            FRAME_SYNC();
+        // vp1-037 has no blanking described here (both blank
+        // counts are 0), so VSYNC(0) never comes for it: its subclass takes the
+        // frame events from the line numbers in HSYNC
+
+        if (m_current_line == m_lines - m_bottom_blank || m_current_line == m_half_frame_lines - m_bottom_blank)
+            VSYNC(0);
+        if (m_current_line == m_top_blank || m_current_line == m_half_frame_lines + m_top_blank)
+            VSYNC(1);
+
+        // A switch of the mode waits for a line to start: none is drawn half
+        // one way and half the other
+        m_beam = m_precise;
+        HSYNC(m_screen_line, 0);
+        m_hsync_counter = 0;
+        m_hsync_active = true;
+
+        // 625 lines of an interlaced frame: 313 in the first field, 312 in the
+        // second. It used to count 626, which made a frame 64 us too long
+        if (++m_current_line >= m_lines) m_current_line = 0;
+        if (several) {
+            // The time into the last line, which the sum below makes whole
+            m_hsync_counter = m_line_counter - counter;
+        }
+        several = true;
+    }
+
+    m_hsync_counter += counter;
+    if (m_hsync_active && m_hsync_counter >= m_counts_hsync) {
+        HSYNC(m_screen_line, 1);
+        m_hsync_active = false;
+    }
+    // Passed in this step: the line has run past the point by less than the
+    // step, also when the step began on the line before
+    if (m_counts_sync_end != 0 && m_line_counter >= m_counts_sync_end
+        && m_line_counter < m_counts_sync_end + counter)
+        HSYNC(m_screen_line, 2);
+
+    // Off, this is all the mode costs: one flag a processor instruction
+    if (m_beam) BEAM(m_screen_line, m_line_counter);
+}
+
+// The events of clock() above: the frame interrupt of the БК comes from one of
+// them, so a processor waiting for it steps exactly onto it
+unsigned int RasterDisplay::clocks_to_event() const
+{
+    unsigned int r = (m_line_length > m_line_counter) ? m_line_length - m_line_counter : 1;
+    if (m_hsync_active && m_counts_hsync > m_hsync_counter && m_counts_hsync - m_hsync_counter < r)
+        r = m_counts_hsync - m_hsync_counter;
+    if (m_counts_sync_end > m_line_counter && m_counts_sync_end - m_line_counter < r)
+        r = m_counts_sync_end - m_line_counter;
+    return r;
+}
+
+bool RasterDisplay::raster_frame_rate(uint64_t &num, uint64_t &den, const unsigned pictures) const
+{
+    return reduced_rate((uint64_t)m_system_clock * pictures, frame_clocks(), num, den);
+}
+
+void RasterDisplay::save_state(StateWriter &w)
+{
+    GenericDisplay::save_state(w);
+    //Where the beam stands. A snapshot taken mid frame comes back mid frame,
+    //and the picture finishes the way it would have
+    w.n("line_counter", m_line_counter);
+    w.n("current_line", m_current_line);
+    w.n("screen_line", m_screen_line);
+    w.n("hsync_counter", m_hsync_counter);
+    w.b("hsync_active", m_hsync_active);
+    w.n("rem_acc", m_rem_acc);
+    w.n("line_length", m_line_length);
+}
+
+emulator::Result RasterDisplay::load_state(const StateReader &r)
+{
+    emulator::Result res = GenericDisplay::load_state(r);
+    if (!res) return res;
+    r.u("line_counter", m_line_counter);
+    r.u("current_line", m_current_line);
+    r.u("screen_line", m_screen_line);
+    r.u("hsync_counter", m_hsync_counter);
+    r.b("hsync_active", m_hsync_active);
+    r.u("rem_acc", m_rem_acc);
+    r.u("line_length", m_line_length);
+    if (m_rem_acc >= m_lines) m_rem_acc = 0;
+    if (m_line_length != m_counts_per_line && m_line_length != m_counts_per_line + 1)
+        m_line_length = m_counts_per_line;
+    // The mode of the line the snapshot stopped in is not saved: it is the
+    // one asked for now (set before the state is applied). Left off, a line
+    // past its sampling point was drawn neither by the beam nor by HSYNC(1)
+    m_beam = m_precise;
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> RasterDisplay::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = GenericDisplay::get_device_fields();
+    r.push_back({"standard",    "Name of the raster standard from the config",  false});
+    r.push_back({"frame_rate",  "Frames per second",                            false});
+    r.push_back({"lines",       "Lines in a frame, blanking included",          false});
+    r.push_back({"frame_clocks", "Clocks of the display's domain per frame",    false});
+    r.push_back({"line",        "Raster line the beam is on right now",         false});
+    r.push_back({"line_clock",  "Clocks of the display's domain into that line", false});
+    r.push_back({"screen_line", "Visible line it corresponds to",               false});
+    r.push_back({"hsync",       "1 while the horizontal sync pulse is active",  false});
+    r.push_back({"interlaced",  "1 for an interlaced standard",                 false});
+    return r;
+}
+
+bool RasterDisplay::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    //Where the beam is, for the machines that hang their timing off it
+    if (field == "standard")
+    {
+        out.numeric = false;
+        out.text = m_standart;
+        return true;
+    }
+
+    if (field == "frame_rate" || field == "lines" || field == "line" ||
+        field == "screen_line" || field == "hsync" || field == "interlaced" ||
+        field == "frame_clocks" || field == "line_clock")
+    {
+        out.numeric = true;
+        if (field == "frame_rate")       out.values.push_back(m_frame_rate);
+        else if (field == "lines")       out.values.push_back(m_lines);
+        else if (field == "line")        out.values.push_back(m_current_line);
+        else if (field == "screen_line") out.values.push_back(m_screen_line);
+        else if (field == "hsync")       out.values.push_back(m_hsync_active ? 1 : 0);
+        else if (field == "frame_clocks") out.values.push_back(frame_clocks());
+        else if (field == "line_clock")  out.values.push_back(m_line_counter);
+        else                             out.values.push_back(m_interlaced ? 1 : 0);
+        return true;
+    }
+
+    return GenericDisplay::get_field(field, from, to, out);
+}

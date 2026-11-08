@@ -1,0 +1,390 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Zilog Z80 emulator interface class
+
+#include "z80.h"
+#include "emulator/utils.h"
+
+#define CALLBACK_NMI    1
+#define CALLBACK_INT    2
+
+#ifndef EXTERNAL_Z80
+
+//----------------------- Library wrapper -----------------------------------
+z80Core::z80Core(z80 * emulator_device):
+    z80core()
+{
+    this->emulator_device = emulator_device;
+}
+
+uint8_t z80Core::read_mem(uint16_t address)
+{
+    return emulator_device->read_mem(address);
+}
+
+void z80Core::write_mem(uint16_t address, uint8_t value)
+{
+    emulator_device->write_mem(address, value);
+}
+
+uint8_t z80Core::read_port(uint16_t address)
+{
+    return emulator_device->read_port(address);
+}
+
+void z80Core::write_port(uint16_t address, uint8_t value)
+{
+    emulator_device->write_port(address, value);
+}
+
+#endif
+
+#ifdef EXTERNAL_Z80
+//external funcs
+unsigned char readByte(void* arg, unsigned short addr)
+{
+    return ((z80*)arg)->read_mem(addr);
+}
+
+// memory write request per 1 byte from CPU
+void writeByte(void* arg, unsigned short addr, unsigned char value)
+{
+    ((z80*)arg)->write_mem(addr, value);
+}
+
+unsigned char inPort(void* arg, unsigned short port)
+{
+    return ((z80*)arg)->read_port(port);
+}
+
+void outPort(void* arg, unsigned short port, unsigned char value)
+{
+    ((z80*)arg)->write_port(port, value);
+}
+#endif
+
+//----------------------- Emulator device -----------------------------------
+
+z80::z80(InterfaceManager *im, EmulatorConfigDevice *cd):
+      CPU(im, cd)
+    , i_nmi(this, im, 1, "nmi", MODE_R, CALLBACK_NMI)
+    , i_int(this, im, 1, "int", MODE_R, CALLBACK_INT)
+    , i_m1(this, im, 1, "m1", MODE_W)
+    , i_io_address(this, im, 16, "io_address", MODE_W)
+{
+#ifndef EXTERNAL_Z80
+    core = new z80Core(this);
+#else
+    core_ext = new Z80(readByte, writeByte, inPort, outPort, this);
+    core_ext->reg.pair.A = core_ext->reg.pair.F = 0;
+    core_ext->reg.SP = 0;
+#endif
+    //TODO: add new codes if expected
+
+}
+
+z80::~z80()
+{
+#ifndef EXTERNAL_Z80
+    //The core's destructor is virtual, the cast is not needed
+    delete static_cast<z80Core*>(core);
+#else
+    delete core_ext;
+#endif
+}
+
+unsigned int z80::get_pc()
+{
+#ifndef EXTERNAL_Z80
+    return core->get_context()->registers.regs.PC;
+#else
+    return core_ext->reg.PC;
+#endif
+
+}
+
+unsigned int z80::read_mem(unsigned int address)
+{
+    return mm->read(address);
+}
+
+void z80::write_mem(unsigned int address, unsigned int data)
+{
+    mm->write(address, data);
+}
+
+unsigned int z80::read_port(unsigned int address)
+{
+    i_io_address.change(address);
+    unsigned int data = mm->read_port(address);
+    return data;
+}
+
+void z80::write_port(unsigned int address, unsigned int data)
+{
+    i_io_address.change(address);
+    mm->write_port(address, data);
+}
+
+void z80::reset(bool cold)
+{
+    CPU::reset(cold);
+}
+
+void z80::save_state(StateWriter &w)
+{
+    CPU::save_state(w);
+    z80context * c = core->get_context();
+    w.array("regs", c->registers.reg_array_8, 12);
+    w.u("I", c->registers.regs.I, 8);
+    w.u("R", c->registers.regs.R, 8);
+    w.u("SP", c->registers.regs.SP);
+    w.u("PC", c->registers.regs.PC);
+    //The shadow set, swapped in by EXX and EX AF,AF'
+    w.u("AF_", c->registers.regs.AF_);
+    w.u("BC_", c->registers.regs.BC_);
+    w.u("DE_", c->registers.regs.DE_);
+    w.u("HL_", c->registers.regs.HL_);
+    w.n("IFF1", c->IFF1);
+    w.n("IFF2", c->IFF2);
+    w.n("IM", c->IM);
+    w.b("halted", c->halted);
+    w.n("NMI", c->NMI);
+    w.n("INT", c->INT);
+    w.n("global_prefix", c->global_prefix);
+    w.n("index8_inc", c->index8_inc);
+    w.u("memptr", c->memptr);
+
+    bool process = false, nmi = false;
+    core->get_pending(process, nmi);
+    w.b("process_ints", process);
+    w.b("nmi_pending", nmi);
+}
+
+emulator::Result z80::load_state(const StateReader &r)
+{
+    emulator::Result res = CPU::load_state(r);
+    if (!res) return res;
+    z80context * c = core->get_context();
+    r.array("regs", c->registers.reg_array_8, 12);
+    r.u("I", c->registers.regs.I);
+    r.u("R", c->registers.regs.R);
+    r.u("SP", c->registers.regs.SP);
+    r.u("PC", c->registers.regs.PC);
+    r.u("AF_", c->registers.regs.AF_);
+    r.u("BC_", c->registers.regs.BC_);
+    r.u("DE_", c->registers.regs.DE_);
+    r.u("HL_", c->registers.regs.HL_);
+    r.u("IFF1", c->IFF1);
+    r.u("IFF2", c->IFF2);
+    r.u("IM", c->IM);
+    r.b("halted", c->halted);
+    r.u("NMI", c->NMI);
+    r.u("INT", c->INT);
+    r.u("global_prefix", c->global_prefix);
+    r.u("index8_inc", c->index8_inc);
+    r.u("memptr", c->memptr);
+
+    bool process = false, nmi = false;
+    core->get_pending(process, nmi);
+    r.b("process_ints", process);
+    r.b("nmi_pending", nmi);
+    core->set_pending(process, nmi);
+    return emulator::Result::ok();
+}
+
+std::vector<std::pair<std::string, std::string>> z80::get_registers()
+{
+    std::vector<std::pair<std::string, std::string>> l;
+#ifndef EXTERNAL_Z80
+    z80context * c = core->get_context();
+
+    l = {
+        {"AF",  hex_str((c->registers.regs.A << 8) + c->registers.regs.F, 4)},
+        {"BC",  hex_str(c->registers.reg_pairs.BC, 4)},
+        {"DE",  hex_str(c->registers.reg_pairs.DE, 4)},
+        {"HL",  hex_str(c->registers.reg_pairs.HL, 4)},
+        {"IX",  hex_str(c->registers.reg_pairs.IX, 4)},
+        {"IY",  hex_str(c->registers.reg_pairs.IY, 4)},
+        {"-1",  ""},
+        {"AF'", hex_str(c->registers.regs.AF_, 4)},
+        {"BC'", hex_str(c->registers.regs.BC_, 4)},
+        {"DE'", hex_str(c->registers.regs.DE_, 4)},
+        {"HL'", hex_str(c->registers.regs.HL_, 4)},
+        {"-2",  ""},
+        {"SP",  hex_str(c->registers.regs.SP, 4)},
+        {"PC",  hex_str(c->registers.regs.PC, 4)},
+        {"-3",  ""},
+        {"I",    hex_str(c->registers.regs.I, 2)},
+        {"R",    hex_str(c->registers.regs.R, 2)},
+        {"IFF1", hex_str(c->IFF1, 1)},
+        {"IFF2", hex_str(c->IFF2, 1)}
+    };
+#else
+#endif
+
+    return l;
+}
+
+std::vector<std::pair<std::string, std::string>> z80::get_flags()
+{
+    std::vector<std::pair<std::string, std::string>> l;
+#ifndef EXTERNAL_Z80
+    z80context * c = core->get_context();
+
+    l = {
+        {"S",  std::to_string(((c->registers.regs.F & F_SIGN) != 0) ? 1 : 0)},
+        {"Z",  std::to_string(((c->registers.regs.F & F_ZERO) != 0) ? 1 : 0)},
+        {"5",  std::to_string(((c->registers.regs.F & F_B5) != 0) ? 1 : 0)},
+        {"H",  std::to_string(((c->registers.regs.F & F_HALF_CARRY) != 0) ? 1 : 0)},
+        {"3",  std::to_string(((c->registers.regs.F & F_B3) != 0) ? 1 : 0)},
+        {"PV", std::to_string(((c->registers.regs.F & F_PARITY) != 0) ? 1 : 0)},
+        {"N",  std::to_string(((c->registers.regs.F & F_SUB) != 0) ? 1 : 0)},
+        {"C",  std::to_string(((c->registers.regs.F & F_CARRY) != 0) ? 1 : 0)}
+    };
+#else
+#endif
+    return l;
+}
+
+
+unsigned int z80::execute()
+{
+    if (reset_mode)
+    {
+#ifndef EXTERNAL_Z80
+        core->reset();
+#else
+        core_ext->reg.PC=0;
+#endif
+        reset_mode = false;
+    }
+
+    //No cycles, as the other processors do: Emulator::timer_proc() then keeps
+    //the machine's time still. Returning 10 here let the clock, the timers,
+    //the screen and the tape run on while the debugger held the processor
+    if (m_debug == DEBUG_STOPPED)
+        return 0;
+
+    //Cycles a DMA controller has taken off the bus, see CPU::hold()
+    unsigned int held = take_hold();
+    if (held > 0) return held;
+
+    if (m_debug != DEBUG_OFF) debug_before();
+#ifndef EXTERNAL_Z80
+    unsigned int cycles = core->execute();
+#else
+    unsigned int cycles = core_ext->execute(1);
+#endif
+
+
+    if (m_debug != DEBUG_OFF) debug_after();
+
+    return cycles;
+}
+
+//Every register get_registers() shows, by the same name
+void z80::set_context_value(const std::string &name, unsigned int value)
+{
+#ifndef EXTERNAL_Z80
+    z80context * c = core->get_context();
+    if (name == "AF")        c->registers.reg_pairs.AF = (uint16_t)value;
+    else if (name == "BC")   c->registers.reg_pairs.BC = (uint16_t)value;
+    else if (name == "DE")   c->registers.reg_pairs.DE = (uint16_t)value;
+    else if (name == "HL")   c->registers.reg_pairs.HL = (uint16_t)value;
+    else if (name == "IX")   c->registers.reg_pairs.IX = (uint16_t)value;
+    else if (name == "IY")   c->registers.reg_pairs.IY = (uint16_t)value;
+    else if (name == "AF'")  c->registers.regs.AF_ = (uint16_t)value;
+    else if (name == "BC'")  c->registers.regs.BC_ = (uint16_t)value;
+    else if (name == "DE'")  c->registers.regs.DE_ = (uint16_t)value;
+    else if (name == "HL'")  c->registers.regs.HL_ = (uint16_t)value;
+    else if (name == "SP")   c->registers.regs.SP = (uint16_t)value;
+    else if (name == "PC")   c->registers.regs.PC = (uint16_t)value;
+    else if (name == "I")    c->registers.regs.I = (uint8_t)value;
+    else if (name == "R")    c->registers.regs.R = (uint8_t)value;
+    else if (name == "IFF1") c->IFF1 = value & 1;
+    else if (name == "IFF2") c->IFF2 = value & 1;
+#else
+    if (name == "PC")
+    {
+        core_ext->reg.PC = value;
+    }
+#endif
+
+}
+
+unsigned int z80::get_command()
+{
+    //Asked by the debugger and by LOG cpu.command, not by the processor
+    return peek_mem(get_pc());
+}
+
+void z80::interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value)
+{
+    switch (callback_id) {
+    case CALLBACK_NMI:
+#ifndef EXTERNAL_Z80
+        core->set_nmi(new_value & 1);
+#else
+#endif
+        break;
+    case CALLBACK_INT:
+#ifndef EXTERNAL_Z80
+        core->set_int(new_value & 1);
+#else
+#endif
+        break;
+    }
+}
+
+
+ComputerDevice * create_z80(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new z80(im, cd);
+}
+
+bool z80::set_flag(const std::string &name, bool value)
+{
+#ifndef EXTERNAL_Z80
+    static const char * names[] = {"S", "Z", "5", "H", "3", "PV", "N", "C"};
+    static const uint8_t bits[] = {F_SIGN, F_ZERO, F_B5, F_HALF_CARRY, F_B3, F_PARITY, F_SUB, F_CARRY};
+    z80context * c = core->get_context();
+    for (unsigned int i = 0; i < 8; i++)
+        if (name == names[i]) {
+            c->registers.regs.F = value ? (uint8_t)(c->registers.regs.F | bits[i]) : (uint8_t)(c->registers.regs.F & ~bits[i]);
+            return true;
+        }
+#else
+    (void)name;
+    (void)value;
+#endif
+    return false;
+}
+
+bool z80::get_sp(unsigned int &sp)
+{
+#ifndef EXTERNAL_Z80
+    sp = core->get_context()->registers.regs.SP;
+    return true;
+#else
+    (void)sp;
+    return false;
+#endif
+}
+
+bool z80::stack_address(int i, unsigned int &address)
+{
+    unsigned int sp;
+    if (!get_sp(sp)) return false;
+    address = (sp + 2 * i) & 0xFFFF;
+    return true;
+}
+
+bool z80::waiting()
+{
+#ifndef EXTERNAL_Z80
+    return core->get_context()->halted;
+#else
+    return false;
+#endif
+}

@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: Main header file
+
+#pragma once
+
+#include <string>
+#include <sstream>
+
+#include "dsk_tools/core.h"
+
+#include "disk_image.h"
+#include "image_agat140.h"
+#include "image_agat840.h"
+#include "image_agat880.h"
+#include "image_fil.h"
+
+#include "loader.h"
+#include "loader_raw.h"
+#include "loader_aim.h"
+#include "loader_hxc_hfe.h"
+#include "loader_fil.h"
+#include "loader_nib.h"
+#include "loader_nic.h"
+#include "loader_hxc_mfm.h"
+#include "loader_imd.h"
+
+#include "writer.h"
+#include "writer_raw.h"
+#include "writer_mfm.h"
+#include "writer_hxc_hfe.h"
+#include "writer_hxc_mfm.h"
+
+#include "filesystem.h"
+#include "fs_dos33.h"
+#include "fs_spriteos.h"
+#include "fs_prodos.h"
+#include "fs_onix.h"
+#include "fs_cpm.h"
+#include "fs_fil.h"
+#include "fs_fat.h"
+#include "fs_rt11.h"
+#include "fs_iskra226.h"
+
+#include "viewers/viewer.h"
+#include "viewers/viewer_binary.h"
+#include "viewers/agat/agat_binary.h"
+#include "viewers/viewer_text.h"
+#include "viewers/viewer_basic_agat.h"
+#include "viewers/viewer_basic_apple.h"
+#include "viewers/viewer_basic_vector.h"
+#include "viewers/viewer_basic_mbasic.h"
+#include "viewers/viewer_basic_bbc.h"
+#include "viewers/viewer_basic_iskra226.h"
+#include "viewers/viewer_pics_agat.h"
+#include "viewers/viewer_pics_vector.h"
+
+
+namespace dsk_tools {
+
+    Result detect_fdd_type(const std::string &file_name, std::string &format_id, std::string &type_id, std::string &filesystem_id, bool format_only = false);
+    std::unique_ptr<diskImage> prepare_image(const std::string &file_name, const std::string &format_id, const std::string &type_id, const DiskDefs & diskdefs);
+    std::unique_ptr<fileSystem> prepare_filesystem(diskImage * image, const std::string &filesystem_id, const DiskDefs & diskdefs);
+    std::string agat_vtoc_info(const Agat_VTOC & VTOC);
+    std::string agat_sos_info(const SPRITE_OS_DPB_DISK & DPB);
+    std::pair<std::string, std::string> suggest_file_type(const std::string file_name, const BYTES & data);
+    std::string agat_vr_info(const BYTES & data, bool comment_only = false);
+
+
+    void register_all_viewers();
+    std::unique_ptr<Loader> create_loader(const std::string& file_name, const std::string& format_id, const std::string& type_id);
+    // file_name is where the image goes, which tells the order of a 140 Kb sector image;
+    // with none, the image goes back into the order of the file it came from
+    std::unique_ptr<Writer> create_writer(const std::string & format_id, const uint8_t volume_id, diskImage * image, const std::string & file_name = "");
+
+    // A 140 Kb Apple II or Agat sector image keeps the 16 sectors of a track in the order
+    // DOS 3.3 numbers them (.dsk, .do) or in the order ProDOS does (.po); the volume overrules
+    // the name: a .dsk, .do or .po is in ProDOS order when it holds a ProDOS volume directory
+    // or a DOS 3.3 catalog that reads right in that order only, and in the order its name says
+    // when neither tells. The library holds such an image in DOS 3.3 order
+    // whatever its file's, as it holds the disks it decodes from tracks.
+    // agat140_prodos_order() tells the order of a file's contents by its name and them;
+    // agat140_reorder() turns either order into the other, track by track
+    bool agat140_prodos_order(const std::string & file_name, const BYTES & image);
+    void agat140_reorder(BYTES & image);
+
+
+    unsigned image_size_by_type(const std::string &type_id, const DiskFormatParams &format);
+
+    DiskDefs parse_diskdefs(const std::string &contents);
+
+} // namespace

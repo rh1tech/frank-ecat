@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: 8255 debug window, source
+
+#include <QTimer>
+
+#include "i8255window.h"
+#include "ui_i8255window.h"
+
+#include "emulator/devices/common/i8255.h"
+#include "dialogs/numfmt.h"
+
+I8255Window::I8255Window(QWidget *parent) :
+    GenericDbgWnd(parent),
+    ui(new Ui::I8255Window)
+{
+    ui->setupUi(this);
+}
+
+I8255Window::I8255Window(QWidget *parent, Emulator * e, ComputerDevice * d):
+    I8255Window(parent)
+{
+    this->e = e;
+    this->d = dynamic_cast<I8255*>(d);
+    setWindowTitle(QString::fromStdString(d->name + " : " + d->type));
+
+    timer = new QTimer(this);
+    connect(timer, &QTimer::timeout, this, &I8255Window::update);
+    timer->start(100);
+}
+
+
+I8255Window::~I8255Window()
+{
+    delete ui;
+}
+
+GenericDbgWnd * CreateI8255Window(QWidget *parent, Emulator * e, ComputerDevice * d)
+{
+    return new I8255Window(parent, e, d);
+}
+
+void I8255Window::update()
+{
+    unsigned int va = d->get_value(0);
+    unsigned int vb = d->get_value(1);
+    unsigned int vc = d->get_value(2);
+    unsigned int vd = d->get_value(3);
+    //Octal on an octal machine, hex elsewhere
+    const int base = view_base(d);
+    const int digits = cell_digits(base, false);
+    ui->binA->setText(QString("%1").arg(va, 8, 2, QChar('0')));
+    ui->hexA->setText(fmt_num(va, base, digits));
+    ui->binB->setText(QString("%1").arg(vb, 8, 2, QChar('0')));
+    ui->hexB->setText(fmt_num(vb, base, digits));
+    ui->binCH->setText(QString("%1").arg(vc >> 4, 4, 2, QChar('0')));
+    ui->binCL->setText(QString("%1").arg(vc & 0x0F, 4, 2, QChar('0')));
+    ui->hexC->setText(fmt_num(vc, base, digits));
+    ui->binD->setText(QString("%1").arg(vd, 8, 2, QChar('0')));
+    ui->hexD->setText(fmt_num(vd, base, digits));
+
+    ui->modeA->setText(((vd &  0x10) != 0)?I8255Window::tr("Input"):I8255Window::tr("Output"));
+    ui->modeB->setText(((vd &  0x02) != 0)?I8255Window::tr("Input"):I8255Window::tr("Output"));
+    ui->modeCH->setText(((vd & 0x08) != 0)?I8255Window::tr("Input"):I8255Window::tr("Output"));
+    ui->modeCL->setText(((vd & 0x01) != 0)?I8255Window::tr("Input"):I8255Window::tr("Output"));
+
+}

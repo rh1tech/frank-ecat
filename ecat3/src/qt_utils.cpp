@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Qt-dependent utility functions (not part of the emulator core)
+
+#include "qt_utils.h"
+#include <QFileInfo>
+#include <QKeyEvent>
+
+#include "emulator/devices/common/keyboard.h"
+
+#define MD4C_USE_UTF8
+#include "libs/md4c/md4c-html.h"
+
+QString pad_string(QString s, QChar c, int len, bool from_left)
+{
+    QString v = s;
+    for (int i=0; i<len - s.length(); i++)
+        if (from_left) v = c + v;
+        else v = v + c;
+    return v;
+}
+
+unsigned decodeBMP(std::vector<unsigned char>& image, unsigned& w, unsigned& h, const std::vector<unsigned char>& bmp) {
+
+    // Copyright (c) 2005-2010 Lode Vandevenne
+    // https://github.com/lvandeve/lodepng/blob/master/examples/example_bmp2png.cpp
+
+    static const unsigned MINHEADER = 54; //minimum BMP header size
+
+    if(bmp.size() < MINHEADER) return -1;
+    if(bmp[0] != 'B' || bmp[1] != 'M') return 1; //It's not a BMP file if it doesn't start with marker 'BM'
+    unsigned pixeloffset = bmp[10] + 256 * bmp[11]; //where the pixel data starts
+    //read width and height from BMP header
+    w = bmp[18] + bmp[19] * 256;
+    h = bmp[22] + bmp[23] * 256;
+    //read number of channels from BMP header
+    if(bmp[28] != 24 && bmp[28] != 32) return 2; //only 24-bit and 32-bit BMPs are supported.
+    unsigned numChannels = bmp[28] / 8;
+
+    //The amount of scanline bytes is width of image times channels, with extra bytes added if needed
+    //to make it a multiple of 4 bytes.
+    unsigned scanlineBytes = w * numChannels;
+    if(scanlineBytes % 4 != 0) scanlineBytes = (scanlineBytes / 4) * 4 + 4;
+
+    unsigned dataSize = scanlineBytes * h;
+    if(bmp.size() < dataSize + pixeloffset) return 3; //BMP file too small to contain all pixels
+
+    image.resize(w * h * 4);
+
+    /*
+  There are 3 differences between BMP and the raw image buffer for LodePNG:
+  -it's upside down
+  -it's in BGR instead of RGB format (or BRGA instead of RGBA)
+  -each scanline has padding bytes to make it a multiple of 4 if needed
+  The 2D for loop below does all these 3 conversions at once.
+  */
+    for(unsigned y = 0; y < h; y++)
+        for(unsigned x = 0; x < w; x++) {
+            //pixel start byte position in the BMP
+            unsigned bmpos = pixeloffset + (h - y - 1) * scanlineBytes + numChannels * x;
+            //pixel start byte position in the new raw image
+            unsigned newpos = 4 * y * w + 4 * x;
+            if(numChannels == 3) {
+                image[newpos + 0] = bmp[bmpos + 2]; //R
+                image[newpos + 1] = bmp[bmpos + 1]; //G
+                image[newpos + 2] = bmp[bmpos + 0]; //B
+                image[newpos + 3] = 255;            //A
+            } else {
+                image[newpos + 0] = bmp[bmpos + 2]; //R
+                image[newpos + 1] = bmp[bmpos + 1]; //G
+                image[newpos + 2] = bmp[bmpos + 0]; //B
+                image[newpos + 3] = bmp[bmpos + 3]; //A
+            }
+        }
+    return 0;
+}
+
+static void store_html_callback(const MD_CHAR* text, MD_SIZE size, void* result)
+{
+    static_cast<std::string*>(result)->append(text, size);
+}
+
+static QString g_ui_language = "en";     //the sources are English
+
+void set_ui_language(const QString &lang)
+{
+    g_ui_language = lang.section('_', 0, 0).toLower();
+}
+
+QString ui_language()
+{
+    return g_ui_language;
+}
+
+QString localized_description(const QString &md_path)
+{
+    if (!md_path.endsWith(".md", Qt::CaseInsensitive)) return md_path;
+    const QString local = md_path.left(md_path.size() - 3) + "." + g_ui_language + ".md";
+    return QFileInfo::exists(local) ? local : md_path;
+}
+
+std::string md2html(const std::string &md)
+{
+    std::string result;
+    md_html(md.c_str(), md.length(), store_html_callback, static_cast<void*>(&result), MD_FLAG_TABLES, 0);
+
+    // Qt's rich text engine draws a bare <table> without any grid, and before Qt 5.14
+    // it ignores CSS borders on tables completely, so the only portable way to get a
+    // visible table is the old HTML attributes, which md4c does not emit.
+    static const std::string plain = "<table>";
+    static const std::string bordered = "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">";
+    size_t pos = 0;
+    while ((pos = result.find(plain, pos)) != std::string::npos)
+    {
+        result.replace(pos, plain.length(), bordered);
+        pos += bordered.length();
+    }
+
+    return result;
+}
+
+//Under a non-Latin host layout (Russian) Qt reports a letter key as the
+//character it types, Й = 0x419, which no machine's map knows: nothing was typed
+//at all. Such a key is taken from the Windows virtual key code instead, which
+//does not depend on the layout - letters and digits are their ASCII codes, the
+//OEM keys are the punctuation of the US layout. Latin characters stay as Qt
+//gives them, so an English layout works exactly as before.
+//
+//A digit or a sign of the numeric keypad carries EmuKey::Keypad (Qt's own
+//KeypadModifier bit), which the core drops for every machine but one with a
+//keypad of its own. The decimal key gives a comma under a Russian layout; it is
+//the same key. Not the arrows: macOS marks them as keypad keys too
+int host_layout_key(const QKeyEvent *event)
+{
+    const int key = event->key();
+    if (event->modifiers() & Qt::KeypadModifier) {
+        if ((key >= Qt::Key_0 && key <= Qt::Key_9) || key == Qt::Key_Period
+            || key == Qt::Key_Plus || key == Qt::Key_Minus || key == Qt::Key_Asterisk || key == Qt::Key_Slash)
+            return key | EmuKey::Keypad;
+        if (key == Qt::Key_Comma) return Qt::Key_Period | EmuKey::Keypad;
+    }
+#ifdef Q_OS_WIN
+    if (key > 0xFF && key < Qt::Key_Escape) {
+        const quint32 vk = event->nativeVirtualKey();
+        if ((vk >= 0x30 && vk <= 0x39) || (vk >= 0x41 && vk <= 0x5A)) return (int)vk;
+        switch (vk) {
+        case 0xBA: return Qt::Key_Semicolon;        // VK_OEM_1: Ж
+        case 0xBB: return Qt::Key_Equal;            // VK_OEM_PLUS
+        case 0xBC: return Qt::Key_Comma;            // VK_OEM_COMMA: Б
+        case 0xBD: return Qt::Key_Minus;            // VK_OEM_MINUS
+        case 0xBE: return Qt::Key_Period;           // VK_OEM_PERIOD: Ю
+        case 0xBF: return Qt::Key_Slash;            // VK_OEM_2
+        case 0xC0: return Qt::Key_QuoteLeft;        // VK_OEM_3: Ё
+        case 0xDB: return Qt::Key_BracketLeft;      // VK_OEM_4: Х
+        case 0xDC: return Qt::Key_Backslash;        // VK_OEM_5
+        case 0xDD: return Qt::Key_BracketRight;     // VK_OEM_6: Ъ
+        case 0xDE: return Qt::Key_Apostrophe;       // VK_OEM_7: Э
+        default: break;
+        }
+    }
+#endif
+    return key;
+}

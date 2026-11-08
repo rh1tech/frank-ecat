@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: A class and ther definitions for the Agat Sprite OS filesystem
+
+#include <iostream>
+#include <stdexcept>
+#include <cstring>
+#include <set>
+#include <fstream>
+
+#include "dsk_tools/dsk_tools.h"
+#include "utils.h"
+#include "fs_spriteos.h"
+
+namespace dsk_tools {
+
+    namespace {
+        // yyyyy mmmmm dddddd, every field in BCD, the year counted from 1980
+        FileDate sprite_date(uint16_t date)
+        {
+            FileDate result;
+            if (date == 0) return result;
+            result.year  = static_cast<uint16_t>(1980 + fromBCD(static_cast<uint8_t>(date >> 11)));
+            result.month = static_cast<uint8_t>(fromBCD(static_cast<uint8_t>((date >> 6) & 0x1F)));
+            result.day   = static_cast<uint8_t>(fromBCD(static_cast<uint8_t>(date & 0x3F)));
+            if (!result.valid()) result = FileDate();
+            return result;
+        }
+    }
+
+    fsSpriteOS::fsSpriteOS(diskImage * image):
+        fileSystem(image)
+    {}
+
+    FSCaps fsSpriteOS::get_caps()
+    {
+        return FSCaps::Protect | FSCaps::Dirs | FSCaps::Export | FSCaps::Date;
+    }
+
+    Result fsSpriteOS::open()
+    {
+        if (!image->get_loaded()) return Result::error(ErrorCode::OpenNotLoaded);
+
+        memcpy(&CURRENT_DIR, image->get_sector_data(0, 0, 0), sizeof(CURRENT_DIR));
+        memcpy(&DPB, &CURRENT_DIR, sizeof(DPB));
+
+        memset(&CURRENT_DIR.NAME, 0xA0, 15);
+        current_path.push_back(CURRENT_DIR);
+
+        is_open = true;
+
+        volume_id = DPB.VOLUME;
+
+        return Result::ok();
+    }
+
+    Result fsSpriteOS::load_file(const SPRITE_OS_DIR_ENTRY & dir_entry, BYTES & out, const bool strict_size) const
+    {
+        BYTES buffer;
+        const auto sectors_count = image->get_sectors();
+
+        auto read_blocks = [this, &buffer](uint16_t INFADR) {
+            const auto sectors_count = image->get_sectors();
+            auto tr = INFADR / sectors_count;
+            auto p = image->get_sector_data(0, tr, INFADR % sectors_count);
+            const auto * BLOCKS_LIST = reinterpret_cast<const uint16_t*>(p);
+
+            int i = 0;
+            while (BLOCKS_LIST[i] != 0 && i<128) {
+                tr = BLOCKS_LIST[i] / sectors_count;
+                p = image->get_sector_data(0, tr, BLOCKS_LIST[i] % sectors_count);
+                if (p == nullptr) return Result::error(ErrorCode::ReadError, QT_TRANSLATE_NOOP("errors", "Incorrect file entry"));
+                buffer.insert(buffer.end(), p, p + 256);
+                i++;
+            }
+            return Result::ok();
+        };
+
+        if (dir_entry.LEVEL == 1) {
+            buffer.resize(256);
+            const auto tr = dir_entry.INFADR / sectors_count;
+            const auto p = image->get_sector_data(0, tr, dir_entry.INFADR % sectors_count);
+            if (p == nullptr) return Result::error(ErrorCode::ReadError, QT_TRANSLATE_NOOP("errors", "Incorrect file entry"));
+            memcpy(buffer.data(), p, 256);
+        } else
+        if (dir_entry.LEVEL == 2) {
+            auto res = read_blocks(dir_entry.INFADR);
+            if (!res) return res;
+        } else
+        if (dir_entry.LEVEL == 3) {
+            const auto tr = dir_entry.INFADR / sectors_count;
+            const auto p = image->get_sector_data(0, tr, dir_entry.INFADR % sectors_count);
+            if (p == nullptr) return Result::error(ErrorCode::ReadError, QT_TRANSLATE_NOOP("errors", "Incorrect file entry"));
+            const auto * BLOCKS_LIST = reinterpret_cast<const uint16_t*>(p);
+
+            int i = 0;
+            while (BLOCKS_LIST[i] != 0 && i<128) {
+                auto res = read_blocks(BLOCKS_LIST[i++]);
+                if (!res) return res;
+            }
+        } else {
+            return Result::error(ErrorCode::ReadError, std::string(QT_TRANSLATE_NOOP("errors", "Unknown DIR_ENTRY.LEVEL value")) + ": " + std::to_string(dir_entry.LEVEL));
+        }
+
+        if (strict_size) {
+            const int expected_size = dir_entry.FILELEN[0] + (dir_entry.FILELEN[1]<<8) + (dir_entry.FILELEN[2]<<16);
+            if (expected_size > buffer.size()) {
+                return Result::error(ErrorCode::ReadError, QT_TRANSLATE_NOOP("errors", "File is smaller than expected"));
+            }
+            if (expected_size < buffer.size()) {
+                buffer.resize(expected_size);
+            }
+        }
+
+        out = buffer;
+        return Result::ok();
+    }
+
+    void fsSpriteOS::cd_up()
+    {
+        if (current_path.size() > 1) {
+            current_path.pop_back();
+            CURRENT_DIR = current_path.back();
+        }
+    }
+
+    void fsSpriteOS::cd(const dsk_tools::UniversalFile & dir, bool & updir)
+    {
+        if (dir.name == "..") {
+            cd_up();
+            updir = true;
+        } else {
+            memcpy(&CURRENT_DIR, dir.metadata.data(), sizeof(CURRENT_DIR));
+            current_path.push_back(CURRENT_DIR);
+            updir = false;
+        }
+    }
+
+    std::string fsSpriteOS::file_info(const UniversalFile & fd) {
+        std::string result;
+        std::string attrs;
+
+        const auto * dir_entry = reinterpret_cast<const SPRITE_OS_DIR_ENTRY*>(fd.metadata.data());
+
+        attrs += (dir_entry->STATUS & 0x80)?"P":"-";
+        attrs += (dir_entry->STATUS & 0x40)?"B":"-";
+        attrs += (dir_entry->STATUS & 0x20)?"U":"-";
+        attrs += (dir_entry->STATUS & 0x10)?"U":"-";
+        attrs += (dir_entry->STATUS & 0x08)?"T":"-";
+        attrs += (dir_entry->STATUS & 0x04)?"S":"-";
+        attrs += (dir_entry->STATUS & 0x02)?"H":"-";
+        attrs += (dir_entry->STATUS & 0x01)?"D":"-";
+
+        int year_bcd = dir_entry->DATE >> 11;
+        int year = (year_bcd & 0xF) + (year_bcd >> 4) * 10 + 1980;
+        std::string month = dsk_tools::toBCD((dir_entry->DATE >> 6) & 0b11111);
+        std::string day = dsk_tools::toBCD(dir_entry->DATE & 0b111111);
+
+        std::string date_str = day + "-" + month + "-" + std::to_string(year);
+
+        result += "{$FILE_NAME}: " +  trim(agat_to_utf(dir_entry->NAME, 15)) + "\n";
+        result += "{$SIZE}: " +  std::to_string(dir_entry->FILELEN[0] + (dir_entry->FILELEN[1] << 8) + (dir_entry->FILELEN[2] << 16)) + " {$BYTES}\n";
+        result += "{$ATTRIBUTES}: $" + dsk_tools::int_to_hex(dir_entry->STATUS) + " (" + attrs + ") \n";
+        result += "{$DATE}: " + date_str + " ($" + dsk_tools::int_to_hex(dir_entry->DATE) +")\n";
+        result += "USRINF: " + dsk_tools::toHexList(dir_entry->USRINF, sizeof(dir_entry->USRINF), "$") + "\n";
+        return result;
+    }
+
+    std::vector<std::string> fsSpriteOS::get_save_file_formats()
+    {
+        return {"FILE_SOS", "FILE_BINARY"};
+    }
+
+    std::vector<std::string> fsSpriteOS::get_add_file_formats()
+    {
+        return {"FILE_SOS", "FILE_BINARY"};
+    }
+
+    std::string fsSpriteOS::information()
+    {
+        return agat_sos_info(DPB);
+    }
+
+    bool fsSpriteOS::is_root()
+    {
+        return current_path.size() == 1;
+    }
+
+    Result fsSpriteOS::get_file(const UniversalFile & uf, const std::string & format, BYTES & data) const
+    {
+        const auto * dir_entry = reinterpret_cast<const SPRITE_OS_DIR_ENTRY*>(uf.metadata.data());
+        auto res = load_file(*dir_entry, data);
+        return res;
+    }
+
+    Result fsSpriteOS::dir(std::vector<UniversalFile> & files, bool show_deleted)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+
+        files.clear();
+
+        if (current_path.size() > 1) {
+            UniversalFile updir{};
+            updir.fs = get_fs();
+            updir.name = "..";
+            updir.is_dir = true;
+            updir.is_deleted = false;
+            files.push_back(updir);
+        }
+
+        BYTES buffer;
+        auto res = load_file(CURRENT_DIR, buffer, false);
+        if (!res) return res;
+
+        for (int i=0; i < buffer.size() / sizeof(SPRITE_OS_DIR_ENTRY); i++) {
+            auto * dir_entry = reinterpret_cast<SPRITE_OS_DIR_ENTRY*>(buffer.data() + i*sizeof(SPRITE_OS_DIR_ENTRY));
+            bool is_deleted = dir_entry->NAME[0] == 0xFF;
+            if (dir_entry->NAME[0] != 0 && (!is_deleted || show_deleted)) {
+                UniversalFile file{};
+                file.fs = get_fs();
+                file.name = trim(agat_to_utf(dir_entry->NAME, 15));
+                file.size = dir_entry->FILELEN[0] + (dir_entry->FILELEN[1] << 8) + (dir_entry->FILELEN[2] << 16);
+                file.is_dir = (dir_entry->STATUS & 0x01) != 0;
+                file.is_deleted = is_deleted;
+                file.date = sprite_date(dir_entry->DATE);
+
+                file.type_preferred = PreferredType::Binary;
+                std::set<std::string> txts = {".txt", ".doc", ".pas", ".cmd", ".def", ".hlp", ".gid", ".asm"};
+                std::string ext = get_file_ext(file.name);
+                if (txts.find(ext) != txts.end()) file.type_preferred = PreferredType::Text;
+                if (ext == ".bft") file.type_preferred = PreferredType::AgatBFT;
+                if (ext == ".bmp") file.type_preferred = PreferredType::AgatBMP;
+
+                file.metadata.resize(sizeof(SPRITE_OS_DIR_ENTRY));
+                memcpy(file.metadata.data(), dir_entry, sizeof(SPRITE_OS_DIR_ENTRY));
+
+                files.push_back(file);
+            }
+        }
+
+        return Result::ok();
+    }
+
+}

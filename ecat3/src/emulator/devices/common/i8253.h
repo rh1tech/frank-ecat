@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Intel 8253 (КР580ВИ53) programmable timer
+
+#pragma once
+
+#include "emulator/core.h"
+
+class I8253:public AddressableDevice
+{
+private:
+    Interface i_address;
+    Interface i_data;
+    Interface i_output;
+    Interface i_gate;
+    //Внешнее тактирование канала: у Юниора звуковой канал считает строчные
+    //импульсы ВГ75, а не такты процессора
+    Interface i_clk;
+
+    uint8_t Modes[3];           //Режим работы счетчиков
+    uint8_t IsBCD[3];           //Тип загруженных данных
+    uint8_t Orders[3];          //Порядок загрузки данных
+    uint8_t Indexes[3];         //Индексы загружаемых в счетчики байтов
+    uint8_t Loaded[3];          //Загружены ли счетчики
+    uint8_t Counting[3];        //Идет ли счет: 1 - канал считает, 0 - стоит
+    uint8_t StartData[6];       //Начальные данные
+    uint8_t LowByte[3];         //Младший байт счета, ждущий старшего (порядок 3)
+    uint8_t Counters[6];        //Текущие значения счетчиков
+    uint8_t ReadData[6];        //Данные для считывания
+    uint8_t Latched[3];         //Счетчик зафиксирован командой и еще не прочитан
+    uint8_t Gates[3];           //Состояния входов GATE
+    uint8_t NeedRestart[3];     //Старт счетчиков по следующему тактовому импульсу
+
+    // Per-channel clock scaling (relative to device clock)
+    unsigned int ch_clock_multiplier[3];
+    unsigned int ch_clock_divider[3];
+    unsigned int ch_clock_stored[3];
+    bool per_channel_clock;
+    unsigned int ext_clock_mask;    //Каналы, у которых подведена своя линия такта
+
+    void init();
+    void StartCount(unsigned int A);
+    void SetOut(unsigned int A, unsigned int Mode);
+    void Count(unsigned int A, unsigned int Increment);
+    void Reload(unsigned int A);
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+
+public:
+    I8253(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+    emulator::Result load_config(SystemData *sd) override;
+    void reset(bool cold) override;
+    unsigned int get_value(unsigned int address) override;
+    unsigned get_direct(unsigned address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    void clock(unsigned int counter) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+ComputerDevice * create_i8253(InterfaceManager *im, EmulatorConfigDevice *cd);

@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: DEC DL11 serial line unit, going out through a host serial port
+
+#pragma once
+
+#include <vector>
+
+#include "emulator/core.h"
+#include "emulator/devices/common/serial_line.h"
+#include "emulator/devices/common/byte_tap.h"
+#include "emulator/devices/common/virq_line.h"
+
+// A serial line of the PDP-11 kind: four registers, a receiver and a
+// transmitter, each with its ready flag, interrupt enable and vector. У УК-НЦ
+// это стык С2, 176570-176576, векторы 370 и 374.
+//
+//   +0  RCSR  разряд 7 - принят байт, 6 - разрешение прерывания,
+//             12 - переполнение; программа пишет только разряд 6
+//   +2  RBUF  принятый байт; чтение снимает разряды 7 и 12 RCSR
+//   +4  XCSR  разряд 7 - передатчик свободен, 6 - разрешение прерывания,
+//             2 - петля (переданное возвращается в приёмник), 0 - обрыв
+//   +6  XBUF  запись - байт на передачу, снимает разряд 7 XCSR
+//
+// Байт идёт по линии время десяти посылок (8N1) на скорости baud. Линия
+// выходит на последовательный порт хоста (параметр port или команда connect),
+// и туда же можно подать байты командами send и sendfile - так сценарий
+// играет роль машины на другом конце. Третий вариант - ~txd/~rxd: байтовая
+// линия к другому устройству машины, например к 8251 терминала КСМ.
+//
+// Сетевой адаптер УК-НЦ (СА, 176560-176566, векторы 360 и 364) - такой же
+// порт, но в старших разрядах всех его регистров виден номер станции: разряды
+// 8-11 и 13-14, разряд 12 пропущен, он занят переполнением (параметр station).
+// И программа пишет в его RCSR ещё разряд 2 (параметр rcsr_mask).
+//
+// Запрос прерывания однократный: он встаёт, когда готовность появляется при
+// разрешённом прерывании (или прерывание разрешают при готовности), и
+// снимается, когда процессор его взял (~iako) или условие пропало. Иначе
+// свободный передатчик предлагал бы прерывание бесконечно.
+class DL11: public AddressableDevice, public ByteTap
+{
+private:
+    Interface i_virq;
+    Interface i_vector;
+    Interface i_virq_in;
+    Interface i_vector_in;
+    VirqLine m_irq;
+    Interface i_iako;
+    Interface i_init;                   // INIT магистрали (команда RESET)
+    // Линия к устройству эмулятора на другом конце (терминал КСМ): байт
+    // целиком, как у i8251, в конце его времени символа. Приёмник берёт его
+    // сразу, при занятом - переполнение
+    Interface i_txd;
+    Interface i_rxd;
+    // Квитирование ВП1-065, когда два канала связаны на одной плате (КЦГД:
+    // D9 и D10, выводы 29 и 31 накрест): готовность приёмника одного -
+    // разрешение передачи другого. Передатчик не начинает символ, пока
+    // приёмник на том конце не забрал прошлый, и байты не теряются, как бы
+    // долго программа там ни была занята
+    Interface i_rx_free;
+    Interface i_cts;
+
+    unsigned int m_rcsr = 0;
+    unsigned int m_rbuf = 0;
+    unsigned int m_xcsr = 0200;         // передатчик свободен и до первого сброса
+    unsigned int m_xbuf = 0;
+
+    unsigned int m_rcsr_mask = 0100;    // разряды RCSR, которые пишет программа
+    unsigned int m_xbuf_read = 0;       // что читается из XBUF
+    bool m_plug = false;                // заглушка на разъёме: выход замкнут на вход
+    int m_station = -1;                 // номер станции СА, -1 - его нет
+    unsigned int m_station_bits = 0;    // он же в разрядах регистров
+
+    unsigned int m_rx_vector = 060;
+    unsigned int m_tx_vector = 064;
+    bool m_rx_pending = false;
+    bool m_tx_pending = false;
+
+    // Время символа в тактах домена и отсчёты до конца передачи и до
+    // следующей попытки приёма
+    unsigned int m_baud = 9600;
+    uint64_t m_char_ticks = 0;
+    bool m_tx_busy = false;
+    bool m_tx_hold = false;             // символ ждёт разрешения на ~cts
+    int64_t m_tx_left = 0;
+    int64_t m_rx_left = 0;
+
+    SerialLine m_line;                  // порт хоста и поданное сценарием
+
+    unsigned int m_sent = 0;
+    unsigned int m_received = 0;
+    unsigned int m_overruns = 0;
+
+    void receive(uint8_t value);
+    void update_rx_free();
+    bool tx_blocked();
+    void transmit_done();
+    void set_rcsr(unsigned int value);
+    void set_xcsr(unsigned int value);
+    void update_irq();
+    void set_station(int station);
+    void init_registers();
+
+public:
+    DL11(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+    emulator::Result load_config(SystemData *sd) override;
+    void reset(bool cold) override;
+    void clock(unsigned int counter) override;
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+
+    unsigned int get_value(unsigned int address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    unsigned int get_value_word(unsigned int address) override;
+    unsigned get_direct(unsigned address) override;
+    void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
+
+    ConfigFields get_config_fields() override;
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+ComputerDevice * create_dl11(InterfaceManager *im, EmulatorConfigDevice *cd);

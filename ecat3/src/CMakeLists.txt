@@ -1,0 +1,590 @@
+cmake_minimum_required(VERSION 3.21)
+
+# MSVC static runtime for release builds (dynamic Qt in Debug needs dynamic CRT)
+cmake_policy(SET CMP0091 NEW)
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# The version lives in the VERSION file at the repository root and is the
+# single source of truth: the release scripts and the browser build read the
+# same file, so none of them can drift from the executable.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" ECAT_VERSION LIMIT_COUNT 1)
+string(STRIP "${ECAT_VERSION}" ECAT_VERSION)
+# A pre-release carries a suffix after the three numbers (4.3.2b1, 4.3.2-rc1).
+# project() takes numbers only, so it gets those; the whole string goes into
+# PROJECT_VERSION of globals.h through ECAT_VERSION.
+if(NOT ECAT_VERSION MATCHES "^([0-9]+\\.[0-9]+\\.[0-9]+)([-+.]?[0-9A-Za-z.]*)$")
+    message(FATAL_ERROR "Cannot read the project version from ../VERSION: '${ECAT_VERSION}'")
+endif()
+set(ECAT_VERSION_NUMBER "${CMAKE_MATCH_1}")
+# Without this a version bump would not trigger a reconfigure, and the number
+# compiled into globals.h would stay behind the one the release scripts use.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+
+project(eCat3 VERSION ${ECAT_VERSION_NUMBER} LANGUAGES C CXX)
+
+# Build variants. The windowed executable is what everyone gets by default;
+# the console one is a second target built from the same emulator sources and
+# links no Qt at all, so it also configures on a machine without Qt.
+option(ENABLE_GUI      "Build the windowed executable" ON)
+option(ENABLE_HEADLESS "Build the console executable without a GUI" OFF)
+
+if(NOT ENABLE_GUI AND NOT ENABLE_HEADLESS)
+    message(FATAL_ERROR "Nothing to build: enable ENABLE_GUI, ENABLE_HEADLESS or both")
+endif()
+
+if(ENABLE_HEADLESS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+                   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9")
+    # It needs <filesystem> for the ini backend and std::thread for the timing
+    message(FATAL_ERROR "ENABLE_HEADLESS requires a C++17 toolchain, this one is too old")
+endif()
+
+if(ENABLE_GUI)
+    find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets LinguistTools)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets LinguistTools)
+    # Optional: the on-screen keyboard draws an SVG through QSvgRenderer. A kit
+    # built without the qtsvg module (a static Qt configured with -submodules
+    # that leaves it out, see docs/BUILD.md) simply goes without the keyboard.
+    find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS Svg)
+endif()
+
+# The renderer of the windowed build: exactly one. The sources pick the first
+# one defined with #ifdef chains, so two of them used to build silently with
+# the wrong one, and none failed deep inside mainwindow.cpp
+option(RENDERER_SDL2   "Build with the SDL2 renderer" OFF)
+option(RENDERER_QT     "Build with the Qt software renderer" OFF)
+option(RENDERER_OPENGL "Build with the OpenGL renderer" OFF)
+if(ENABLE_GUI)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT RENDERER_SDL2 AND NOT RENDERER_QT AND NOT RENDERER_OPENGL)
+        # A debug kit of the IDE names none: OpenGL with Qt 6 (Win 10+, Linux,
+        # macOS 64 bits), SDL2 with Qt 5 (Win 7+ 32 bits). Set as normal
+        # variables, so a renderer given later on the command line still wins
+        if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
+            set(RENDERER_OPENGL ON)
+        else()
+            set(RENDERER_SDL2 ON)
+        endif()
+    endif()
+    set(ECAT_RENDERERS "")
+    foreach(_r SDL2 QT OPENGL)
+        if(RENDERER_${_r})
+            list(APPEND ECAT_RENDERERS ${_r})
+            add_compile_definitions(RENDERER_${_r})
+        endif()
+    endforeach()
+    list(LENGTH ECAT_RENDERERS _count)
+    if(NOT _count EQUAL 1)
+        message(FATAL_ERROR "The windowed build needs exactly one renderer, got '${ECAT_RENDERERS}': "
+                            "pass one of -DRENDERER_OPENGL=1, -DRENDERER_SDL2=1, -DRENDERER_QT=1 "
+                            "(and clear the others from the cache of a reused build directory)")
+    endif()
+    if(RENDERER_OPENGL AND QT_VERSION_MAJOR LESS 6)
+        # GLWidget is built on QOpenGLWidget from the OpenGLWidgets module of Qt 6
+        message(FATAL_ERROR "RENDERER_OPENGL needs Qt 6, this kit is Qt ${QT_VERSION}")
+    endif()
+    message(STATUS "Renderer: ${ECAT_RENDERERS}")
+endif()
+
+IF(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(EXTERNAL_Z80 0)
+    set(CPU_STOPPED 0)
+ENDIF()
+
+# CMake globals & options
+
+# Only the windowed build has anything to generate. Left on without Qt, AUTOGEN
+# warns for every target that it cannot find a Qt version, which in a console
+# only build (no find_package(Qt) at all) is pure noise in the log
+if(ENABLE_GUI)
+    set(CMAKE_AUTOUIC ON)
+    set(CMAKE_AUTOMOC ON)
+    set(CMAKE_AUTORCC ON)
+endif()
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# mini-ini requires C++17 (<filesystem>); enabled for Qt 5.15+ with GCC 9+ or non-GCC compilers
+if(QT_VERSION VERSION_GREATER_EQUAL "5.15" OR NOT ENABLE_GUI)
+    if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9"))
+        add_compile_definitions(USE_MINI_INI)
+        # A variable as well: add_compile_definitions() creates none, so the
+        # if(USE_MINI_INI) below never held and ini_wrapper.cpp was not given
+        # C++17 - Qt 6 raises the whole target to it, Qt 5.15 does not
+        set(USE_MINI_INI ON)
+    endif()
+endif()
+
+# Threading compatibility for old MinGW (4.9.2)
+option(FORCE_QT_THREADING "Force QThread-based threading (for old MinGW)" OFF)
+option(FORCE_STD_THREADING "Force std::thread even on old MinGW" OFF)
+option(UPDATE_TRANSLATIONS "Run lupdate to update .ts files on each build" OFF)
+if(FORCE_QT_THREADING)
+    add_compile_definitions(FORCE_QT_THREADING)
+endif()
+if(FORCE_STD_THREADING)
+    add_compile_definitions(FORCE_STD_THREADING)
+endif()
+
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+if(QT_VERSION_MAJOR EQUAL 6 AND RENDERER_OPENGL)
+    find_package(Qt6 REQUIRED COMPONENTS OpenGLWidgets)
+    set(OPENGL_FILES
+        renderers/renderer_opengl.h
+        renderers/GLWidget.cpp renderers/GLWidget.h
+    )
+endif()
+
+# External control over stdin/stdout. Without the option not a single file of
+# the feature is compiled: the sources below are simply not added to the target
+option(ENABLE_MCP "Build the MCP server (external control over stdin/stdout)" OFF)
+if(ENABLE_MCP)
+    set(MCP_FILES
+        mcp/mcp_server.cpp   mcp/mcp_server.h
+        mcp/mcp_session.cpp  mcp/mcp_session.h
+        libs/picojson/picojson.h
+    )
+    # The bridge marshals to the GUI thread, so it belongs to the windowed
+    # target only: the console build calls the session straight from main()
+    set(MCP_GUI_FILES
+        mcp_bridge.cpp       mcp_bridge.h
+    )
+    add_compile_definitions(ENABLE_MCP)
+    # The MCP server drives the emulator while the GUI thread runs the event
+    # loop; only the OpenGL renderer is supported in that combination
+    if(ENABLE_GUI AND NOT RENDERER_OPENGL)
+        message(FATAL_ERROR "ENABLE_MCP with a GUI build requires -DRENDERER_OPENGL=1")
+    endif()
+endif()
+
+# Audio backend: miniaudio by default, SDL2 optional
+option(USE_SDL_AUDIO "Use SDL2 for audio instead of miniaudio" OFF)
+if(USE_SDL_AUDIO)
+    add_compile_definitions(USE_SDL_AUDIO)
+endif()
+
+# SDL2 is only required when using SDL2 renderer or SDL2 audio
+if(RENDERER_SDL2 OR USE_SDL_AUDIO)
+    # For Windows, path to SDL should be added to CMAKE_PREFIX_PATH global environment variable
+    find_package(SDL2 REQUIRED)
+    include_directories(${SDL2_INCLUDE_DIRS})
+endif()
+
+set(ENABLE_DSK_TOOLS OFF CACHE BOOL "Disable command line tools from the library")
+set(CMAKE_INCLUDE_CURRENT_DIR OFF)
+# Only dsk_tools_core (helpers and track decoders) is linked: EXCLUDE_FROM_ALL keeps the
+# loaders, file systems and viewers of the full library out of the build
+add_subdirectory(${CMAKE_SOURCE_DIR}/libs/dsk_tools/ EXCLUDE_FROM_ALL)
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+# Translations
+
+set(SUPPORTED_LANGUAGES ru en bg)
+set(TS_FILES
+    ${CMAKE_SOURCE_DIR}/translations/en_us.ts
+    ${CMAKE_SOURCE_DIR}/translations/ru_ru.ts
+    ${CMAKE_SOURCE_DIR}/translations/bg_bg.ts
+)
+
+# Source files
+
+if(USE_MINI_INI AND NOT MSVC)
+    # GCC/Clang syntax; MSVC builds are Qt 6, which sets C++17 for the target
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/libs/ini_wrapper.cpp PROPERTIES COMPILE_FLAGS "-std=c++17")
+endif()
+
+# The emulator itself: Qt free, shared by the windowed and the console targets
+# here and by the browser build. The list lives in emulator_sources.cmake so
+# that a file added to the core reaches all three
+include(${CMAKE_CURRENT_SOURCE_DIR}/emulator_sources.cmake)
+set(EMULATOR_SOURCES
+    ${ECAT_CORE_SOURCES}
+    ${MCP_FILES}
+)
+
+# Everything that needs Qt. The documentation and the assembler test sources
+# are listed so that they show up in the IDE.
+set(GUI_SOURCES
+    ../README.md
+    ../docs/BUILD.md
+    ../docs/MANUAL.md
+    ../docs/DEBUGGER.md
+    ../docs/CONFIG.md
+    ../docs/SCRIPTING.md
+    ../docs/HISTORY.md
+    ../docs/MCP.md
+
+    main.cpp
+    mainwindow.cpp mainwindow.h mainwindow.ui
+    qt_utils.cpp qt_utils.h
+
+    dialogs/numfmt.h
+    dialogs/aboutdlg.ui
+    dialogs/mmwindow.cpp dialogs/mmwindow.h dialogs/mmwindow.ui
+    dialogs/portwindow.h dialogs/portwindow.cpp dialogs/portwindow.ui
+    dialogs/i8255window.h dialogs/i8255window.cpp dialogs/i8255window.ui
+    dialogs/openconfigwindow.h dialogs/openconfigwindow.cpp dialogs/openconfigwindow.ui
+    dialogs/exteditorwindow.h dialogs/exteditorwindow.cpp dialogs/exteditorwindow.ui
+    dialogs/genericdbgwnd.h dialogs/genericdbgwnd.cpp
+    dialogs/debugger/debugstyle.h dialogs/debugger/debugutil.h
+    dialogs/debugger/celleditor.h dialogs/debugger/celleditor.cpp
+    dialogs/debugger/disasmview.h dialogs/debugger/disasmview.cpp
+    dialogs/debugger/registersview.h dialogs/debugger/registersview.cpp
+    dialogs/debugger/memoryview.h dialogs/debugger/memoryview.cpp
+    dialogs/debugger/sideviews.h dialogs/debugger/sideviews.cpp
+    dialogs/debugger/debuggerwindow.h dialogs/debugger/debuggerwindow.cpp
+    dialogs/debugger/memorywindow.h dialogs/debugger/memorywindow.cpp
+    dialogs/smkwindow.h dialogs/smkwindow.cpp
+    dialogs/bkscreenwindow.h dialogs/bkscreenwindow.cpp
+    dialogs/taperecorder.h dialogs/taperecorder.cpp dialogs/taperecorder.ui
+    dialogs/keyboardwindow.h dialogs/keyboardwindow.cpp
+    dialogs/serialwindow.h dialogs/serialwindow.cpp
+
+    renderers/renderer_sdl2.h
+    renderers/renderer_qt.h
+    ${OPENGL_FILES}
+
+    libs/md4c/md4c.h libs/md4c/md4c.c libs/md4c/md4c-html.h libs/md4c/md4c-html.c libs/md4c/entity.h libs/md4c/entity.c
+
+    tests/8080exe.asm tests/8080pre.asm
+    tests/zexall.asm
+    tests/i8253_test.asm
+    tests/i8080.asm
+
+    ${MCP_GUI_FILES}
+)
+
+set(HEADLESS_SOURCES
+    headless/headless_main.cpp
+    headless/renderer_null.h headless/renderer_null.cpp
+)
+
+set(PROJECT_SOURCES ${EMULATOR_SOURCES} ${GUI_SOURCES})
+
+if(ENABLE_GUI)
+
+# Adding Qt base translations
+
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED Core)
+if(NOT ${Qt6Core_DIR} STREQUAL "")
+    set(QT_TRANSLATIONS_DIR "${Qt6Core_DIR}/../../../translations")
+else()
+    set(QT_TRANSLATIONS_DIR "${Qt5Core_DIR}/../../../translations")
+endif()
+
+# An older Qt lacks some of them (Qt 5.6 has no qtbase_bg.qm): then the copy
+# from a newer Qt kept in translations/qt is taken
+set(QT_TRANSLATION_FILES "")
+foreach(LANG ${SUPPORTED_LANGUAGES})
+    set(QT_TRANSLATION_FILE "${QT_TRANSLATIONS_DIR}/qtbase_${LANG}.qm")
+    set(QT_TRANSLATION_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/translations/qt/qtbase_${LANG}.qm")
+    if(EXISTS ${QT_TRANSLATION_FILE})
+        list(APPEND QT_TRANSLATION_FILES ${QT_TRANSLATION_FILE})
+    elseif(EXISTS ${QT_TRANSLATION_FALLBACK})
+        list(APPEND QT_TRANSLATION_FILES ${QT_TRANSLATION_FALLBACK})
+    else()
+        message(WARNING "Qt translation (qtbase_${LANG}.qm) not found: ${QT_TRANSLATION_FILE}")
+    endif()
+endforeach()
+
+if(QT_TRANSLATION_FILES STREQUAL "")
+    message(FATAL_ERROR "No any Qt translations found.")
+endif()
+
+file(WRITE ${CMAKE_BINARY_DIR}/qt_base.qrc "<RCC>\n  <qresource prefix=\"/i18n\">\n")
+foreach(FILE ${QT_TRANSLATION_FILES})
+    get_filename_component(FILENAME ${FILE} NAME)
+    file(APPEND ${CMAKE_BINARY_DIR}/qt_base.qrc "    <file alias=\"${FILENAME}\">${FILE}</file>\n")
+endforeach()
+file(APPEND ${CMAKE_BINARY_DIR}/qt_base.qrc "  </qresource>\n</RCC>\n")
+
+set(RESOURCE_FILES
+    resources.qrc
+    ${CMAKE_BINARY_DIR}/qt_base.qrc
+)
+
+# Build project
+
+if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
+    QT6_ADD_RESOURCES(PROJECT_RESOURCES
+        ${RESOURCE_FILES}
+    )
+    qt_add_executable(${PROJECT_NAME}
+        MANUAL_FINALIZATION
+        ${PROJECT_SOURCES}
+        ${PROJECT_RESOURCES}
+    )
+
+    # Creates the update_translations and release_translations targets. lupdate
+    # is run over the sources of the target, so the build directories sitting
+    # inside the source tree are not scanned.
+    qt_add_translations(${PROJECT_NAME} TS_FILES
+        ${TS_FILES}
+    )
+
+    if(UPDATE_TRANSLATIONS)
+        add_dependencies(${PROJECT_NAME} update_translations)
+    endif()
+else()
+    # For Qt5: making qms manually and putting them to a separate resource file
+    find_program(LRELEASE_EXECUTABLE lrelease)
+
+    set(QRC_FILE ${CMAKE_BINARY_DIR}/translations.qrc)
+    file(WRITE ${QRC_FILE} "<RCC>\n    <qresource prefix=\"/i18n\">\n")
+
+    foreach(_ts_file ${TS_FILES})
+        get_filename_component(_qt_id ${_ts_file} NAME_WE)
+        set(QM_FILE ${CMAKE_BINARY_DIR}/${_qt_id}.qm)
+        # Made at configure time too: the resource rule lists the files of the
+        # qrc then, and a missing one breaks it. The command below remakes it
+        # whenever the .ts changes; without it a translation edited after the
+        # configure never reached the build
+        execute_process(COMMAND ${LRELEASE_EXECUTABLE} ${_ts_file} -qm  ${QM_FILE})
+        add_custom_command(
+            OUTPUT ${QM_FILE}
+            COMMAND ${LRELEASE_EXECUTABLE} ${_ts_file} -qm ${QM_FILE}
+            DEPENDS ${_ts_file}
+            VERBATIM
+        )
+        file(APPEND ${QRC_FILE} "        <file alias=\"${_qt_id}\">${QM_FILE}</file>\n")
+    endforeach()
+
+    file(APPEND ${QRC_FILE} "    </qresource>\n</RCC>\n")
+
+    if(UPDATE_TRANSLATIONS)
+        find_program(LUPDATE_EXECUTABLE lupdate)
+        if(LUPDATE_EXECUTABLE)
+            # lupdate is given the project sources instead of the source tree:
+            # scanning the tree would also walk the build directories that live
+            # inside it and fill the .ts files with generated code. This is what
+            # qt_add_translations does for Qt6.
+            set(LUPDATE_SOURCES ${PROJECT_SOURCES})
+            list(FILTER LUPDATE_SOURCES EXCLUDE REGEX [[\.(md|txt|qrc|png|ico|rc)$]])
+            add_custom_target(update_translations
+                COMMAND ${LUPDATE_EXECUTABLE} ${LUPDATE_SOURCES} -ts ${TS_FILES}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                COMMENT "Updating translation files..."
+            )
+        endif()
+    endif()
+
+    qt5_add_resources(PROJECT_RESOURCES
+        ${RESOURCE_FILES}
+        ${QRC_FILE}
+    )
+
+    add_executable(${PROJECT_NAME}
+        ${PROJECT_SOURCES}
+        ${PROJECT_RESOURCES}
+    )
+
+    if(UPDATE_TRANSLATIONS AND TARGET update_translations)
+        add_dependencies(${PROJECT_NAME} update_translations)
+    endif()
+endif()
+
+target_include_directories(${PROJECT_NAME} PUBLIC
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_SOURCE_DIR}/libs/dsk_tools/include/
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    Qt${QT_VERSION_MAJOR}::Widgets
+    dsk_tools_core
+)
+
+# The flag is set on this target only: eCat3-headless is built from the same
+# directory and must not see it. The release scripts look for HAVE_QT_SVG in
+# build.ninja to decide whether the Svg library has to be shipped.
+if(TARGET Qt${QT_VERSION_MAJOR}::Svg)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::Svg)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_QT_SVG)
+    message(STATUS "Qt Svg found: the on-screen keyboard is enabled")
+else()
+    message(STATUS "Qt Svg not found: the on-screen keyboard is disabled")
+endif()
+
+# SDL2 libraries (only when using SDL2 renderer or SDL2 audio)
+if(RENDERER_SDL2 OR USE_SDL_AUDIO)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_LIBRARIES})
+endif()
+
+# The render thread asks Windows for a 1 ms timer (timeBeginPeriod), whatever
+# the audio back end is
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE winmm)
+endif()
+
+# miniaudio platform dependencies
+if(NOT USE_SDL_AUDIO)
+    if(WIN32)
+        target_link_libraries(${PROJECT_NAME} PRIVATE winmm ole32)
+    elseif(APPLE)
+        find_library(COREAUDIO_FRAMEWORK CoreAudio)
+        find_library(AUDIOUNIT_FRAMEWORK AudioUnit)
+        find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            ${COREAUDIO_FRAMEWORK}
+            ${AUDIOUNIT_FRAMEWORK}
+            ${COREFOUNDATION_FRAMEWORK}
+        )
+    else()
+        # Linux
+        target_link_libraries(${PROJECT_NAME} PRIVATE pthread m dl)
+    endif()
+endif()
+
+if(QT_VERSION_MAJOR EQUAL 6 AND RENDERER_OPENGL)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        Qt${QT_VERSION_MAJOR}::OpenGLWidgets
+    )
+endif()
+
+# Different platforms setup
+
+if(APPLE)
+    if(${QT_VERSION} VERSION_LESS 6.1.0)
+      set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.example.${PROJECT_NAME})
+    endif()
+
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build universal binary for macOS" FORCE)
+    set(ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/resources/files/ecat.icns")
+    set(PLIST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/resources/files/Info.plist")
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        ${BUNDLE_ID_OPTION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_ICON_FILE "ecat.icns"
+        MACOSX_BUNDLE_INFO_PLIST "${PLIST_FILE}"
+    )
+  target_sources(${PROJECT_NAME} PRIVATE ${ICON_FILE})
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_FILE}" "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources/"
+  )
+endif()
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    WIN32_EXECUTABLE TRUE
+)
+
+endif() # ENABLE_GUI
+
+include(GNUInstallDirs)
+
+# Passing version to the application
+
+set(CMAKE_CONFIGURE_FILE_CONTENT_NEWLINE_STYLE UNIX)
+# Into the build directory, like the web build does: every build directory
+# configured from one tree used to rewrite the same src/globals.h, so the last
+# one configured decided the version and the options all of them compiled
+configure_file (globals.h.in ${CMAKE_CURRENT_BINARY_DIR}/globals.h @ONLY NEWLINE_STYLE LF)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/globals.h)
+    # Left by a configure of an older tree; found first, it would hide the
+    # generated one
+    file(REMOVE ${CMAKE_CURRENT_SOURCE_DIR}/globals.h)
+endif()
+
+if(ENABLE_GUI)
+    install(TARGETS ${PROJECT_NAME}
+        BUNDLE DESTINATION .
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+
+    if(QT_VERSION_MAJOR EQUAL 6)
+        qt_finalize_executable(${PROJECT_NAME})
+    endif()
+endif()
+
+# The console executable. Same emulator, no Qt: a console subsystem binary on
+# Windows, so it has a terminal to print to, and a null renderer that keeps the
+# frame in memory. Screenshots and the whole .ecat vocabulary work as usual.
+if(ENABLE_HEADLESS)
+    set(HEADLESS_TARGET ${PROJECT_NAME}-headless)
+
+    add_executable(${HEADLESS_TARGET}
+        ${EMULATOR_SOURCES}
+        ${HEADLESS_SOURCES}
+    )
+
+    target_compile_features(${HEADLESS_TARGET} PRIVATE cxx_std_17)
+
+    target_include_directories(${HEADLESS_TARGET} PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/libs/dsk_tools/include/
+    )
+
+    target_link_libraries(${HEADLESS_TARGET} PRIVATE dsk_tools_core)
+
+    if(WIN32)
+        target_link_libraries(${HEADLESS_TARGET} PRIVATE winmm)
+    endif()
+
+    # std::thread and std::mutex, never the Qt ones: there is no Qt here
+    target_compile_definitions(${HEADLESS_TARGET} PRIVATE FORCE_STD_THREADING USE_MINI_INI)
+
+    # frank-ecat: the console build with the microcontroller's core patches
+    # (ECAT_EMBEDDED: 8-bit surface, slim link tables), to run the test suite on them
+    option(ECAT_EMBEDDED_CHECK "Build eCat3-headless with the frank-ecat ECAT_EMBEDDED patches" OFF)
+    if(ECAT_EMBEDDED_CHECK)
+        target_compile_definitions(${HEADLESS_TARGET} PRIVATE ECAT_EMBEDDED)
+    endif()
+
+    # The flags Qt puts on the windowed target for MSVC. Without -permissive-
+    # the core does not compile (it spells && and || as "and" and "or"), and
+    # without -utf-8 the Cyrillic string literals are read in the ANSI codepage
+    if(MSVC)
+        target_compile_options(${HEADLESS_TARGET} PRIVATE -Zc:__cplusplus -permissive- -utf-8)
+    endif()
+
+    if(USE_SDL_AUDIO)
+        target_link_libraries(${HEADLESS_TARGET} PRIVATE ${SDL2_LIBRARIES})
+    else()
+        if(WIN32)
+            target_link_libraries(${HEADLESS_TARGET} PRIVATE winmm ole32)
+        elseif(APPLE)
+            find_library(COREAUDIO_FRAMEWORK CoreAudio)
+            find_library(AUDIOUNIT_FRAMEWORK AudioUnit)
+            find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+            target_link_libraries(${HEADLESS_TARGET} PRIVATE
+                ${COREAUDIO_FRAMEWORK}
+                ${AUDIOUNIT_FRAMEWORK}
+                ${COREFOUNDATION_FRAMEWORK}
+            )
+        else()
+            target_link_libraries(${HEADLESS_TARGET} PRIVATE pthread m dl)
+        endif()
+    endif()
+
+    set_target_properties(${HEADLESS_TARGET} PROPERTIES
+        WIN32_EXECUTABLE FALSE
+        MACOSX_BUNDLE FALSE
+    )
+
+    install(TARGETS ${HEADLESS_TARGET}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+
+# The compiler's own warnings. Off by default: the tree has not been cleaned
+# against them, and a release build is not the place to read a thousand lines.
+# A pass with them on is the cheapest search there is for a class of bugs -
+# operator precedence, uninitialised members, signed/unsigned comparisons
+option(ENABLE_WARNINGS "Build with the compiler warnings on (-Wall -Wextra, /W4)" OFF)
+if(ENABLE_WARNINGS)
+    foreach(WARN_TARGET ${PROJECT_NAME} ${PROJECT_NAME}-headless)
+        if(TARGET ${WARN_TARGET})
+            if(MSVC)
+                target_compile_options(${WARN_TARGET} PRIVATE /W4)
+            else()
+                target_compile_options(${WARN_TARGET} PRIVATE -Wall -Wextra)
+            endif()
+        endif()
+    endforeach()
+endif()

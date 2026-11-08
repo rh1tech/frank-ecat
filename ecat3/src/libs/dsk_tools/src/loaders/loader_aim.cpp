@@ -1,0 +1,293 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: A loader class for AIM (Agat 840/880 Kb psysical images)
+
+#include <fstream>
+#include <iostream>
+
+#include "host_helpers.h"
+
+#include "loader_aim.h"
+#include "utils.h"
+
+namespace dsk_tools {
+
+    namespace {
+
+        // An AIM track is a sequence of cells, each one being a data byte and an AIM command
+        const int AIM_TRACKS = 160;
+        const int AIM_TRACK_CELLS = 6464;
+
+        // Two sector layouts are known: 21 sectors of 256 bytes (Agat 840 Kb) and
+        // 11 sectors of 512 bytes (Agat 880 Kb, the format used by ProDOS disks of the Nippel OS)
+        const int AIM_840_SECTORS = 21;
+        const int AIM_840_SECTOR_SIZE = 256;
+        const int AIM_880_SECTORS = 11;
+        const int AIM_880_SECTOR_SIZE = 512;
+
+        // DESYNC 95 6A | Volume Track Sector $5A
+        const int ADDRESS_FIELD_CELLS = 7;
+        // DESYNC 6A 95 | <sector_size> bytes | CRC $5A
+        int data_field_cells(const int sector_size)
+        {
+            return 3 + sector_size + 2;
+        }
+
+        // A DESYNC is $01 or $80, some dumps set both bits at once
+        bool is_desync(const uint8_t cmd)
+        {
+            return cmd == 0x01 || cmd == 0x80 || cmd == 0x81;
+        }
+
+        // A track is read as a ring, so a field crossing its end continues at the beginning
+        uint8_t cell(const std::vector<uint16_t> & in, const int base, const int p)
+        {
+            return in[base + p % AIM_TRACK_CELLS] & 0xFF;
+        }
+
+    }
+
+LoaderAIM::LoaderAIM(const std::string &file_name, const std::string &format_id, const std::string &type_id):
+        Loader(file_name, format_id, type_id)
+    {}
+
+    bool LoaderAIM::iterate_until(const std::vector<uint16_t> & in, int & p, const uint8_t v)
+    {
+        uint16_t b;
+        uint8_t d;
+        do {
+            if (p >= in.size()) return false;
+            b = in.at(p++);
+            d = b & 0xFF;
+        } while (d != v);
+        return true;
+    }
+
+    // The sector size is not recorded anywhere in an AIM dump, so it is deduced from the
+    // data itself: the checksum stored after a data field only matches the length the disk
+    // was formatted with. Every data field of the dump is summed up to both candidate
+    // lengths and the winner takes the disk.
+    int LoaderAIM::detect_sector_size(const std::vector<uint16_t> & in)
+    {
+        int matches_256 = 0;
+        int matches_512 = 0;
+
+        for (int track=0; track<AIM_TRACKS; track++) {
+            const int base = track * AIM_TRACK_CELLS;
+            for (int p=0; p<AIM_TRACK_CELLS; p++) {
+                if (!is_desync(in[base + p] >> 8)) continue;
+                if (cell(in, base, p + 1) != 0x6A || cell(in, base, p + 2) != 0x95) continue;
+
+                // The Agat checksum is an 8 bit sum with the carry added back
+                uint16_t crc = 0;
+                for (int i=0; i<AIM_880_SECTOR_SIZE; i++) {
+                    if (i == AIM_840_SECTOR_SIZE && (crc & 0xFF) == cell(in, base, p + 3 + i)) matches_256++;
+                    const uint8_t d = cell(in, base, p + 3 + i);
+                    if (crc > 0xFF) crc = (crc + 1) & 0xFF;
+                    crc += d;
+                }
+                if ((crc & 0xFF) == cell(in, base, p + 3 + AIM_880_SECTOR_SIZE)) matches_512++;
+            }
+        }
+
+        return (matches_512 > matches_256) ? AIM_880_SECTOR_SIZE : AIM_840_SECTOR_SIZE;
+    }
+
+    Result LoaderAIM::load(BYTES & buffer, const DiskFormatParams &format)
+    {
+        UTF8_ifstream file(file_name, std::ios::binary);
+
+        if (!file.good()) {
+            return Result::error(ErrorCode::LoadError, QT_TRANSLATE_NOOP("errors", "Cannot open file"));
+        }
+
+        file.seekg (0, std::ios::end);
+        auto fsize = file.tellg();
+        file.seekg (0, std::ios::beg);
+
+        if (fsize < static_cast<std::streamoff>(AIM_TRACKS) * AIM_TRACK_CELLS * 2) {
+            return Result::error(ErrorCode::LoadSizeMismatch, QT_TRANSLATE_NOOP("errors", "File is too small"));
+        }
+
+        std::vector<uint16_t> in(fsize/2);
+
+        file.read (reinterpret_cast<char*>(in.data()), in.size() * 2);
+
+        // An explicitly requested geometry wins, otherwise the dump decides
+        if (format.sectors != 0 && format.sector_size != 0) {
+            m_sectors = format.sectors;
+            m_sector_size = format.sector_size;
+        } else {
+            m_sector_size = detect_sector_size(in);
+            m_sectors = (m_sector_size == AIM_880_SECTOR_SIZE) ? AIM_880_SECTORS : AIM_840_SECTORS;
+        }
+
+        buffer.clear();
+        buffer.resize(AIM_TRACKS * m_sectors * m_sector_size);
+
+        int sectors_found = 0;
+
+        for (int track=0; track<AIM_TRACKS; track++) {
+            const int base = track * AIM_TRACK_CELLS;
+
+            // The sector number is taken from its address field, so a dump that
+            // starts at an arbitrary angle is not scrambled
+            int sector = -1;
+            int p = 0;
+
+            while (p < AIM_TRACK_CELLS) {
+                if (!is_desync(in[base + p] >> 8)) {p++; continue;};
+
+                // An AIM track is a bit longer than a revolution, so its last
+                // field can wrap to the beginning of the same track
+                uint8_t m1 = cell(in, base, p + 1);
+                uint8_t m2 = cell(in, base, p + 2);
+
+                if (m1 == 0x95 && m2 == 0x6A) {
+                    // Address field: Volume, Track, Sector, $5A
+                    sector = cell(in, base, p + 5);
+                    p += ADDRESS_FIELD_CELLS;
+                } else
+                if (m1 == 0x6A && m2 == 0x95) {
+                    // Data field: <sector_size> bytes, CRC, $5A
+                    if (sector >= 0 && sector < m_sectors) {
+                        int out_p = (track * m_sectors + sector) * m_sector_size;
+                        for (int i=0; i<m_sector_size; i++)
+                            buffer[out_p + i] = cell(in, base, p + 3 + i);
+                        sectors_found++;
+                    }
+                    sector = -1;
+                    p += data_field_cells(m_sector_size);
+                } else
+                    p++;
+            }
+        }
+
+        if (sectors_found == 0) {
+            return Result::error(ErrorCode::LoadDataCorrupt, QT_TRANSLATE_NOOP("errors", "Invalid index mark"));
+        }
+
+        loaded = true;
+
+        return Result::ok();
+    }
+
+    std::string LoaderAIM::file_info()
+    {
+        std::string result = "";
+
+        UTF8_ifstream file(file_name, std::ios::binary);
+
+        if (!file.good()) {
+            result += "{$ERROR_OPENING}:\n";
+            return result;
+        }
+
+        file.seekg (0, std::ios::end);
+        auto fsize = file.tellg();
+        file.seekg (0, std::ios::beg);
+
+        size_t pos = file_name.find_last_of("/\\");
+        std::string file_short = (pos == std::string::npos) ? file_name : file_name.substr(pos + 1);
+        result += "{$FILE_NAME}: " + file_short + "\n";
+        result += "{$SIZE}: " + std::to_string(fsize) + " {$BYTES}\n";
+
+
+        std::vector<uint16_t> in(fsize/2);
+
+        file.read (reinterpret_cast<char*>(in.data()), fsize);
+
+        // A 512 byte sector disk parsed as a 256 byte one reports an error on every sector
+        const int sector_size = (in.size() >= static_cast<size_t>(AIM_TRACKS) * AIM_TRACK_CELLS)
+                                ? detect_sector_size(in)
+                                : AIM_840_SECTOR_SIZE;
+
+        int in_p = 0;
+        int track_len = AIM_TRACK_CELLS;
+        result += "\n";
+        bool error = false;
+        bool errors = false;
+        for (int track=0; track<AIM_TRACKS; track++) {
+            int in_base = track * track_len;
+            in_p = in_base;
+            result += "{$TRACK}: " + std::to_string(track) + "\n";
+            while (in_p < in_base+track_len) {
+                // Looking for Index Mark
+                bool index_found = false;
+                while (in_p < in_base+track_len) {
+                    if (!iterate_until(in, in_p, 0x95)) break;
+                    if (in_p < in_base+track_len) {
+                        uint8_t b = in.at(in_p++) & 0xFF;
+                        if (b == 0x6A) {index_found = true; break;};
+                    }
+                }
+                if (index_found) {
+                    // VTS
+                    result += "    $" + dsk_tools::int_to_hex(static_cast<uint32_t>(in_p*2 - 2)) + " {$INDEX_MARK} ($95 $6A)\n";
+                    result += "    $" + dsk_tools::int_to_hex(static_cast<uint32_t>(in_p*2)) + " {$SECTOR_INDEX}:";
+                    uint8_t r_v = in.at(in_p++) & 0xFF;
+                    uint8_t r_t = in.at(in_p++) & 0xFF;
+                    uint8_t r_s = in.at(in_p++) & 0xFF;
+                    uint8_t r_e = in.at(in_p++) & 0xFF;
+                    result += " {$VOLUME_ID}=" + std::to_string(r_v) + " ($" + dsk_tools::int_to_hex(r_v) + ")";
+                    result += ", {$TRACK_SHORT}=" + std::to_string(r_t);
+                    result += ", {$LOGICAL_SECTOR}=" + std::to_string(r_s);
+                    if (r_e == 0x5A) {
+                        result += ", {$SECTOR_INDEX_END_OK}";
+                    } else {
+                        result += ", {$SECTOR_INDEX_END_ERROR}";
+                    }
+                    result += "\n";
+                    // Data mark
+                    bool data_found = false;
+                    while (in_p < in_base+track_len) {
+                        if (!iterate_until(in, in_p, 0x6A)) break;
+                        uint8_t b = in.at(in_p++) & 0xFF;
+                        if (b == 0x95) {data_found = true; break;};
+                    };
+                    if (data_found) {
+                        // Data
+                        result += "    $" + dsk_tools::int_to_hex(static_cast<uint32_t>(in_p*2-2)) + " {$DATA_MARK} ($6A $95)\n";
+                        result += "    $" + dsk_tools::int_to_hex(static_cast<uint32_t>(in_p*2)) + " {$DATA_FIELD} (" + std::to_string(sector_size) + ")\n";
+                        uint16_t crc = 0;
+                        error = false;
+                        for (int i=0; i<sector_size; i++) {
+                            if (in_p >= in_base+track_len) {error = true; break;};
+                            uint8_t  d = in.at(in_p++) & 0xFF;
+                            if (crc > 0xFF) crc = (crc + 1) & 0xFF;
+                            crc += d;
+                        }
+                        if (!error) {
+                            result += "    $" + dsk_tools::int_to_hex(static_cast<uint32_t>(in_p*2));
+                            uint8_t r_crc = in.at(in_p++) & 0xFF;
+                            if (r_crc == (crc & 0xFF)) {
+                                result += " {$SECTOR_CRC_OK} ($" + dsk_tools::int_to_hex(r_crc) + ")";
+                            } else {
+                                errors = true;
+                                result += " {$SECTOR_CRC_ERROR} ({$CRC_EXPECTED}: $" + dsk_tools::int_to_hex(static_cast<uint8_t>(crc & 0xFF)) + ", {$CRC_FOUND}: $" + dsk_tools::int_to_hex(r_crc) + ")";
+                            }
+                        } else {
+                            result += " {$SECTOR_ERROR}";
+                            errors = true;
+                        }
+                        result += "\n\n";
+                    }
+                }
+            }
+            for (int i=0; i<track_len; i++) {
+                uint8_t hi = in.at(i) >> 8;
+                if (hi != 0) {
+                    result += "    Command[$" + dsk_tools::int_to_hex(static_cast<uint16_t>(i*2)) + "] = $" + dsk_tools::int_to_hex(hi) + "\n";
+                }
+            }
+        }
+        if (errors) {
+            result += "{$ERROR_PARSING}\n";
+        } else {
+            result += "{$PARSING_FINISHED}\n";
+        }
+
+        return result;
+    }
+}

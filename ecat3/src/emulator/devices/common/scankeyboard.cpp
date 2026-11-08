@@ -1,0 +1,568 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Scanning matrix-based keyboard device
+
+#include <cstring>
+
+#include "emulator/utils.h"
+#include "emulator/config.h"
+#include "scankeyboard.h"
+#include "dsk_tools/core.h"
+
+#define SCAN_CALLBACK 1
+#define LED_CALLBACK 2
+#define COLMASK_CALLBACK 3
+
+//Both tables of this keyboard are laid out as the matrix: one line per output
+//line, one whitespace separated column per scan line
+static std::vector<std::string> split_columns(const std::string &line)
+{
+    std::vector<std::string> parts;
+    std::string token;
+    for (size_t ci = 0; ci < line.size(); ci++) {
+        if (line[ci] == ' ' || line[ci] == '\t' || line[ci] == '\r') {
+            if (!token.empty()) { parts.push_back(token); token.clear(); }
+        } else {
+            token += line[ci];
+        }
+    }
+    if (!token.empty()) parts.push_back(token);
+    return parts;
+}
+
+ScanKeyboard::ScanKeyboard(InterfaceManager *im, EmulatorConfigDevice *cd):
+      Keyboard(im, cd)
+    , i_scan(this, im, 8, "scan", MODE_R, SCAN_CALLBACK)
+    , i_output(this, im, 8, "output", MODE_W)
+    , i_output_hi(this, im, 8, "output_hi", MODE_W)
+    , i_shift(this, im, 1, "shift", MODE_W)
+    , i_ctrl(this, im, 1, "ctrl", MODE_W)
+    , i_ruslat(this, im, 1, "ruslat", MODE_W)
+    , i_ruslat_led(this, im, 1, "ruslat_led", MODE_R, LED_CALLBACK)
+    , i_colmask(this, im, 8, "colmask", MODE_R, COLMASK_CALLBACK)
+    , i_sense(this, im, 1, "sense", MODE_W)
+    , i_nmi(this, im, 1, "nmi", MODE_W)
+
+{
+    memset(&key_array, _FFFF, sizeof(key_array));
+}
+
+emulator::Result ScanKeyboard::load_config(SystemData *sd)
+{
+    emulator::Result res = Keyboard::load_config(sd);
+    if (!res) return res;
+
+    decoded_scan = read_confg_value(cd, "decoder", false, false);
+    decoded_mask = (1u << read_confg_value(cd, "decoder_bits", false, (unsigned int)4)) - 1;
+
+    std::string map_file = find_file_location(sd, cd->get_parameter("map", false).value);
+    if (map_file.empty())
+        return emulator::Result::error(emulator::ErrorCode::ConfigError, "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Keyboard map file is expected")) + "}");
+    else {
+        std::string layout = dsk_tools::utf8_read_file(map_file);
+        if (layout.empty()) {
+            return emulator::Result::error(emulator::ErrorCode::ConfigError, "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Error reading map file")) + "} " + map_file);
+        }
+
+        std::vector<std::string> lines = split_string(layout, '\n', true);
+        out_lines = lines.size();
+        for (unsigned int out = 0; out < out_lines; out++)
+        {
+            std::string line = str_trim(lines[out]);
+            if (line.empty()) continue;
+            std::vector<std::string> parts = split_columns(line);
+            scan_lines = parts.size();
+            for (unsigned int scan=0; scan<scan_lines; scan++)
+            {
+                std::vector<std::string> keys = split_string(parts[scan], '|', true);
+                for (size_t i=0; i< keys.size(); i++)
+                    if (keys[i] != "__")
+                    {
+                        int shift_state = SHIFT_STATE_KEEP;
+                        std::string key_name;
+                        size_t key_len = keys[i].length();
+                        if (key_len > 1 && keys[i].back() == '_') {
+                            key_name = keys[i].substr(0, key_len-1);
+                            shift_state = SHIFT_STATE_OFF;
+                        } else
+                        if (key_len > 1 && keys[i].back() == '^') {
+                            key_name = keys[i].substr(0, key_len-1);
+                            shift_state = SHIFT_STATE_ON;
+                        } else
+                            key_name = keys[i];
+                        unsigned int key_code = translate_key(key_name);
+                        if (key_code == _FFFF)
+                            return emulator::Result::error(emulator::ErrorCode::ConfigError, "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Unknown key")) + "} " + keys[i]);
+                        else
+                            scan_data.push_back({key_code, scan, out, shift_state});
+                    }
+            }
+        }
+    }
+
+    //The native table was read before the map (by Keyboard::load_config), so
+    //only now can it be checked against the matrix. A key outside it would be
+    //dead on the drawing, and one shifted by a row would close another contact
+    for (size_t i = 0; i < id_data.size(); i++)
+        if (id_data[i].scan_line >= scan_lines || id_data[i].out_line >= out_lines)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Key table does not fit the matrix")) + "} " + id_data[i].id);
+
+    if (scan_lines > sizeof(key_array)/sizeof(key_array[0]))
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Too many scan lines in the map file")) + "} " + map_file);
+
+    //A machine whose modifiers sit in the matrix itself names none of these:
+    //on the Юниор the ROM finds РУС/ЛАТ and the register key among the scanned
+    //codes and keeps their state on its own, so the host keys must close those
+    //contacts like any other and not be taken away here
+    const std::string s_ctrl   = cd->get_parameter("ctrl", false).value;
+    const std::string s_shift  = cd->get_parameter("shift", false).value;
+    const std::string s_ruslat = cd->get_parameter("ruslat", false).value;
+    code_ctrl   = s_ctrl.empty()  ?_FFFF:translate_key(s_ctrl);
+    code_shift  = s_shift.empty() ?_FFFF:translate_key(s_shift);
+    code_ruslat = s_ruslat.empty()?_FFFF:translate_key(s_ruslat);
+    const std::string s_nmi = cd->get_parameter("nmi_key", false).value;
+    code_nmi = s_nmi.empty()?_FFFF:translate_key(s_nmi);
+    m_clocked = code_nmi != _FFFF;     //clock() hands the NMI key over
+    const std::string s_ruskey = cd->get_parameter("rus_key", false).value;
+    m_rus_key = s_ruskey.empty() ? _FFFF : translate_key(s_ruskey);
+    const std::string s_layout = str_tolower(cd->get_parameter("rus_layout", false).value);
+    m_rus_jcuken = s_layout == "jcuken";
+    m_rus_koi7_shift = s_layout == "koi7-shift";
+    const std::string s_yo = cd->get_parameter("rus_yo", false).value;
+    if (!s_yo.empty()) m_rus_yo = translate_key(s_yo);
+
+    //The Юниор gives '>' for the key marked '.' and '.' only with НР, so a
+    //host '.' has to close НР along with it - and НР there is a contact of the
+    //matrix, not a line of its own
+    const std::string s_mshift = cd->get_parameter("matrix_shift", false).value;
+    mshift_scan = mshift_out = -1;
+    if (!s_mshift.empty()) {
+        for (size_t i = 0; i < id_data.size(); i++)
+            if (id_data[i].id == s_mshift) {
+                mshift_scan = (int)id_data[i].scan_line;
+                mshift_out = (int)id_data[i].out_line;
+                break;
+            }
+        if (mshift_scan < 0)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Unknown key")) + "} " + s_mshift);
+    }
+
+    i_shift.change(1);
+    i_ctrl.change(1);
+    i_ruslat.change(1);
+
+    return emulator::Result::ok();
+}
+
+// The native table has the layout of the map file, with the machine's key names
+// in place of the host's. Its position is all a key of the drawing needs: it
+// closes that contact of the matrix and nothing else - no forced Shift like the
+// map file entries have, the drawing has a Shift of its own. Blank lines and
+// comments are gone by now, so the lines of the body are the output lines.
+emulator::Result ScanKeyboard::parse_key_table(const std::vector<std::string> &body, const std::string &file)
+{
+    const unsigned int max_scan = sizeof(key_array) / sizeof(key_array[0]);
+    const unsigned int max_out = sizeof(key_array[0]) * 8;
+    for (unsigned int out = 0; out < body.size(); out++)
+    {
+        const std::vector<std::string> parts = split_columns(body[out]);
+        if (out >= max_out || parts.size() > max_scan)
+            return emulator::Result::error(emulator::ErrorCode::ConfigError,
+                "{ScanKeyboard|" + std::string(QT_TRANSLATE_NOOP("ScanKeyboard", "Key table does not fit the matrix")) + "} " + body[out] + " (" + file + ")");
+        for (unsigned int scan = 0; scan < parts.size(); scan++)
+        {
+            if (parts[scan] == "__") continue;
+            //Две клавиши могут сидеть на одном контакте: у Юниора обе НР
+            //соединены на плате параллельно, и на рисунке нажимается любая
+            const std::vector<std::string> ids = split_string(parts[scan], '|', true);
+            for (size_t k = 0; k < ids.size(); k++)
+            {
+                const std::string id = str_trim(ids[k]);
+                if (id.empty()) continue;
+                id_data.push_back({id, scan, out});
+                register_key_id(id);
+            }
+        }
+    }
+    return emulator::Result::ok();
+}
+
+std::string ScanKeyboard::id_at(unsigned int scan, unsigned int out) const
+{
+    for (size_t i = 0; i < id_data.size(); i++)
+        if (id_data[i].scan_line == scan && id_data[i].out_line == out) return id_data[i].id;
+    return "";
+}
+
+std::string ScanKeyboard::role_id(KeyRole role) const
+{
+    for (size_t i = 0; i < m_key_roles.size(); i++)
+        if (m_key_roles[i].second == role) return m_key_roles[i].first;
+    return "";
+}
+
+void ScanKeyboard::send_key_id(const std::string &id, bool press)
+{
+    //РУС/ЛАТ is not in the matrix: it has a line of its own, which the firmware
+    //polls, flipping its own flag and the indicator. So the key is held for as
+    //long as the pointer holds it - a press and release in one instant would
+    //pass by between two polls unseen - and the register is left to the machine
+    if (key_role(id) == KEY_ROLE_RUS_LINE) {
+        i_ruslat.change(press ? 0 : 1);
+        return;
+    }
+
+    for (size_t i = 0; i < id_data.size(); i++)
+        if (id_data[i].id == id) {
+            const unsigned int mask = create_mask(1, id_data[i].out_line);
+            if (press)
+                key_array[id_data[i].scan_line] &= ~mask;
+            else
+                key_array[id_data[i].scan_line] |= mask;
+            calculate_out();
+            return;
+        }
+}
+
+//stored_shift follows every decision about Shift: a host key with a forced
+//Shift restores it on release, and must not bring back a state the drawing
+//has changed since
+void ScanKeyboard::set_shift_state(bool pressed)
+{
+    stored_shift = pressed ? 0 : 1;
+    i_shift.change(stored_shift);
+}
+
+void ScanKeyboard::set_ctrl_state(bool pressed)
+{
+    i_ctrl.change(pressed ? 0 : 1);
+}
+
+bool ScanKeyboard::matrix_shift_pressed() const
+{
+    return (key_array[mshift_scan] & create_mask(1, mshift_out)) == 0;
+}
+
+void ScanKeyboard::set_matrix_shift(bool pressed)
+{
+    const unsigned int mask = create_mask(1, mshift_out);
+    if (pressed) key_array[mshift_scan] &= ~mask;
+    else         key_array[mshift_scan] |= mask;
+}
+
+void ScanKeyboard::key_down(unsigned int key)
+{
+    //qDebug() << "DOWN" << Qt::hex << key;
+    if (key == code_nmi) { m_nmi_pending = 0; return; }
+    if (key == code_ctrl) {
+        i_ctrl.change(0);
+        note_id(role_id(KEY_ROLE_CTRL), true);
+    } else if (key == code_shift) {
+        stored_shift = 0;
+        i_shift.change(0);
+        note_id(role_id(KEY_ROLE_SHIFT), true);
+    } else if (key == code_ruslat) {
+        i_ruslat.change(0);
+        set_rus(!rus_mode);
+        note_id(role_id(KEY_ROLE_RUS_LINE), true);
+    } else {
+        for (size_t i=0; i<scan_data.size(); i++)
+            if (scan_data[i].key_code == key)
+            {
+                //qDebug() << "SCAN INDEX" << i;
+                if (scan_data[i].shift_state != SHIFT_STATE_KEEP) {
+                    if (mshift_scan >= 0) {
+                        mshift_saved = matrix_shift_pressed();
+                        set_matrix_shift(scan_data[i].shift_state == SHIFT_STATE_ON);
+                    } else {
+                        stored_shift = i_shift.value;
+                        i_shift.change(scan_data[i].shift_state==SHIFT_STATE_ON?0:1);
+                    }
+                }
+
+                unsigned int l = scan_data[i].scan_line;
+                key_array[l] &= ~create_mask(1, scan_data[i].out_line);
+                calculate_out();
+                //qDebug() << l << Qt::hex << key_array[l];
+
+                //So that typing on the real keyboard lights the drawing up as well
+                note_id(id_at(l, scan_data[i].out_line), true);
+            }
+    }
+}
+
+void ScanKeyboard::key_up(unsigned int key)
+{
+    //qDebug() << "UP" << key;
+    if (key == code_nmi) { m_nmi_pending = 1; return; }
+    if (key == code_ctrl) {
+        i_ctrl.change(1);
+        note_id(role_id(KEY_ROLE_CTRL), false);
+    } else if (key == code_shift) {
+        stored_shift = 1;
+        i_shift.change(1);
+        note_id(role_id(KEY_ROLE_SHIFT), false);
+    } else if (key == code_ruslat) {
+        //Only the press toggles the register. Toggling on the release too
+        //cancels the press out, and what the machine is left with is whatever
+        //its own indicator line happened to say - which is why the Орион
+        //configs used to invert ruslat_led to get the right letters out
+        i_ruslat.change(1);
+        note_id(role_id(KEY_ROLE_RUS_LINE), false);
+    } else {
+        for (size_t i=0; i<scan_data.size(); i++)
+            if (scan_data[i].key_code == key)
+            {
+                unsigned int l = scan_data[i].scan_line;
+                key_array[l] |= create_mask(1, scan_data[i].out_line);
+                calculate_out();
+
+                if (scan_data[i].shift_state != SHIFT_STATE_KEEP) {
+                    if (mshift_scan >= 0) {
+                        set_matrix_shift(mshift_saved);
+                        calculate_out();
+                    } else
+                        i_shift.change(stored_shift);
+                }
+
+                note_id(id_at(l, scan_data[i].out_line), false);
+            }
+    }
+}
+
+// A reset forgets what was held, as it does for the other keyboard type. The
+// drawing drops its latches on a reset without releasing them, so a Shift or a
+// Control it had engaged would otherwise stay down in the matrix while the
+// picture shows it free.
+void ScanKeyboard::reset(bool cool)
+{
+    Keyboard::reset(cool);
+    memset(&key_array, _FFFF, sizeof(key_array));
+    stored_shift = 1;
+    i_shift.change(1);
+    i_ctrl.change(1);
+    m_nmi_pending = -1;
+    if (i_nmi.linked > 0) i_nmi.change(1);
+    i_ruslat.change(1);
+    calculate_out();
+}
+
+void ScanKeyboard::clock(unsigned int counter)
+{
+    (void)counter;
+    if (m_nmi_pending.load(std::memory_order_relaxed) < 0) return;
+    const int level = m_nmi_pending.exchange(-1);
+    if (level >= 0) i_nmi.change((unsigned int)level);
+}
+
+void ScanKeyboard::calculate_out()
+{
+    unsigned int new_value = _FFFF;
+
+    //With an external decoder exactly one line is ever driven, and the port
+    //carries its number: the Юниор monitor walks the columns 0..10 by writing
+    //the low nibble of port A (F9AC), so there is no mask to walk here
+    if (decoded_scan)
+    {
+        const unsigned int line = i_scan.value & decoded_mask;
+        if (line < scan_lines) new_value = key_array[line];
+        i_output.change(new_value);
+        if (i_sense.linked > 0) {
+            const unsigned int s = (((new_value | i_colmask.value) & 0xFF) != 0xFF) ? 1 : 0;
+            if (s != i_sense.value) i_sense.change(s);
+        }
+        if (i_output_hi.linked > 0) i_output_hi.change(new_value >> 8);
+        return;
+    }
+
+    for (unsigned int i = 0; i<scan_lines; i++)
+    {
+        unsigned int mask = create_mask(1, i);
+        if ((i_scan.value & mask) == 0)
+            new_value &= key_array[i];
+    }
+    i_output.change(new_value);
+    if (i_output_hi.linked > 0) i_output_hi.change(new_value >> 8);
+}
+
+// The indicator is taken into the register when the machine scans the matrix,
+// not the moment the line moves. The Радио-86РК and Апогей ROMs write all of
+// port C with zero on every keyboard poll and set the indicator bit back from
+// their own flag right after ($FE7F-$FE89 in the Апогей ROM): the lamp is dark
+// for some 20 us, which nobody sees on a real one. Followed instantly, that
+// dip lights the drawing's lamp at random and, when a host key lands inside
+// it, remaps the key into the other alphabet. The scan write comes before the
+// dip and after the restore, so what it sees is the ROM's flag.
+//
+// Only a change of the line counts: a РУС/ЛАТ typed on the host keyboard flips
+// the register at once (key_down), and a scan that comes before the ROM has
+// polled that key must not flip it back.
+void ScanKeyboard::interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value)
+{
+    if (callback_id == COLMASK_CALLBACK) {
+        calculate_out();
+    } else
+    if (callback_id == SCAN_CALLBACK) {
+        calculate_out();
+        if (led_line >= 0 && led_line != led_taken) {
+            led_taken = led_line;
+            set_rus(led_taken == 1);
+        }
+    } else
+        // LED_CALLBACK
+        led_line = (int)(i_ruslat_led.value & 1);
+}
+
+bool ScanKeyboard::key_for_char(unsigned int codepoint, unsigned int &key, bool &shift)
+{
+    if (m_rus_koi7_shift) {
+        // The Bulgarian alphabet: Ъ is where КОИ-7 has Ы ($79, the key Y),
+        // and there is no Ы
+        if (codepoint == 0x42B || codepoint == 0x44B) return false;
+        if (codepoint == 0x42A || codepoint == 0x44A) codepoint += 1;
+        const unsigned int code = koi7_code(codepoint);
+        if (code != _FFFF) {
+            const unsigned int n = code & 0x1F;
+            if (n == 0x1F) return false;
+            if (n == 0 || n >= 0x1B) {
+                // The ASCII of the code: ` { | } ~, which the map puts on
+                // those keys with Shift
+                key = (0x60 | n) | KEY_NO_REMAP;
+                shift = false;
+                return true;
+            }
+            return Keyboard::key_for_char(codepoint, key, shift);
+        }
+    }
+    if (!m_rus_jcuken) return Keyboard::key_for_char(codepoint, key, shift);
+    if (rus_switch_key() == _FFFF) return false;
+    // ЙЦУКЕН of a PC: the host key whose Russian letter it is - the remap
+    // table pairs it with the Latin key of the letter in КОИ-7 - and Shift
+    // for a capital. Ё is the key left of 1, unless the machine has it
+    // elsewhere (rus_yo: the Поиск, grey +)
+    const unsigned int code = koi7_code(codepoint);
+    const bool capital = (codepoint >= 0x410 && codepoint <= 0x42F) || codepoint == 0x401;
+    if (codepoint == 0x401 || codepoint == 0x451) {
+        if (m_rus_yo == _FFFF) return false;
+        key = m_rus_yo | KEY_NO_REMAP;
+        shift = capital;
+        return true;
+    }
+    if (code == _FFFF) return false;
+    unsigned int latin = _FFFF;
+    {
+        // The Latin key of the code, as in Keyboard::key_for_char()
+        bool sh = false;
+        if (!Keyboard::key_for_char(codepoint, latin, sh)) return false;
+        latin &= ~KEY_NO_REMAP;
+    }
+    for (size_t i = 0; i < RUS_REMAP_SIZE; i++)
+        if (RUS_REMAP[i][1] == latin) {
+            key = RUS_REMAP[i][0] | KEY_NO_REMAP;
+            shift = capital;
+            return true;
+        }
+    return false;
+}
+
+void ScanKeyboard::set_rus(bool new_rus)
+{
+    //qDebug() << "RUS" << new_rus;
+    Keyboard::set_rus(new_rus);
+}
+
+void ScanKeyboard::save_state(StateWriter &w)
+{
+    Keyboard::save_state(w);
+    //The Rus/Lat indicator line as last driven and as last taken into the
+    //register: the Орион monitor writes the whole of port C while saving to
+    //tape, and which of the two the register follows decides the alphabet
+    w.n("led_line", static_cast<uint32_t>(led_line));
+    w.n("led_taken", static_cast<uint32_t>(led_taken));
+    w.u("stored_shift", stored_shift, 16);
+    //key_array is the matrix the host is holding down, and the host holds
+    //nothing when a snapshot is opened
+}
+
+emulator::Result ScanKeyboard::load_state(const StateReader &r)
+{
+    emulator::Result res = Keyboard::load_state(r);
+    if (!res) return res;
+    r.u("led_line", led_line);
+    r.u("led_taken", led_taken);
+    r.u("stored_shift", stored_shift);
+    //Nobody is holding a key, and in this matrix that is all ones: a bit goes
+    //to 0 while its key is down (key_down() clears it, reset() fills the array
+    //with _FFFF). Zeroed, the machine found every key of the matrix pressed at
+    //the first scan after a restore. The output lines are not recomputed here:
+    //they are restored with everything else, and the machine's own scan puts
+    //them right within microseconds - it writes the scan lines continuously
+    memset(&key_array, _FFFF, sizeof(key_array));
+    return emulator::Result::ok();
+}
+
+
+std::vector<DeviceFieldInfo> ScanKeyboard::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = Keyboard::get_device_fields();
+    r.push_back({"scan",   "Value driven onto the scan lines",           false});
+    r.push_back({"out",    "Value the matrix answers with",              false});
+    r.push_back({"shift",  "1 while Shift is held",                      false});
+    r.push_back({"ctrl",   "1 while Ctrl is held",                       false});
+    r.push_back({"ruslat", "State of the Rus/Lat line",                  false});
+    r.push_back({"matrix", "The key matrix, one value per scan line. A bit is 0 while its key is down", true});
+    r.push_back({"count",  "How many keys of the matrix are down",       false});
+    return r;
+}
+
+bool ScanKeyboard::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "scan" || field == "out" || field == "shift" || field == "ctrl" || field == "ruslat")
+    {
+        out.numeric = true;
+        if (field == "scan")        out.values.push_back(i_scan.value);
+        else if (field == "out")    out.values.push_back(i_output.value);
+        else if (field == "shift")  out.values.push_back(i_shift.value);
+        else if (field == "ctrl")   out.values.push_back(i_ctrl.value);
+        else                        out.values.push_back(i_ruslat.value);
+        return true;
+    }
+
+    //The matrix is what a key that does not arrive, or one that never goes up,
+    //actually looks like from the machine side
+    if (field == "matrix" || field == "count")
+    {
+        const unsigned int lines = (scan_lines < 15) ? scan_lines : 15;
+
+        if (field == "count")
+        {
+            //The matrix is active low: a key pulls its bit to zero, and only
+            //the columns the machine actually has are wired
+            unsigned int n = 0;
+            for (unsigned int i = 0; i < lines; i++)
+                for (unsigned int b = 0; b < out_lines && b < 16; b++)
+                    if (((key_array[i] >> b) & 1) == 0) n++;
+            out.numeric = true;
+            out.values.push_back(n);
+            return true;
+        }
+
+        if (to >= lines) to = (lines > 0) ? lines - 1 : 0;
+        if (from > to) from = to;
+        out.numeric = true;
+        out.has_start = true;
+        out.start = from;
+        for (unsigned int i = from; i <= to; i++) out.values.push_back(key_array[i]);
+        return true;
+    }
+
+    return Keyboard::get_field(field, from, to, out);
+}
+
+ComputerDevice * create_scankeyboard(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new ScanKeyboard(im, cd);
+}

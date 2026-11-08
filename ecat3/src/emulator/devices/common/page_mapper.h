@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: RAM pages memory manager device
+
+#pragma once
+
+#include "emulator/core.h"
+
+class PageMapper:public AddressableDevice
+{
+private:
+    Interface i_page;
+    Interface i_segment;
+
+    unsigned int PagesCount;
+    Memory * pages[32];
+    unsigned int Frame;
+    unsigned int PageMask;
+    unsigned int SegmentMask;
+    unsigned int address_mask;
+
+    bool m_single_frame = false;
+
+public:
+    PageMapper(InterfaceManager *im, EmulatorConfigDevice *cd);
+    emulator::Result load_config(SystemData *sd) override;
+    unsigned int get_value(unsigned int address) override;
+    void set_value(unsigned int address, unsigned int value, bool force=false) override;
+    bool debug_writable(MAYBE_UNUSED unsigned int address) const override { return true; }
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+ComputerDevice * create_page_mapper(InterfaceManager *im, EmulatorConfigDevice *cd);

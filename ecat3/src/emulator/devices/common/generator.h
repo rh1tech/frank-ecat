@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Wave generator, header
+
+#pragma once
+
+#include "emulator/core.h"
+
+class Generator:public ComputerDevice
+{
+private:
+    Interface i_out;
+    Interface i_enable;
+    //Вход запуска. Без него генератор свободно бежит по своей частоте, с ним
+    //превращается в одновибратор: импульс выдаётся на фронте этого входа.
+    //Так собирают кадровое прерывание - импульс должен приходить вместе с
+    //кадром, а не когда попало, иначе он попадает в вычитку строки экрана,
+    //процессор в этот момент снят с шины и прерывание теряется
+    Interface i_trigger;
+    bool triggered;
+    uint64_t m_pulses;      // Сколько импульсов выдано с пуска
+
+    bool positive;
+    unsigned int total_counts;
+    unsigned int pulse_counts;
+    unsigned int pulse_stored;
+    bool in_pulse;
+    bool enabled;
+
+public:
+    Generator(InterfaceManager *im, EmulatorConfigDevice *cd);
+    virtual emulator::Result load_config(SystemData *sd) override;
+    virtual void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+    virtual void system_clock(unsigned int counter) override;
+    bool own_system_clock() const override { return true; }
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+ComputerDevice * create_generator(InterfaceManager *im, EmulatorConfigDevice *cd);

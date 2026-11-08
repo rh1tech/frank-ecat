@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: GMD70 (Электроника-ГМД70) FDC device
+
+#include "gmd70.h"
+#include "emulator/utils.h"
+
+// Commands
+#define GMD70_FILL_BUFFER               0
+#define GMD70_GET_BUFFER                1
+#define GMD70_WRITE_SECTOR              2
+#define GMD70_READ_SECTOR               3
+#define GMD70_SPECIFIC                  4   // Format track for СМ5631, set density for ГМД7012
+#define GMD70_READ_STATUS               5
+#define GMD70_WRITE_SECTOR_WITH_MARK    6
+#define GMD70_READ_ERROR                7
+
+// Errors
+#define GMD70_ERROR_SECTOR_NOT_FOUND    7
+
+
+GMD70::GMD70(InterfaceManager *im, EmulatorConfigDevice *cd) :
+      FDC(im, cd)
+    , i_select(this, im, 1, "select", MODE_W)
+    , i_motor(this, im, 1, "motor", MODE_W)
+{
+    std::fill_n(m_buffer, 128, 0);
+}
+
+void GMD70::reset(const bool cold)
+{
+    FDC::reset(cold);
+    reset_fdc();
+}
+
+void GMD70::reset_fdc()
+{
+    m_ints_en = false;
+    m_selected_drive = 0;
+    m_reserved = false;
+    m_command = 0;
+    m_trq = false;
+    m_error = -1;
+    m_done = false;
+    motor_off();
+    i_select.change(m_selected_drive);
+    auto fdd = m_drives[m_selected_drive];
+    if (fdd->get_loaded())
+    {
+        fdd->SeekSector(1, 1);
+        for (unsigned int i = 0; i < 128; i++) m_buffer[i] = fdd->ReadNextByte();
+    }
+    m_counter = 0;
+}
+
+emulator::Result GMD70::load_config(SystemData *sd)
+{
+    emulator::Result res = FDC::load_config(sd);
+    if (!res) return res;
+
+    //Two drive selects
+    std::vector<FDD*> list;
+    res = load_drives(1, sizeof(m_drives)/sizeof(m_drives[0]), list);
+    if (!res) return res;
+    m_drives_count = list.size();
+    for (unsigned int i = 0; i < m_drives_count; i++) m_drives[i] = list[i];
+
+    reset_fdc();
+
+    return emulator::Result::ok();
+}
+
+bool GMD70::get_busy()
+{
+    return m_busy;
+}
+
+unsigned int GMD70::get_selected_drive()
+{
+    return m_selected_drive;
+}
+
+unsigned GMD70::get_value(const unsigned address)
+{
+    if ((address & 1) == 0) {
+        // Status register
+        // std::cout << "GMD70::status" << std::endl;
+        return    (m_trq          ? 0x80 : 0)
+                | (m_ints_en      ? 0x40 : 0)
+                | ((m_error >= 0) ? 0x20 : 0)
+                | (m_done         ? 0x10 : 0)
+                | (m_error >= 0 ? (m_error & 0xF) : 0);
+    }
+    // Data register
+    // std::cout << "GMD70::read data" << std::endl;
+    if (m_command == GMD70_GET_BUFFER) {
+        m_data = m_buffer[m_counter];
+        m_counter = (m_counter + 1) % 128;
+    }
+    if (m_command == GMD70_READ_ERROR) {
+        m_data = m_error >= 0 ? m_error : 0;
+        m_error = -1;
+        m_done = true;
+    }
+    return m_data;
+}
+
+unsigned GMD70::get_direct(const unsigned address)
+{
+    //The status register is computed from flags and reading it changes
+    //nothing, but the data register advances the sector buffer and eats the
+    //error code, so an inspection returns the last byte as it stands
+    if ((address & 1) == 0) {
+        return    (m_trq          ? 0x80 : 0)
+                | (m_ints_en      ? 0x40 : 0)
+                | ((m_error >= 0) ? 0x20 : 0)
+                | (m_done         ? 0x10 : 0)
+                | (m_error >= 0 ? (m_error & 0xF) : 0);
+    }
+    return m_data;
+}
+
+void GMD70::set_value(const unsigned  address, const unsigned  value, bool force)
+{
+    if ((address & 1) == 0) {
+        // Command register
+        // std::cout << "GMD70::command " << std::hex << (value & 0xFF) << std::endl;
+        if (value & 0x80) {
+            reset_fdc();
+            m_done = true;
+            return;
+        }
+        m_ints_en = (value & 0x40) != 0;
+        m_reserved = (value & 0x20) != 0;   // TODO: check if this bit should do something
+        m_selected_drive = (value >> 4) & 1;
+        m_command = (value >> 1) & 0x07;
+        const bool start = (value & 1) != 0;
+
+        i_select.change(m_selected_drive);
+        m_done = false;
+        if (start) do_command();
+    } else {
+        // Data register
+        // std::cout << "GMD70::write data " << std::hex << (value & 0xFF) << std::endl;
+        m_data = value & 0xFF;
+        if (m_command == GMD70_FILL_BUFFER) {
+            m_buffer[m_counter] = m_data;
+            m_counter = (m_counter + 1) % 128;
+        }
+        if (m_command == GMD70_READ_SECTOR) {
+            if (m_command_counter < 2) {
+                m_command_buffer[m_command_counter++] = m_data;
+                if (m_command_counter == 2) {
+                    m_done = true;
+                    m_trq = false;
+                    auto fdd = m_drives[m_selected_drive];
+                    //The track and the sector come from the port, so they are
+                    //whatever the program wrote there: an address the disk does
+                    //not have is answered, not translated into an offset
+                    if (fdd->get_loaded() && fdd->SeekSector(m_command_buffer[1], m_command_buffer[0]) > 0)
+                    {
+                        for (unsigned int i = 0; i < 128; i++) m_buffer[i] = fdd->ReadNextByte();
+                        m_counter = 0;
+                    } else {
+                        m_error = GMD70_ERROR_SECTOR_NOT_FOUND;
+                    }
+                    motor_off();
+                }
+            }
+        }
+        if (m_command == GMD70_WRITE_SECTOR || m_command == GMD70_WRITE_SECTOR_WITH_MARK) {
+            if (m_command_counter < 2) {
+                m_command_buffer[m_command_counter++] = m_data;
+                if (m_command_counter == 2) {
+                    m_done = true;
+                    m_trq = false;
+                    auto fdd = m_drives[m_selected_drive];
+                    if (fdd->get_loaded() && fdd->SeekSector(m_command_buffer[1], m_command_buffer[0]) > 0)
+                    {
+                        for (unsigned int i = 0; i < 128; i++) fdd->WriteNextByte(m_buffer[i]);
+                        m_counter = 0;
+                    } else {
+                        m_error = GMD70_ERROR_SECTOR_NOT_FOUND;
+                    }
+                    motor_off();
+                }
+            }
+        }
+    }
+}
+
+void GMD70::motor_on()
+{
+    i_motor.change(0);
+}
+
+void GMD70::motor_off()
+{
+    i_motor.change(1);
+}
+
+void GMD70::do_command()
+{
+    if (m_command == GMD70_FILL_BUFFER) {
+        m_counter = 0;
+        m_trq = true;
+        m_done = true;
+        if (!m_drives[m_selected_drive]->get_loaded()) m_error = GMD70_ERROR_SECTOR_NOT_FOUND;
+    }
+    if (m_command == GMD70_GET_BUFFER) {
+        m_counter = 0;
+        m_trq = true;
+        m_done = true;
+        if (!m_drives[m_selected_drive]->get_loaded()) m_error = GMD70_ERROR_SECTOR_NOT_FOUND;
+    }
+    if (m_command == GMD70_READ_SECTOR) {
+        m_command_counter = 0;
+        m_trq = true;
+        motor_on();
+    }
+    if (m_command == GMD70_WRITE_SECTOR || m_command == GMD70_WRITE_SECTOR_WITH_MARK) {
+        m_command_counter = 0;
+        m_trq = true;
+        motor_on();
+    }
+    if (m_command == GMD70_SPECIFIC) {
+        // Format track / set density — no-op in emulator (images are pre-formatted)
+        // TODO: implement
+        m_done = true;
+        if (!m_drives[m_selected_drive]->get_loaded()) m_error = GMD70_ERROR_SECTOR_NOT_FOUND;
+    }
+    if (m_command == GMD70_READ_STATUS) {
+        auto fdd = m_drives[m_selected_drive];
+        m_data = fdd->get_loaded() ? 0 : 0x80;
+        m_done = true;
+    }
+    if (m_command == GMD70_READ_ERROR) {
+        m_trq = true;
+        m_done = false;
+    }
+}
+
+void GMD70::save_state(StateWriter &w)
+{
+    FDC::save_state(w);
+    w.b("busy", m_busy);
+    w.n("selected_drive", m_selected_drive);
+    w.b("ints_en", m_ints_en);
+    w.n("command", m_command);
+    w.b("reserved", m_reserved);
+    w.b("trq", m_trq);
+    w.n("error", static_cast<uint32_t>(m_error));
+    w.b("done", m_done);
+    w.u("data", m_data, 8);
+    //The sector being handed over a byte at a time
+    w.hex("buffer", m_buffer, sizeof(m_buffer));
+    w.n("counter", m_counter);
+    w.n("command_counter", m_command_counter);
+    w.array("command_buffer", m_command_buffer, 2);
+}
+
+emulator::Result GMD70::load_state(const StateReader &r)
+{
+    emulator::Result res = FDC::load_state(r);
+    if (!res) return res;
+    r.b("busy", m_busy);
+    r.u("selected_drive", m_selected_drive);
+    //Both index fixed arrays, and the file is not trusted
+    if (m_selected_drive >= m_drives_count) m_selected_drive = 0;
+    r.b("ints_en", m_ints_en);
+    r.u("command", m_command);
+    r.b("reserved", m_reserved);
+    r.b("trq", m_trq);
+    r.u("error", m_error);
+    r.b("done", m_done);
+    r.u("data", m_data);
+    r.hex("buffer", m_buffer, sizeof(m_buffer));
+    r.u("counter", m_counter);
+    m_counter %= sizeof(m_buffer);
+    r.u("command_counter", m_command_counter);
+    r.array("command_buffer", m_command_buffer, 2);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> GMD70::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = FDC::get_device_fields();
+    r.push_back({"command",  "Command code being executed",                false});
+    r.push_back({"data",     "Byte in the data register",                  false});
+    r.push_back({"trq",      "1 while the controller asks for a transfer", false});
+    r.push_back({"done",     "1 once the command has finished",            false});
+    r.push_back({"error",    "Error code of the last command, -1 for none", false});
+    r.push_back({"ints",     "1 when interrupts are enabled",              false});
+    r.push_back({"counter",  "Position inside the 128 byte sector buffer", false});
+    r.push_back({"drives",   "How many drives are attached",               false});
+    r.push_back({"buffer",   "Sector buffer",                              true});
+    return r;
+}
+
+bool GMD70::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    if (field == "command" || field == "data" || field == "trq" || field == "done" ||
+        field == "ints" || field == "counter" || field == "drives")
+    {
+        out.numeric = true;
+        if (field == "command")      out.values.push_back(m_command);
+        else if (field == "data")    out.values.push_back(m_data);
+        else if (field == "trq")     out.values.push_back(m_trq ? 1 : 0);
+        else if (field == "done")    out.values.push_back(m_done ? 1 : 0);
+        else if (field == "ints")    out.values.push_back(m_ints_en ? 1 : 0);
+        else if (field == "counter") out.values.push_back(m_counter);
+        else                         out.values.push_back(m_drives_count);
+        return true;
+    }
+
+    //Kept as a signed value, and -1 means "no error", so it is printed as text
+    //rather than as a very large unsigned number
+    if (field == "error")
+    {
+        out.numeric = false;
+        out.text = (m_error < 0) ? "none" : std::to_string(m_error);
+        return true;
+    }
+
+    if (field == "buffer")
+    {
+        if (to >= sizeof(m_buffer)) to = sizeof(m_buffer) - 1;
+        if (from > to) from = to;
+        out.numeric = true;
+        out.has_start = true;
+        out.start = from;
+        for (unsigned int i = from; i <= to; i++) out.values.push_back(m_buffer[i]);
+        return true;
+    }
+
+    return FDC::get_field(field, from, to, out);
+}
+
+ComputerDevice * create_GMD70(InterfaceManager *im, EmulatorConfigDevice *cd){
+    return new GMD70(im, cd);
+}

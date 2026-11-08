@@ -1,0 +1,1384 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: A class and the definitions for the PC FAT filesystem
+
+#include <iostream>
+#include <stdexcept>
+#include <cstring>
+#include <set>
+#include <fstream>
+#include <algorithm>
+#include <ctime>
+
+#include "dsk_tools/dsk_tools.h"
+#include "utils.h"
+#include "fs_fat.h"
+
+namespace dsk_tools {
+
+    namespace {
+        // Checksum of the 11-byte short name; used to bind LFN entries to their owner.
+        uint8_t lfn_checksum(const uint8_t name[11])
+        {
+            uint8_t sum = 0;
+            for (int i = 0; i < 11; i++)
+                sum = static_cast<uint8_t>(((sum & 1) ? 0x80 : 0) + (sum >> 1) + name[i]);
+            return sum;
+        }
+
+        // Pull all 13 UTF-16LE code units out of an LFN slot in their natural order.
+        void lfn_extract_chars(const FAT_LFN_ENTRY & lfn, uint16_t out[13])
+        {
+            for (int i = 0; i < 5; i++)
+                out[i]      = static_cast<uint16_t>(lfn.name1[i*2]) | (static_cast<uint16_t>(lfn.name1[i*2 + 1]) << 8);
+            for (int i = 0; i < 6; i++)
+                out[5 + i]  = static_cast<uint16_t>(lfn.name2[i*2]) | (static_cast<uint16_t>(lfn.name2[i*2 + 1]) << 8);
+            for (int i = 0; i < 2; i++)
+                out[11 + i] = static_cast<uint16_t>(lfn.name3[i*2]) | (static_cast<uint16_t>(lfn.name3[i*2 + 1]) << 8);
+        }
+
+        std::string utf16le_to_utf8(const std::vector<uint16_t> & u16)
+        {
+            std::string out;
+            out.reserve(u16.size());
+            for (size_t i = 0; i < u16.size(); i++) {
+                uint32_t cp = u16[i];
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < u16.size()) {
+                    const uint16_t lo = u16[i + 1];
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                        i++;
+                    }
+                }
+                if (cp < 0x80) {
+                    out += static_cast<char>(cp);
+                } else if (cp < 0x800) {
+                    out += static_cast<char>(0xC0 | (cp >> 6));
+                    out += static_cast<char>(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                    out += static_cast<char>(0xE0 | (cp >> 12));
+                    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                    out += static_cast<char>(0x80 | (cp & 0x3F));
+                } else {
+                    out += static_cast<char>(0xF0 | (cp >> 18));
+                    out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                    out += static_cast<char>(0x80 | (cp & 0x3F));
+                }
+            }
+            return out;
+        }
+    }
+
+    fsFAT::fsFAT(diskImage * image):
+        fileSystem(image)
+    {}
+
+    FSCaps fsFAT::get_caps()
+    {
+        return    FSCaps::Protect | FSCaps::Dirs   | FSCaps::Export | FSCaps::Types
+                | FSCaps::Delete  | FSCaps::Add    | FSCaps::Rename | FSCaps::MkDir
+                | FSCaps::Metadata | FSCaps::Restore | FSCaps::Date;
+    }
+
+    uint8_t * fsFAT::read_lba(unsigned lba) const
+    {
+        const unsigned spt   = image->get_sectors();
+        const unsigned heads = image->get_heads();
+        if (spt == 0) return nullptr;
+
+        unsigned head, track;
+        if (heads <= 1) {
+            head  = 0;
+            track = lba / spt;
+        } else {
+            // PC floppy layout: sides are interleaved per track
+            head  = (lba / spt) % heads;
+            track = (lba / spt) / heads;
+        }
+        const unsigned sector = lba % spt;
+        return image->get_sector_data(head, track, sector);
+    }
+
+    unsigned fsFAT::read_fat_entry(unsigned cluster) const
+    {
+        const unsigned bps = BPB.bytesPerSector;
+        if (bps == 0) return 0x0FFFFFFF;
+
+        if (fat_type == FATType::FAT12) {
+            const unsigned byte_offset = cluster + (cluster >> 1);   // cluster * 3 / 2
+            const unsigned sec    = byte_offset / bps;
+            const unsigned in_sec = byte_offset % bps;
+
+            uint8_t * p0 = read_lba(fat_start + sec);
+            if (!p0) return 0x0FFFFFFF;
+
+            uint8_t b0 = p0[in_sec];
+            uint8_t b1;
+            if (in_sec + 1 < bps) {
+                b1 = p0[in_sec + 1];
+            } else {
+                uint8_t * p1 = read_lba(fat_start + sec + 1);
+                if (!p1) return 0x0FFFFFFF;
+                b1 = p1[0];
+            }
+            const uint16_t v = static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
+            return (cluster & 1) ? (v >> 4) : (v & 0x0FFF);
+        }
+
+        if (fat_type == FATType::FAT16) {
+            const unsigned byte_offset = cluster * 2;
+            const unsigned sec    = byte_offset / bps;
+            const unsigned in_sec = byte_offset % bps;
+
+            uint8_t * p0 = read_lba(fat_start + sec);
+            if (!p0) return 0x0FFFFFFF;
+
+            const uint8_t b0 = p0[in_sec];
+            uint8_t b1;
+            if (in_sec + 1 < bps) {
+                b1 = p0[in_sec + 1];
+            } else {
+                uint8_t * p1 = read_lba(fat_start + sec + 1);
+                if (!p1) return 0x0FFFFFFF;
+                b1 = p1[0];
+            }
+            return static_cast<unsigned>(b0) | (static_cast<unsigned>(b1) << 8);
+        }
+
+        // FAT32 not supported yet
+        return 0x0FFFFFFF;
+    }
+
+    bool fsFAT::is_eoc(unsigned fat_entry) const
+    {
+        switch (fat_type) {
+            case FATType::FAT12: return fat_entry >= 0x0FF8;
+            case FATType::FAT16: return fat_entry >= 0xFFF8;
+            case FATType::FAT32: return fat_entry >= 0x0FFFFFF8;
+        }
+        return true;
+    }
+
+    Result fsFAT::read_directory(uint32_t cluster, BYTES & out) const
+    {
+        const unsigned bps = BPB.bytesPerSector;
+        const unsigned spc = BPB.sectorsPerCluster;
+        out.clear();
+
+        if (cluster == 0) {
+            // Root directory on FAT12/16: fixed sectors at root_dir_start
+            for (unsigned i = 0; i < root_dir_sectors; i++) {
+                uint8_t * p = read_lba(root_dir_start + i);
+                if (!p) return Result::error(ErrorCode::ReadError);
+                out.insert(out.end(), p, p + bps);
+            }
+            return Result::ok();
+        }
+
+        // Subdirectory: follow cluster chain
+        uint32_t c = cluster;
+        unsigned guard = 0;
+        const unsigned guard_max = (total_clusters > 0) ? total_clusters + 2 : 1u << 20;
+        while (!is_eoc(c)) {
+            if (c < 2) return Result::error(ErrorCode::ReadError);
+            const unsigned first_sec = data_start + (c - 2) * spc;
+            for (unsigned s = 0; s < spc; s++) {
+                uint8_t * p = read_lba(first_sec + s);
+                if (!p) return Result::error(ErrorCode::ReadError);
+                out.insert(out.end(), p, p + bps);
+            }
+            c = read_fat_entry(c);
+            if (++guard > guard_max) return Result::error(ErrorCode::ReadError);
+        }
+        return Result::ok();
+    }
+
+    std::string fsFAT::make_file_name(const FAT_DIR_ENTRY & de)
+    {
+        std::string base(reinterpret_cast<const char *>(&de.name[0]), 8);
+        std::string ext (reinterpret_cast<const char *>(&de.name[8]), 3);
+
+        // First byte 0x05 actually represents 0xE5 (Kanji workaround)
+        if (!base.empty() && static_cast<uint8_t>(base[0]) == 0x05)
+            base[0] = static_cast<char>(0xE5);
+
+        base = trim(base);
+        ext  = trim(ext);
+        return ext.empty() ? base : (base + "." + ext);
+    }
+
+    Result fsFAT::open()
+    {
+        if (!image->get_loaded()) return Result::error(ErrorCode::OpenNotLoaded);
+
+        uint8_t * boot = read_lba(0);
+        if (!boot) return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "Cannot read FAT boot sector"));
+
+        std::memcpy(&BPB, boot, sizeof(BPB));
+
+        // Sanity checks
+        if (BPB.bytesPerSector == 0 || (BPB.bytesPerSector & (BPB.bytesPerSector - 1)) != 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: invalid bytes per sector"));
+        if (BPB.sectorsPerCluster == 0 || (BPB.sectorsPerCluster & (BPB.sectorsPerCluster - 1)) != 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: invalid sectors per cluster"));
+        if (BPB.numFATs == 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: invalid FAT count"));
+        if (BPB.reservedSectors == 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: invalid reserved sector count"));
+        if (BPB.bytesPerSector != image->get_sector_size())
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: sector size mismatch"));
+
+        const unsigned total_sectors = (BPB.totalSectors16 != 0) ? BPB.totalSectors16 : BPB.totalSectors32;
+        if (total_sectors == 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: zero total sectors"));
+
+        const unsigned sectors_per_fat = BPB.sectorsPerFAT16; // FAT32 stored elsewhere; not supported yet
+        if (sectors_per_fat == 0)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT32 is not supported"));
+
+        const unsigned root_entry_bytes = static_cast<unsigned>(BPB.rootEntries) * sizeof(FAT_DIR_ENTRY);
+        root_dir_sectors = (root_entry_bytes + BPB.bytesPerSector - 1) / BPB.bytesPerSector;
+
+        fat_start      = BPB.reservedSectors;
+        root_dir_start = fat_start + static_cast<unsigned>(BPB.numFATs) * sectors_per_fat;
+        data_start     = root_dir_start + root_dir_sectors;
+
+        if (data_start >= total_sectors)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT: data region beyond disk"));
+
+        const unsigned data_sectors = total_sectors - data_start;
+        total_clusters = data_sectors / BPB.sectorsPerCluster;
+
+        // Microsoft's "Hardware White Paper" rules
+        if (total_clusters < 4085) fat_type = FATType::FAT12;
+        else if (total_clusters < 65525) fat_type = FATType::FAT16;
+        else fat_type = FATType::FAT32;
+
+        if (fat_type == FATType::FAT32)
+            return Result::error(ErrorCode::OpenBadFormat, QT_TRANSLATE_NOOP("errors", "FAT32 is not supported"));
+
+        current_path.clear();
+        current_path.push_back(0); // 0 = root for FAT12/16
+
+        volume_id = BPB.mediaDescriptor;
+        is_open = true;
+        return Result::ok();
+    }
+
+    void fsFAT::cd_up()
+    {
+        if (current_path.size() > 1)
+            current_path.pop_back();
+    }
+
+    void fsFAT::cd(const UniversalFile & dir, bool & updir)
+    {
+        if (dir.name == "..") {
+            cd_up();
+            updir = true;
+        } else {
+            if (dir.metadata.size() >= sizeof(FAT_DIR_ENTRY)) {
+                const auto * de = reinterpret_cast<const FAT_DIR_ENTRY *>(dir.metadata.data());
+                const uint32_t cluster = (static_cast<uint32_t>(de->firstClusterHi) << 16) | de->firstClusterLo;
+                current_path.push_back(cluster);
+            }
+            updir = false;
+        }
+    }
+
+    std::string fsFAT::file_info(const UniversalFile & fd) {
+        std::string result;
+        //TODO: Impelement
+        return result;
+    }
+
+    std::vector<std::string> fsFAT::get_save_file_formats()
+    {
+        return {"FILE_BINARY"};
+    }
+
+    std::vector<std::string> fsFAT::get_add_file_formats()
+    {
+        return {"FILE_BINARY"};
+    }
+
+    std::string fsFAT::information()
+    {
+        if (!is_open) return "";
+
+        std::string oem = trim(std::string(reinterpret_cast<const char *>(BPB.OEMName), 8));
+
+        const char * type_name = (fat_type == FATType::FAT12) ? "FAT12"
+                               : (fat_type == FATType::FAT16) ? "FAT16"
+                                                              : "FAT32";
+
+        const unsigned total_sectors = (BPB.totalSectors16 != 0) ? BPB.totalSectors16 : BPB.totalSectors32;
+        const unsigned cluster_bytes = static_cast<unsigned>(BPB.bytesPerSector) * BPB.sectorsPerCluster;
+
+        unsigned free_clusters = 0;
+        unsigned bad_clusters  = 0;
+        unsigned used_clusters = 0;
+        const unsigned bad_marker = (fat_type == FATType::FAT12) ? 0x0FF7u : 0xFFF7u;
+        for (unsigned c = 2; c < total_clusters + 2; c++) {
+            const unsigned v = read_fat_entry(c);
+            if (v == 0) free_clusters++;
+            else if (v == bad_marker) bad_clusters++;
+            else used_clusters++;
+        }
+
+        std::string result;
+        result += "{$FAT_FS_TYPE}: " + std::string(type_name) + "\n";
+        result += "{$FAT_OEM_NAME}: " + oem + " [" + toHexList(BPB.OEMName, 8, "$") + "]\n";
+        result += "{$FAT_MEDIA_DESCRIPTOR}: $" + int_to_hex(BPB.mediaDescriptor) + "\n";
+        result += "\n";
+
+        result += "{$FAT_BPB_GEOMETRY}:\n";
+        result += "    {$FAT_BYTES_PER_SECTOR}: " + std::to_string(BPB.bytesPerSector) + "\n";
+        result += "    {$FAT_SECTORS_PER_CLUSTER}: " + std::to_string(BPB.sectorsPerCluster) + "\n";
+        result += "    {$FAT_CLUSTER_SIZE}: " + std::to_string(cluster_bytes) + " {$BYTES}\n";
+        result += "    {$FAT_SECTORS_PER_TRACK}: " + std::to_string(BPB.sectorsPerTrack) + "\n";
+        result += "    {$FAT_NUM_HEADS}: " + std::to_string(BPB.numHeads) + "\n";
+        result += "    {$FAT_TOTAL_SECTORS}: " + std::to_string(total_sectors)
+               + " (16-bit: " + std::to_string(BPB.totalSectors16)
+               + ", 32-bit: " + std::to_string(BPB.totalSectors32) + ")\n";
+        result += "    {$FAT_HIDDEN_SECTORS}: " + std::to_string(BPB.hiddenSectors) + "\n";
+        result += "\n";
+
+        result += "{$FAT_LAYOUT}:\n";
+        result += "    {$FAT_RESERVED_SECTORS}: " + std::to_string(BPB.reservedSectors) + "\n";
+        result += "    {$FAT_NUM_FATS}: " + std::to_string(BPB.numFATs) + "\n";
+        result += "    {$FAT_SECTORS_PER_FAT}: " + std::to_string(BPB.sectorsPerFAT16) + "\n";
+        result += "    {$FAT_ROOT_ENTRIES}: " + std::to_string(BPB.rootEntries) + "\n";
+        result += "    {$FAT_ROOT_DIR_SECTORS}: " + std::to_string(root_dir_sectors) + "\n";
+        result += "\n";
+
+        result += "{$FAT_REGIONS_LBA}:\n";
+        result += "    {$FAT_FAT_START}: " + std::to_string(fat_start) + "\n";
+        result += "    {$FAT_ROOT_DIR_START}: " + std::to_string(root_dir_start) + "\n";
+        result += "    {$FAT_DATA_START}: " + std::to_string(data_start) + "\n";
+        result += "\n";
+
+        result += "{$FAT_CLUSTERS}:\n";
+        result += "    {$FAT_TOTAL_CLUSTERS}: " + std::to_string(total_clusters) + "\n";
+        result += "    {$FAT_USED_CLUSTERS}: " + std::to_string(used_clusters) + "\n";
+        result += "    {$FAT_FREE_CLUSTERS}: " + std::to_string(free_clusters) + "\n";
+        result += "    {$FAT_BAD_CLUSTERS}: " + std::to_string(bad_clusters) + "\n";
+        result += "    {$FREE_BYTES}: " + std::to_string(static_cast<uint64_t>(free_clusters) * cluster_bytes) + "\n";
+
+        return result;
+    }
+
+    bool fsFAT::is_root()
+    {
+        return current_path.size() <= 1;
+    }
+
+    Result fsFAT::get_file(const UniversalFile & uf, const std::string & format, BYTES & data) const
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+        if (uf.metadata.size() < sizeof(FAT_DIR_ENTRY))
+            return Result::error(ErrorCode::FileIncorrectFS);
+
+        data.clear();
+
+        const auto * de = reinterpret_cast<const FAT_DIR_ENTRY *>(uf.metadata.data());
+        const uint32_t first_cluster = (static_cast<uint32_t>(de->firstClusterHi) << 16) | de->firstClusterLo;
+        const uint32_t file_size = de->fileSize;
+
+        if (file_size == 0 || first_cluster == 0) return Result::ok();
+
+        const unsigned bps = BPB.bytesPerSector;
+        const unsigned spc = BPB.sectorsPerCluster;
+
+        data.reserve(file_size);
+
+        uint32_t c = first_cluster;
+        unsigned guard = 0;
+        const unsigned guard_max = (total_clusters > 0) ? total_clusters + 2 : 1u << 20;
+
+        while (!is_eoc(c)) {
+            if (c < 2) return Result::error(ErrorCode::ReadError);
+
+            const unsigned first_sec = data_start + (c - 2) * spc;
+            for (unsigned s = 0; s < spc; s++) {
+                uint8_t * p = read_lba(first_sec + s);
+                if (!p) return Result::error(ErrorCode::ReadError);
+                data.insert(data.end(), p, p + bps);
+                if (data.size() >= file_size) {
+                    data.resize(file_size);
+                    return Result::ok();
+                }
+            }
+
+            c = read_fat_entry(c);
+            if (++guard > guard_max) return Result::error(ErrorCode::ReadError);
+        }
+
+        if (data.size() > file_size) data.resize(file_size);
+        return Result::ok();
+    }
+
+    SectorTypeMap fsFAT::get_sector_type_map()
+    {
+        SectorTypeMap result;
+        if (!is_open) return result;
+
+        const unsigned spt    = image->get_sectors();
+        const unsigned heads  = image->get_heads();
+        const unsigned tracks = image->get_tracks();
+        const unsigned spc    = BPB.sectorsPerCluster;
+        if (spt == 0 || spc == 0) return result;
+
+        // Mirrors read_lba(): translates an LBA to image (head, track, sector).
+        // Returns false if the LBA falls outside the image geometry.
+        auto lba_to_hts = [&](unsigned lba, unsigned & h, unsigned & t, unsigned & s) -> bool {
+            if (heads <= 1) {
+                h = 0;
+                t = lba / spt;
+            } else {
+                h = (lba / spt) % heads;
+                t = (lba / spt) / heads;
+            }
+            s = lba % spt;
+            return t < tracks;
+        };
+
+        // Mark a single LBA. `priority_set` is the set of states a previously-stored
+        // value must NOT belong to in order for the new value to overwrite it. Pass
+        // an empty set to mean "only set if currently unmarked".
+        auto mark_lba = [&](unsigned lba, SectorType type, bool overwrite_any) {
+            unsigned h, t, s;
+            if (!lba_to_hts(lba, h, t, s)) return;
+            const std::array<unsigned, 3> key{h, t, s};
+            const auto it = result.find(key);
+            if (it == result.end() || overwrite_any) {
+                result[key] = type;
+            }
+        };
+
+        auto mark_cluster = [&](unsigned cluster, SectorType type, bool overwrite_any) {
+            if (cluster < 2) return;
+            const unsigned first_lba = data_start + (cluster - 2) * spc;
+            for (unsigned k = 0; k < spc; k++)
+                mark_lba(first_lba + k, type, overwrite_any);
+        };
+
+        // 1. Reserved area (boot sector + BPB-declared reserved sectors).
+        for (unsigned lba = 0; lba < BPB.reservedSectors; lba++)
+            mark_lba(lba, SectorType::System, false);
+
+        // 2. FAT table copies.
+        const unsigned sectors_per_fat = BPB.sectorsPerFAT16;
+        const unsigned fats_end = fat_start + static_cast<unsigned>(BPB.numFATs) * sectors_per_fat;
+        for (unsigned lba = fat_start; lba < fats_end; lba++)
+            mark_lba(lba, SectorType::System, false);
+
+        // 3. Root directory area (FAT12/16 — fixed location, fixed size).
+        for (unsigned lba = root_dir_start; lba < root_dir_start + root_dir_sectors; lba++)
+            mark_lba(lba, SectorType::Catalog, false);
+
+        // 4. Walk the FAT once: mark every claimed cluster as File. Bad-marked
+        //    clusters become Bad. Free clusters (entry == 0) stay unmarked so
+        //    they fall back to Empty.
+        const unsigned bad_marker = (fat_type == FATType::FAT12) ? 0x0FF7u : 0xFFF7u;
+        for (unsigned c = 2; c < total_clusters + 2; c++) {
+            const unsigned v = read_fat_entry(c);
+            if (v == 0) continue;
+            if (v == bad_marker) {
+                mark_cluster(c, SectorType::Bad, false);
+            } else {
+                mark_cluster(c, SectorType::File, false);
+            }
+        }
+
+        // 5. Walk every directory we can reach, starting at the root. For each
+        //    subdirectory found, override its cluster chain from File to Catalog
+        //    (subdir clusters are claimed in the FAT so they were tagged File in
+        //    step 4). Deleted entries get their first cluster tagged DeletedFile
+        //    if it's currently Empty — after a DOS-style delete the FAT chain is
+        //    typically zeroed out, so the recovered fragment is just one cluster.
+        std::vector<uint32_t> dir_queue;
+        std::set<uint32_t>    visited;
+        dir_queue.push_back(0);                              // 0 = root for FAT12/16
+        visited.insert(0);
+
+        const unsigned guard_max = (total_clusters > 0) ? total_clusters + 2 : 1u << 20;
+
+        while (!dir_queue.empty()) {
+            const uint32_t cluster = dir_queue.back();
+            dir_queue.pop_back();
+
+            BYTES buffer;
+            if (!read_directory(cluster, buffer)) continue;
+
+            const size_t entries = buffer.size() / sizeof(FAT_DIR_ENTRY);
+            for (size_t i = 0; i < entries; i++) {
+                const auto * de = reinterpret_cast<const FAT_DIR_ENTRY *>(buffer.data() + i * sizeof(FAT_DIR_ENTRY));
+                const uint8_t first = de->name[0];
+
+                if (first == 0x00) break;                     // end-of-directory marker
+                if (de->attr == FAT_ATTR_LONG_NAME) continue; // LFN sub-entry — ignore
+                if (de->attr & FAT_ATTR_VOLUME_ID) continue;  // volume label
+
+                const uint32_t first_cluster =
+                    (static_cast<uint32_t>(de->firstClusterHi) << 16) | de->firstClusterLo;
+                if (first_cluster == 0) continue;             // empty file / zero-cluster entry
+
+                const bool is_dir     = (de->attr & FAT_ATTR_DIRECTORY) != 0;
+                const bool is_deleted = (first == 0xE5);
+
+                if (is_deleted) {
+                    // Mark just the first cluster — chain is usually gone.
+                    unsigned h, t, s;
+                    const unsigned first_lba = data_start + (first_cluster - 2) * spc;
+                    for (unsigned k = 0; k < spc; k++) {
+                        if (!lba_to_hts(first_lba + k, h, t, s)) continue;
+                        const std::array<unsigned, 3> key{h, t, s};
+                        const auto it = result.find(key);
+                        if (it == result.end()) {
+                            result[key] = SectorType::DeletedFile;
+                        }
+                        // Don't override anything live (File / Catalog / System).
+                    }
+                    continue;
+                }
+
+                if (!is_dir) continue;
+
+                // Live subdirectory. Skip on-disk "." and ".." records: they
+                // point at this directory's own cluster and its parent's, which
+                // we'd otherwise re-walk or loop on.
+                if (first == '.') continue;
+                if (visited.count(first_cluster) != 0) continue;
+                visited.insert(first_cluster);
+
+                // Override the subdirectory's whole chain to Catalog
+                uint32_t c = first_cluster;
+                unsigned guard = 0;
+                while (!is_eoc(c) && c >= 2) {
+                    mark_cluster(c, SectorType::Catalog, true);
+                    c = read_fat_entry(c);
+                    if (++guard > guard_max) break;
+                }
+
+                dir_queue.push_back(first_cluster);
+            }
+        }
+
+        return result;
+    }
+
+    Result fsFAT::dir(std::vector<UniversalFile> & files, bool show_deleted)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+
+        files.clear();
+
+        const uint32_t cur_cluster = current_path.empty() ? 0 : current_path.back();
+
+        if (current_path.size() > 1) {
+            UniversalFile updir;
+            updir.name = "..";
+            updir.is_dir = true;
+            updir.is_deleted = false;
+            files.push_back(updir);
+        }
+
+        BYTES buffer;
+        auto res = read_directory(cur_cluster, buffer);
+        if (!res) return res;
+
+        // LFN accumulator: VFAT stores long names in 1..N preceding 0x0F-attr slots,
+        // highest ordinal first (with the 0x40 "last" bit set), bound to the short
+        // entry via a checksum of the 11-byte short name.
+        std::vector<std::vector<uint16_t>> lfn_parts;
+        uint8_t lfn_checksum_expected = 0;
+        bool lfn_valid = false;
+
+        const size_t entries = buffer.size() / sizeof(FAT_DIR_ENTRY);
+        for (size_t i = 0; i < entries; i++) {
+            const auto * de = reinterpret_cast<const FAT_DIR_ENTRY *>(buffer.data() + i * sizeof(FAT_DIR_ENTRY));
+
+            const uint8_t first = de->name[0];
+
+            if (first == 0x00) break;                       // no further entries past this point
+
+            // LFN sub-entry — accumulate, then continue to its companion short entry.
+            if (de->attr == FAT_ATTR_LONG_NAME) {
+                if (first == 0xE5) {
+                    // Deleted LFN sub-entry orphans the chain — drop it.
+                    lfn_parts.clear();
+                    lfn_valid = false;
+                    continue;
+                }
+                const auto * lfn = reinterpret_cast<const FAT_LFN_ENTRY *>(de);
+                const uint8_t ord = lfn->ord;
+                const uint8_t idx = static_cast<uint8_t>((ord & 0x1F) - 1);
+
+                uint16_t chars[13];
+                lfn_extract_chars(*lfn, chars);
+
+                if (ord & 0x40) {
+                    // First sub-entry we encounter is the highest-ordinal one — size to fit.
+                    lfn_parts.assign(static_cast<size_t>(idx) + 1, std::vector<uint16_t>());
+                    lfn_checksum_expected = lfn->checksum;
+                    lfn_valid = true;
+                }
+                if (!lfn_valid || idx >= lfn_parts.size() || lfn->checksum != lfn_checksum_expected) {
+                    lfn_parts.clear();
+                    lfn_valid = false;
+                    continue;
+                }
+                lfn_parts[idx].assign(chars, chars + 13);
+                continue;
+            }
+
+            if (de->attr & FAT_ATTR_VOLUME_ID) {            // volume label entry
+                lfn_parts.clear();
+                lfn_valid = false;
+                continue;
+            }
+
+            const bool is_deleted = (first == 0xE5);
+            if (is_deleted && !show_deleted) {
+                lfn_parts.clear();
+                lfn_valid = false;
+                continue;
+            }
+
+            std::string short_name;
+            if (is_deleted) {
+                // First byte of a deleted entry is overwritten with 0xE5;
+                // surface a placeholder so the rest of the 8.3 name stays readable.
+                FAT_DIR_ENTRY shown = *de;
+                shown.name[0] = '?';
+                short_name = make_file_name(shown);
+            } else {
+                short_name = make_file_name(*de);
+            }
+
+            // Use the accumulated long name if the chain is complete and the
+            // checksum matches the short name we're sitting on.
+            std::string long_name;
+            if (!is_deleted && lfn_valid && lfn_checksum(de->name) == lfn_checksum_expected) {
+                std::vector<uint16_t> all_chars;
+                bool complete = true;
+                bool terminator_seen = false;
+                for (const auto & p : lfn_parts) {
+                    if (p.empty()) { complete = false; break; }
+                    if (terminator_seen) continue;
+                    for (uint16_t c : p) {
+                        if (c == 0x0000 || c == 0xFFFF) { terminator_seen = true; break; }
+                        all_chars.push_back(c);
+                    }
+                }
+                if (complete) long_name = utf16le_to_utf8(all_chars);
+            }
+            lfn_parts.clear();
+            lfn_valid = false;
+
+            const std::string name = long_name.empty() ? short_name : long_name;
+
+            // Drop on-disk "." and ".." rows — the parent ".." is synthesized above
+            // from current_path. Relies on make_file_name preserving the dots.
+            if (!is_deleted && (name == "." || name == "..")) continue;
+
+            files.push_back(make_universal_file(*de, cur_cluster, static_cast<unsigned>(i), name));
+        }
+
+        return Result::ok();
+    }
+
+    UniversalFile fsFAT::make_universal_file(const FAT_DIR_ENTRY & de, uint32_t dir_cluster, unsigned index, const std::string & name) const
+    {
+        static const std::set<std::string> txts = {".txt", ".bat", ".ini", ".doc", ".asm", ".c", ".h", ".cpp", ".pas", ".me"};
+
+        UniversalFile f;
+        f.fs           = get_fs();
+        f.name         = name;
+        f.is_dir       = (de.attr & FAT_ATTR_DIRECTORY) != 0;
+        f.is_deleted   = (de.name[0] == 0xE5);
+        f.is_protected = (de.attr & FAT_ATTR_READ_ONLY) != 0;
+        f.attributes   = de.attr;
+        f.size         = de.fileSize;
+
+        f.type_preferred = PreferredType::Binary;
+        const std::string ext = get_file_ext(f.name);
+        if (txts.find(to_lower(ext)) != txts.end()) f.type_preferred = PreferredType::Text;
+
+        std::string label;
+        label += (de.attr & FAT_ATTR_READ_ONLY) ? "R" : "";
+        label += (de.attr & FAT_ATTR_HIDDEN)    ? "H" : "";
+        label += (de.attr & FAT_ATTR_SYSTEM)    ? "S" : "";
+        label += (de.attr & FAT_ATTR_ARCHIVE)   ? "A" : "";
+        f.type_label = label;
+
+        f.original_name.assign(de.name, de.name + 11);
+
+        // Last write: date yyyyyyym mmmddddd from 1980, time hhhhhmmm mmmsssss
+        if (de.writeDate != 0) {
+            f.date.year   = static_cast<uint16_t>(1980 + (de.writeDate >> 9));
+            f.date.month  = static_cast<uint8_t>((de.writeDate >> 5) & 0x0F);
+            f.date.day    = static_cast<uint8_t>(de.writeDate & 0x1F);
+            f.date.hour   = static_cast<int8_t>(de.writeTime >> 11);
+            f.date.minute = static_cast<int8_t>((de.writeTime >> 5) & 0x3F);
+            if (f.date.hour > 23 || f.date.minute > 59) f.date.hour = f.date.minute = -1;
+            if (!f.date.valid()) f.date = FileDate();
+        }
+
+        f.metadata.resize(sizeof(FAT_DIR_ENTRY));
+        std::memcpy(f.metadata.data(), &de, sizeof(FAT_DIR_ENTRY));
+
+        // Where the entry lives, so that the write operations can find it again
+        f.position = {dir_cluster, index};
+
+        return f;
+    }
+
+    // ---------------------------------------------------------------- Writing
+
+    unsigned fsFAT::cluster_bytes() const
+    {
+        return static_cast<unsigned>(BPB.bytesPerSector) * BPB.sectorsPerCluster;
+    }
+
+    unsigned fsFAT::eoc_value() const
+    {
+        return (fat_type == FATType::FAT12) ? 0x0FFFu : 0xFFFFu;
+    }
+
+    bool fsFAT::write_fat_entry(unsigned cluster, unsigned value)
+    {
+        const unsigned bps = BPB.bytesPerSector;
+        if (cluster >= total_clusters + 2) return false;
+
+        const unsigned byte_offset = (fat_type == FATType::FAT12) ? cluster + (cluster >> 1) : cluster * 2;
+        const unsigned sec    = byte_offset / bps;
+        const unsigned in_sec = byte_offset % bps;
+
+        // Every copy of the FAT is kept identical
+        for (unsigned k = 0; k < BPB.numFATs; k++) {
+            const unsigned base = fat_start + k * BPB.sectorsPerFAT16;
+
+            uint8_t * p0 = read_lba(base + sec);
+            if (!p0) return false;
+            uint8_t * b0 = p0 + in_sec;
+            uint8_t * b1;
+            if (in_sec + 1 < bps) {
+                b1 = p0 + in_sec + 1;
+            } else {
+                uint8_t * p1 = read_lba(base + sec + 1);
+                if (!p1) return false;
+                b1 = p1;
+            }
+
+            if (fat_type == FATType::FAT12) {
+                if (cluster & 1) {
+                    *b0 = static_cast<uint8_t>((*b0 & 0x0F) | ((value << 4) & 0xF0));
+                    *b1 = static_cast<uint8_t>((value >> 4) & 0xFF);
+                } else {
+                    *b0 = static_cast<uint8_t>(value & 0xFF);
+                    *b1 = static_cast<uint8_t>((*b1 & 0xF0) | ((value >> 8) & 0x0F));
+                }
+            } else {
+                *b0 = static_cast<uint8_t>(value & 0xFF);
+                *b1 = static_cast<uint8_t>((value >> 8) & 0xFF);
+            }
+        }
+        return true;
+    }
+
+    unsigned fsFAT::count_free_clusters() const
+    {
+        unsigned result = 0;
+        for (unsigned c = 2; c < total_clusters + 2; c++)
+            if (read_fat_entry(c) == 0) result++;
+        return result;
+    }
+
+    // Picks free clusters lowest first. They stay free in the FAT until link_chain().
+    bool fsFAT::allocate_clusters(unsigned count, std::vector<uint32_t> & out)
+    {
+        out.clear();
+        for (unsigned c = 2; c < total_clusters + 2 && out.size() < count; c++)
+            if (read_fat_entry(c) == 0) out.push_back(c);
+        return out.size() == count;
+    }
+
+    bool fsFAT::link_chain(const std::vector<uint32_t> & chain)
+    {
+        for (size_t i = 0; i < chain.size(); i++) {
+            const unsigned next = (i + 1 < chain.size()) ? chain[i + 1] : eoc_value();
+            if (!write_fat_entry(chain[i], next)) return false;
+        }
+        return true;
+    }
+
+    bool fsFAT::free_chain(uint32_t first)
+    {
+        uint32_t c = first;
+        unsigned guard = 0;
+        while (c >= 2 && c < total_clusters + 2) {
+            const unsigned next = read_fat_entry(c);
+            if (!write_fat_entry(c, 0)) return false;
+            if (is_eoc(next)) break;
+            c = next;
+            if (++guard > total_clusters + 2) return false;
+        }
+        return true;
+    }
+
+    // Writes `size` bytes of `data` into the cluster, the rest is zero filled
+    bool fsFAT::write_cluster(uint32_t cluster, const uint8_t * data, size_t size)
+    {
+        const unsigned bps = BPB.bytesPerSector;
+        const unsigned first_sec = data_start + (cluster - 2) * BPB.sectorsPerCluster;
+        size_t offset = 0;
+        for (unsigned s = 0; s < BPB.sectorsPerCluster; s++) {
+            uint8_t * p = read_lba(first_sec + s);
+            if (!p) return false;
+            const size_t to_copy = (offset < size) ? std::min<size_t>(bps, size - offset) : 0;
+            if (to_copy) std::memcpy(p, data + offset, to_copy);
+            if (to_copy < bps) std::memset(p + to_copy, 0, bps - to_copy);
+            offset += bps;
+        }
+        return true;
+    }
+
+    // Pointers to every slot of a directory, straight into the image data
+    std::vector<FAT_DIR_ENTRY *> fsFAT::dir_slots(uint32_t dir_cluster) const
+    {
+        std::vector<FAT_DIR_ENTRY *> result;
+        const unsigned bps = BPB.bytesPerSector;
+        const unsigned per_sector = bps / sizeof(FAT_DIR_ENTRY);
+
+        auto add_sector = [&](unsigned lba) -> bool {
+            uint8_t * p = read_lba(lba);
+            if (!p) return false;
+            for (unsigned j = 0; j < per_sector; j++)
+                result.push_back(reinterpret_cast<FAT_DIR_ENTRY *>(p + j * sizeof(FAT_DIR_ENTRY)));
+            return true;
+        };
+
+        if (dir_cluster == 0) {
+            for (unsigned i = 0; i < root_dir_sectors; i++)
+                if (!add_sector(root_dir_start + i)) break;
+            if (result.size() > BPB.rootEntries) result.resize(BPB.rootEntries);
+            return result;
+        }
+
+        uint32_t c = dir_cluster;
+        unsigned guard = 0;
+        while (!is_eoc(c) && c >= 2 && c < total_clusters + 2) {
+            const unsigned first_sec = data_start + (c - 2) * BPB.sectorsPerCluster;
+            for (unsigned s = 0; s < BPB.sectorsPerCluster; s++)
+                if (!add_sector(first_sec + s)) return result;
+            c = read_fat_entry(c);
+            if (++guard > total_clusters + 2) break;
+        }
+        return result;
+    }
+
+    FAT_DIR_ENTRY * fsFAT::find_live_entry(uint32_t dir_cluster, const uint8_t name[11], unsigned * index) const
+    {
+        const auto slots = dir_slots(dir_cluster);
+        for (size_t i = 0; i < slots.size(); i++) {
+            FAT_DIR_ENTRY * de = slots[i];
+            if (de->name[0] == 0x00) break;
+            if (de->name[0] == 0xE5) continue;
+            if (de->attr == FAT_ATTR_LONG_NAME || (de->attr & FAT_ATTR_VOLUME_ID)) continue;
+            if (std::memcmp(de->name, name, 11) == 0) {
+                if (index) *index = static_cast<unsigned>(i);
+                return de;
+            }
+        }
+        return nullptr;
+    }
+
+    // Finds a slot for a new entry without changing anything. If the directory is full,
+    // need_extend tells that a subdirectory has to grow by a cluster first.
+    Result fsFAT::prepare_free_slot(uint32_t dir_cluster, unsigned & index, bool & need_extend) const
+    {
+        const auto slots = dir_slots(dir_cluster);
+        for (size_t i = 0; i < slots.size(); i++) {
+            const uint8_t first = slots[i]->name[0];
+            if (first == 0x00 || first == 0xE5) {
+                index = static_cast<unsigned>(i);
+                need_extend = false;
+                return Result::ok();
+            }
+        }
+        if (dir_cluster == 0) return Result::error(ErrorCode::FileAddErrorAllocateDirEntry);
+        index = static_cast<unsigned>(slots.size());
+        need_extend = true;
+        return Result::ok();
+    }
+
+    // Takes the slot prepare_free_slot() points to, growing the directory if needed.
+    // Must be called before allocating any other clusters for the same operation.
+    Result fsFAT::take_free_slot(uint32_t dir_cluster, FAT_DIR_ENTRY *& slot, unsigned & index)
+    {
+        bool need_extend = false;
+        const auto res = prepare_free_slot(dir_cluster, index, need_extend);
+        if (!res) return res;
+
+        if (need_extend) {
+            std::vector<uint32_t> chain;
+            if (!allocate_clusters(1, chain)) return Result::error(ErrorCode::FileAddErrorSpace);
+
+            uint32_t tail = dir_cluster;
+            unsigned guard = 0;
+            for (;;) {
+                const unsigned next = read_fat_entry(tail);
+                if (is_eoc(next) || next < 2) break;
+                tail = next;
+                if (++guard > total_clusters + 2) return Result::error(ErrorCode::WriteError);
+            }
+            if (!write_cluster(chain[0], nullptr, 0)
+                || !link_chain(chain)
+                || !write_fat_entry(tail, chain[0]))
+                return Result::error(ErrorCode::WriteError);
+        }
+
+        const auto slots = dir_slots(dir_cluster);
+        if (index >= slots.size()) return Result::error(ErrorCode::FileAddErrorAllocateDirEntry);
+
+        // Taking the end-of-directory marker: whatever follows must stay unseen
+        if (slots[index]->name[0] == 0x00 && index + 1 < slots.size())
+            slots[index + 1]->name[0] = 0x00;
+
+        slot = slots[index];
+        std::memset(slot, 0, sizeof(FAT_DIR_ENTRY));
+        return Result::ok();
+    }
+
+    // Long name parts written by VFAT systems go stale once the short entry is renamed or deleted
+    void fsFAT::mark_lfn_deleted(uint32_t dir_cluster, unsigned index)
+    {
+        const auto slots = dir_slots(dir_cluster);
+        if (index >= slots.size()) return;
+        const uint8_t sum = lfn_checksum(slots[index]->name);
+        for (unsigned i = index; i-- > 0; ) {
+            auto * lfn = reinterpret_cast<FAT_LFN_ENTRY *>(slots[i]);
+            if (lfn->attr != FAT_ATTR_LONG_NAME || lfn->ord == 0xE5 || lfn->checksum != sum) break;
+            lfn->ord = 0xE5;
+        }
+    }
+
+    FAT_DIR_ENTRY * fsFAT::locate(const UniversalFile & uf) const
+    {
+        if (uf.position.size() < 2 || uf.metadata.size() < sizeof(FAT_DIR_ENTRY)) return nullptr;
+        const auto * md = reinterpret_cast<const FAT_DIR_ENTRY *>(uf.metadata.data());
+
+        const auto slots = dir_slots(uf.position[0]);
+        if (uf.position[1] >= slots.size()) return nullptr;
+        FAT_DIR_ENTRY * de = slots[uf.position[1]];
+
+        if (uf.is_deleted) {
+            if (de->name[0] != 0xE5 || std::memcmp(de->name + 1, md->name + 1, 10) != 0) return nullptr;
+        } else {
+            if (std::memcmp(de->name, md->name, 11) != 0) return nullptr;
+        }
+        if (de->firstClusterLo != md->firstClusterLo || de->attr == FAT_ATTR_LONG_NAME) return nullptr;
+        return de;
+    }
+
+    Result fsFAT::make_short_name(const std::string & name, uint8_t out[11])
+    {
+        if (name.empty() || name == "." || name == "..") return Result::error(ErrorCode::InvalidName);
+
+        std::string base, ext;
+        const auto dot = name.find_last_of('.');
+        if (dot == std::string::npos) {
+            base = name;
+        } else {
+            base = name.substr(0, dot);
+            ext  = name.substr(dot + 1);
+        }
+        if (base.empty() || base.size() > 8 || ext.size() > 3)
+            return Result::error(ErrorCode::InvalidName);
+
+        static const char * forbidden = "\"*+,./:;<=>?[\\]|";
+        for (const std::string * part : {&base, &ext})
+            for (const char ch : *part) {
+                const auto c = static_cast<unsigned char>(ch);
+                if (c < 0x21 || c > 0x7E || std::strchr(forbidden, ch) != nullptr)
+                    return Result::error(ErrorCode::InvalidName);
+            }
+
+        base = to_upper(base);
+        ext  = to_upper(ext);
+        std::memset(out, ' ', 11);
+        std::memcpy(out, base.data(), base.size());
+        std::memcpy(out + 8, ext.data(), ext.size());
+        return Result::ok();
+    }
+
+    Result fsFAT::make_short_name(const UniversalFile & uf, uint8_t out[11])
+    {
+        // A file coming from another FAT disk keeps its name byte for byte
+        if (uf.fs == FS::FAT && !uf.is_deleted && uf.original_name.size() == 11) {
+            std::memcpy(out, uf.original_name.data(), 11);
+            return Result::ok();
+        }
+        return make_short_name(get_filename(uf.name), out);
+    }
+
+    void fsFAT::fat_now(uint16_t & date, uint16_t & time)
+    {
+        const std::time_t t = std::time(nullptr);
+        const std::tm * lt = std::localtime(&t);
+        if (!lt || lt->tm_year < 80) {
+            date = (1 << 5) | 1;                 // 1980-01-01
+            time = 0;
+            return;
+        }
+        date = static_cast<uint16_t>(((lt->tm_year - 80) << 9) | ((lt->tm_mon + 1) << 5) | lt->tm_mday);
+        time = static_cast<uint16_t>((lt->tm_hour << 11) | (lt->tm_min << 5) | (lt->tm_sec / 2));
+    }
+
+    // The time stamp of a new entry: the source file's date when it has one FAT can hold
+    // (1980..2107; no time gives midnight), otherwise now
+    void fsFAT::fat_stamp(const FileDate & d, uint16_t & date, uint16_t & time)
+    {
+        if (!d.valid() || d.year < 1980 || d.year > 2107) {
+            fat_now(date, time);
+            return;
+        }
+        date = static_cast<uint16_t>(((d.year - 1980) << 9) | (d.month << 5) | d.day);
+        const bool has_time = d.hour >= 0 && d.hour <= 23 && d.minute >= 0 && d.minute <= 59;
+        time = has_time ? static_cast<uint16_t>((d.hour << 11) | (d.minute << 5)) : 0;
+    }
+
+    Result fsFAT::put_file(const UniversalFile & uf, const std::string & format, const BYTES & data, bool force_replace)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+
+        uint8_t name[11];
+        const auto name_res = make_short_name(uf, name);
+        if (!name_res) return name_res;
+
+        const uint32_t cur = current_path.empty() ? 0 : current_path.back();
+
+        unsigned index = 0;
+        FAT_DIR_ENTRY * existing = find_live_entry(cur, name, &index);
+        if (existing) {
+            if (existing->attr & FAT_ATTR_DIRECTORY) return Result::error(ErrorCode::DirAlreadyExists);
+            if (!force_replace) return Result::error(ErrorCode::FileAlreadyExists);
+        }
+
+        // ---- Check the space before changing anything
+        const unsigned cb = cluster_bytes();
+        const unsigned needed = static_cast<unsigned>((data.size() + cb - 1) / cb);
+        unsigned available = count_free_clusters();
+        bool need_extend = false;
+
+        if (existing) {
+            // The old chain will be released
+            uint32_t c = existing->firstClusterLo;
+            unsigned guard = 0;
+            while (c >= 2 && c < total_clusters + 2) {
+                available++;
+                const unsigned next = read_fat_entry(c);
+                if (is_eoc(next) || ++guard > total_clusters + 2) break;
+                c = next;
+            }
+        } else {
+            const auto res = prepare_free_slot(cur, index, need_extend);
+            if (!res) return res;
+        }
+        if (available < needed + (need_extend ? 1 : 0))
+            return Result::error(ErrorCode::FileAddErrorSpace);
+
+        // ---- Commit
+        FAT_DIR_ENTRY old{};
+        FAT_DIR_ENTRY * de = existing;
+        if (existing) {
+            old = *existing;
+            if (!free_chain(existing->firstClusterLo)) return Result::error(ErrorCode::WriteError);
+        } else {
+            const auto res = take_free_slot(cur, de, index);
+            if (!res) return res;
+        }
+
+        std::vector<uint32_t> chain;
+        if (!allocate_clusters(needed, chain)) return Result::error(ErrorCode::FileAddErrorSpace);
+        for (size_t i = 0; i < chain.size(); i++) {
+            const size_t offset = i * cb;
+            if (!write_cluster(chain[i], data.data() + offset, std::min<size_t>(cb, data.size() - offset)))
+                return Result::error(ErrorCode::WriteError);
+        }
+        if (!link_chain(chain)) return Result::error(ErrorCode::WriteError);
+
+        FAT_DIR_ENTRY e{};
+        std::memcpy(e.name, name, 11);
+        if (uf.fs == FS::FAT && uf.metadata.size() >= sizeof(FAT_DIR_ENTRY)) {
+            // Copying between FAT disks keeps attributes and time stamps
+            const auto * src = reinterpret_cast<const FAT_DIR_ENTRY *>(uf.metadata.data());
+            e.attr            = src->attr & static_cast<uint8_t>(~(FAT_ATTR_DIRECTORY | FAT_ATTR_VOLUME_ID));
+            e.createTimeTenth = src->createTimeTenth;
+            e.createTime      = src->createTime;
+            e.createDate      = src->createDate;
+            e.accessDate      = src->accessDate;
+            e.writeTime       = src->writeTime;
+            e.writeDate       = src->writeDate;
+        } else {
+            e.attr = existing ? static_cast<uint8_t>(old.attr | FAT_ATTR_ARCHIVE)
+                              : static_cast<uint8_t>(FAT_ATTR_ARCHIVE | (uf.is_protected ? FAT_ATTR_READ_ONLY : 0));
+            fat_stamp(uf.date, e.writeDate, e.writeTime);
+            if (existing) {
+                e.createTimeTenth = old.createTimeTenth;
+                e.createTime      = old.createTime;
+                e.createDate      = old.createDate;
+            } else {
+                e.createTime = e.writeTime;
+                e.createDate = e.writeDate;
+            }
+            e.accessDate = e.writeDate;
+        }
+        e.firstClusterLo = chain.empty() ? 0 : static_cast<uint16_t>(chain[0]);
+        e.fileSize       = static_cast<uint32_t>(data.size());
+        *de = e;
+
+        is_changed = true;
+        stats_valid = false;
+        return Result::ok();
+    }
+
+    Result fsFAT::delete_file(const UniversalFile & uf)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+        if (uf.is_deleted) return Result::error(ErrorCode::FileDeleteError);
+
+        FAT_DIR_ENTRY * de = locate(uf);
+        if (!de) return Result::error(ErrorCode::FileDeleteError);
+
+        const uint32_t first = de->firstClusterLo;
+
+        if ((de->attr & FAT_ATTR_DIRECTORY) && first >= 2) {
+            for (const FAT_DIR_ENTRY * child : dir_slots(first)) {
+                if (child->name[0] == 0x00) break;
+                if (child->name[0] == 0xE5 || child->name[0] == '.') continue;
+                if (child->attr == FAT_ATTR_LONG_NAME || (child->attr & FAT_ATTR_VOLUME_ID)) continue;
+                return Result::error(ErrorCode::DirNotEmpty);
+            }
+        }
+
+        mark_lfn_deleted(uf.position[0], uf.position[1]);
+        if (first >= 2 && !free_chain(first)) return Result::error(ErrorCode::FileDeleteError);
+        // The cluster number stays in the entry so that the file can be restored
+        de->name[0] = 0xE5;
+
+        is_changed = true;
+        stats_valid = false;
+        return Result::ok();
+    }
+
+    Result fsFAT::restore_file(const UniversalFile & uf)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+        if (!uf.is_deleted) return Result::ok();
+
+        FAT_DIR_ENTRY * de = locate(uf);
+        if (!de) return Result::error(ErrorCode::FileRestoreError);
+
+        // The first character is lost on deletion; take the first one that doesn't clash
+        static const char candidates[] = "_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        uint8_t name[11];
+        std::memcpy(name, de->name, 11);
+        bool name_found = false;
+        for (const char * p = candidates; *p; p++) {
+            name[0] = static_cast<uint8_t>(*p);
+            if (!find_live_entry(uf.position[0], name)) { name_found = true; break; }
+        }
+        if (!name_found) return Result::error(ErrorCode::FileRestoreError, QT_TRANSLATE_NOOP("errors", "Cannot find a free name"));
+
+        // The chain is gone, assume the file was contiguous. A directory's size is unknown,
+        // so only its first cluster comes back.
+        const uint32_t first = de->firstClusterLo;
+        const unsigned cb = cluster_bytes();
+        const unsigned needed = (de->attr & FAT_ATTR_DIRECTORY) ? 1u : static_cast<unsigned>((de->fileSize + cb - 1) / cb);
+
+        std::vector<uint32_t> chain;
+        if (first >= 2 && needed > 0) {
+            for (unsigned i = 0; i < needed; i++) {
+                const uint32_t c = first + i;
+                if (c >= total_clusters + 2 || read_fat_entry(c) != 0)
+                    return Result::error(ErrorCode::FileRestoreError, QT_TRANSLATE_NOOP("errors", "Sector is not free"));
+                chain.push_back(c);
+            }
+            if (!link_chain(chain)) return Result::error(ErrorCode::FileRestoreError);
+        }
+        de->name[0] = name[0];
+
+        is_changed = true;
+        stats_valid = false;
+        return Result::ok();
+    }
+
+    Result fsFAT::rename_file(const UniversalFile & fd, const std::string & new_name)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+        if (fd.is_deleted) return Result::error(ErrorCode::FileRenameError);
+
+        uint8_t name[11];
+        const auto name_res = make_short_name(new_name, name);
+        if (!name_res) return name_res;
+
+        FAT_DIR_ENTRY * de = locate(fd);
+        if (!de) return Result::error(ErrorCode::FileRenameError);
+        if (std::memcmp(de->name, name, 11) == 0) return Result::ok();
+
+        const FAT_DIR_ENTRY * other = find_live_entry(fd.position[0], name);
+        if (other && other != de) return Result::error(ErrorCode::FileAlreadyExists);
+
+        mark_lfn_deleted(fd.position[0], fd.position[1]);
+        std::memcpy(de->name, name, 11);
+
+        is_changed = true;
+        return Result::ok();
+    }
+
+    Result fsFAT::mkdir(const std::string & dir_name, UniversalFile & new_dir)
+    {
+        UniversalFile uf;
+        uf.fs = FS::None;
+        uf.name = dir_name;
+        uf.is_deleted = false;
+        return mkdir(uf, new_dir);
+    }
+
+    Result fsFAT::mkdir(const UniversalFile & uf, UniversalFile & new_dir)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+
+        uint8_t name[11];
+        const auto name_res = make_short_name(uf, name);
+        if (!name_res) return name_res;
+
+        const uint32_t cur = current_path.empty() ? 0 : current_path.back();
+        if (find_live_entry(cur, name)) return Result::error(ErrorCode::DirAlreadyExists);
+
+        unsigned index = 0;
+        bool need_extend = false;
+        if (!prepare_free_slot(cur, index, need_extend)) return Result::error(ErrorCode::DirErrorAllocateDirEntry);
+        if (count_free_clusters() < 1u + (need_extend ? 1u : 0u)) return Result::error(ErrorCode::DirErrorSpace);
+
+        FAT_DIR_ENTRY * de = nullptr;
+        const auto slot_res = take_free_slot(cur, de, index);
+        if (!slot_res) return Result::error(ErrorCode::DirErrorAllocateDirEntry);
+
+        std::vector<uint32_t> chain;
+        if (!allocate_clusters(1, chain)) return Result::error(ErrorCode::DirErrorAllocateSector);
+        if (!write_cluster(chain[0], nullptr, 0) || !link_chain(chain)) return Result::error(ErrorCode::DirError);
+
+        FAT_DIR_ENTRY e{};
+        std::memcpy(e.name, name, 11);
+        e.attr = FAT_ATTR_DIRECTORY;
+        if (uf.fs == FS::FAT && uf.metadata.size() >= sizeof(FAT_DIR_ENTRY)) {
+            const auto * src = reinterpret_cast<const FAT_DIR_ENTRY *>(uf.metadata.data());
+            e.attr      |= src->attr & (FAT_ATTR_READ_ONLY | FAT_ATTR_HIDDEN | FAT_ATTR_SYSTEM | FAT_ATTR_ARCHIVE);
+            e.createTime = src->createTime;
+            e.createDate = src->createDate;
+            e.writeTime  = src->writeTime;
+            e.writeDate  = src->writeDate;
+        } else {
+            fat_stamp(uf.date, e.writeDate, e.writeTime);
+            e.createTime = e.writeTime;
+            e.createDate = e.writeDate;
+        }
+        e.accessDate     = e.writeDate;
+        e.firstClusterLo = static_cast<uint16_t>(chain[0]);
+        *de = e;
+
+        // "." and ".." of the new directory; ".." of a root child points to cluster 0
+        const auto slots = dir_slots(chain[0]);
+        if (slots.size() < 2) return Result::error(ErrorCode::DirError);
+        FAT_DIR_ENTRY dot = e;
+        dot.attr = FAT_ATTR_DIRECTORY;
+        std::memset(dot.name, ' ', 11);
+        dot.name[0] = '.';
+        *slots[0] = dot;
+        dot.name[1] = '.';
+        dot.firstClusterLo = static_cast<uint16_t>(cur);
+        *slots[1] = dot;
+
+        new_dir = make_universal_file(*de, cur, index, make_file_name(*de));
+
+        is_changed = true;
+        stats_valid = false;
+        return Result::ok();
+    }
+
+    std::vector<ParameterDescription> fsFAT::file_get_metadata(const UniversalFile & fd)
+    {
+        std::vector<ParameterDescription> params;
+        params.push_back({"filename",  "{$META_FILENAME}",    ParamType::String,   fd.name});
+        params.push_back({"protected", "{$META_PROTECTED}",   ParamType::Checkbox, (fd.attributes & FAT_ATTR_READ_ONLY) ? "true" : "false"});
+        params.push_back({"hidden",    "{$META_HIDDEN}",      ParamType::Checkbox, (fd.attributes & FAT_ATTR_HIDDEN)    ? "true" : "false"});
+        params.push_back({"system",    "{$META_CPM_SYSTEM}",  ParamType::Checkbox, (fd.attributes & FAT_ATTR_SYSTEM)    ? "true" : "false"});
+        params.push_back({"archive",   "{$META_CPM_ARCHIVE}", ParamType::Checkbox, (fd.attributes & FAT_ATTR_ARCHIVE)   ? "true" : "false"});
+        return params;
+    }
+
+    Result fsFAT::file_set_metadata(const UniversalFile & fd, const std::map<std::string, std::string> & metadata)
+    {
+        if (!is_open) return Result::error(ErrorCode::OpenNotLoaded);
+        if (fd.is_deleted) return Result::error(ErrorCode::FileMetadataError);
+
+        FAT_DIR_ENTRY * de = locate(fd);
+        if (!de) return Result::error(ErrorCode::FileMetadataError);
+
+        uint8_t attr = de->attr;
+        std::string new_name;
+        for (const auto & p : metadata) {
+            uint8_t bit = 0;
+            if (p.first == "filename") {
+                if (p.second != fd.name) new_name = p.second;
+                continue;
+            }
+            if (p.first == "protected") bit = FAT_ATTR_READ_ONLY;
+            else if (p.first == "hidden")  bit = FAT_ATTR_HIDDEN;
+            else if (p.first == "system")  bit = FAT_ATTR_SYSTEM;
+            else if (p.first == "archive") bit = FAT_ATTR_ARCHIVE;
+            else continue;
+            attr = (p.second == "true") ? static_cast<uint8_t>(attr | bit) : static_cast<uint8_t>(attr & ~bit);
+        }
+
+        if (attr != de->attr) {
+            de->attr = attr;
+            is_changed = true;
+        }
+
+        if (!new_name.empty()) {
+            const auto res = rename_file(fd, new_name);
+            if (!res) return res;
+        }
+        return Result::ok();
+    }
+
+    void fsFAT::update_stats()
+    {
+        m_stats.int_values.clear();
+        m_stats.int_values["image_size"] = image->get_heads() * image->get_tracks()
+                                         * image->get_sectors() * image->get_sector_size();
+
+        unsigned free_clusters = 0, used_clusters = 0;
+        if (is_open) {
+            const unsigned bad_marker = (fat_type == FATType::FAT12) ? 0x0FF7u : 0xFFF7u;
+            for (unsigned c = 2; c < total_clusters + 2; c++) {
+                const unsigned v = read_fat_entry(c);
+                if (v == 0) free_clusters++;
+                else if (v != bad_marker) used_clusters++;
+            }
+        }
+        const unsigned cb = is_open ? cluster_bytes() : 0;
+        m_stats.int_values["total_space"]    = total_clusters * cb;
+        m_stats.int_values["occupied_space"] = used_clusters * cb;
+        m_stats.int_values["free_space"]     = free_clusters * cb;
+        stats_valid = true;
+    }
+
+}

@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: FDD device, header
+
+#pragma once
+
+#include <chrono>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "emulator/core.h"
+#include "libs/mfm_formats.h"
+#include "libs/mfm_tools.h"
+
+namespace dsk_tools { struct HfeImage; }
+
+#define FDD_STREAM_PLAIN    0
+#define FDD_STREAM_MFM      1
+#define FDD_STREAM_HEADERS  2
+
+#define FDD_MODE_SECTORS        0
+#define FDD_MODE_WHOLE_TRACK    1
+
+// SeekSector() failures: no disk in the drive, or an address that does not
+// exist on the one loaded (a real controller answers the second one with RNF)
+#define FDD_SEEK_NO_DISK        (-1)
+#define FDD_SEEK_NO_SECTOR      (-2)
+
+class FDD : public ComputerDevice
+{
+private:
+    uint8_t * buffer;
+    int sides;
+    int tracks;
+    int sectors;
+    int sector_size;
+    int disk_size;
+
+    // MFM tracks info
+    HXC_MFM_TRACK_INFO track_indexes[200];
+    int physical_track_len;
+
+    unsigned int selector;
+
+    Interface i_select;
+    Interface i_side;
+    Interface i_density;
+    Interface i_motor_on;
+
+    bool write_protect;
+    bool loaded;
+    unsigned int m_generation = 0;      // bumped on every load/unload so controllers can drop cached tracks
+    bool m_modified = false;            // the disk differs from what was loaded or last taken for saving
+    bool motor_on = false;
+    bool m_motor_was_on = false;
+    std::chrono::steady_clock::time_point led_start;
+    bool led_active = false;
+
+
+    int side;
+    int track;
+    int sector;
+    int position;
+
+    int fdd_mode;
+    int track_mode;
+    bool sides_layout;          // order of the loaded image: true - all tracks of side 0, then all tracks of side 1
+    bool default_sides_layout;  // order for files whose extension is not listed in layout_by_ext
+    std::vector<std::pair<std::string, bool> > layout_by_ext;   // ".ext" (lower case) -> sides order
+
+    AgatAIMCodes aim_codes;
+
+    // Deleted data marks of a sector image, a byte per sector in the order of
+    // the image. Empty: the disk has none, which is every .dsk
+    std::vector<uint8_t> m_deleted;
+    int sector_index(int track, int side, int sector);
+    void mark_sector(int index, bool value);
+    emulator::Result sectors_from_hfe(const dsk_tools::HfeImage &img, const std::string &file_name);
+    emulator::Result sectors_to_hfe(const std::string &file_name);
+
+    // A WOZ image: the disk as the bits under the head, with a track for
+    // every quarter-track position the head can stand on (the map). The
+    // tracks are a byte per bit; buffer keeps them as nibbles as well, for
+    // the controllers that read bytes
+    bool m_woz = false;
+    uint8_t m_woz_map[160];
+    unsigned m_woz_timing = 32;         // the bit cell, 1/8 us: kept for the file, read at 4 us
+    std::vector<std::vector<uint8_t> > m_woz_tracks;
+    bool parse_woz(const std::vector<uint8_t> &file);
+    void serialize_woz(std::vector<uint8_t> &out);
+    void woz_bytes();
+
+    void store_byte(unsigned int offset, uint8_t value)
+    {
+        if (buffer[offset] == value) return;
+        buffer[offset] = value;
+        m_modified = true;
+    }
+    unsigned int translate_address();
+    bool sector_in_range();
+    unsigned int image_track(int track, int side, bool sides_order);
+    bool layout_for_file(const std::string &file_name);
+    static bool parse_layout_word(const std::string &word, bool &sides_out);
+    void ConvertStreamFormat();
+    void clear_aim_desync();
+
+public:
+    std::string files;
+    std::string files_save;
+    std::string file_name;
+    std::string image_path;     //file_name with its directory, empty when not known (a snapshot)
+    unsigned int stream_format;
+
+    FDD(InterfaceManager *im, EmulatorConfigDevice *cd);
+    ~FDD();
+
+    bool is_selected();
+    bool is_protected();
+    bool is_index();
+    bool is_track_00();
+    bool is_led_on();
+    int get_sector_size();
+    int get_sides();
+    int get_tracks();
+    int get_sectors();
+    int get_loaded();
+    unsigned int get_generation();
+    // Rewriting a sector with the same bytes does not count
+    bool is_modified() const { return m_modified; }
+    bool take_modified() { const bool was = m_modified; m_modified = false; return was; }
+    int get_position();
+    void set_position(int value);
+    int SeekSector(int track, int sector);
+    // Сторона, выбранная последним SeekSector() (0 у односторонних)
+    int get_side() const { return side; }
+    // The data mark ($F8 instead of $FB) of the sector of the last SeekSector()
+    bool is_sector_deleted();
+    void set_sector_deleted(bool value);
+    unsigned int deleted_count() const;
+    // Дорожки целиком (режим дорожек: MX, IBM FM/MFM - контроллеры MX, DX, БК)
+    bool whole_track() const;
+    bool read_track(int track, int side, std::vector<uint8_t> &out);
+    bool write_track(int track, int side, const std::vector<uint8_t> &data);
+    void rebuild_dvk_mx();
+    void read_track_marks(int track, int side, std::vector<int> &positions);
+    void write_track_marks(int track, int side, const std::vector<int> &positions);
+    void rebuild_ibm_mfm(const uint16_t * deleted);
+    void rebuild_ibm_fm();
+    emulator::Result load_hfe(const std::string &file_name);
+    emulator::Result save_hfe(const std::string &file_name);
+    emulator::Result load_woz(const std::string &file_name);
+    emulator::Result load_d13(const std::string &file_name);
+    emulator::Result save_d13(const std::string &file_name);
+    emulator::Result save_woz(const std::string &file_name);
+    // The bits of a WOZ disk: which track the head finds at a quarter-track
+    // position (-1: none, the surface is blank), its bits, and what was
+    // written there, given back as a whole track (a blank position gets a
+    // new track; the index of it is returned)
+    bool is_woz() const { return m_woz && loaded; }
+    static void nibbles_to_bits(const std::vector<uint8_t> &bytes, std::vector<uint8_t> &bits);
+    int woz_track(int quarter) const;
+    bool read_bits(int index, std::vector<uint8_t> &bits) const;
+    int write_bits(int quarter, int index, const std::vector<uint8_t> &bits);
+    void NextPosition();
+    uint8_t  ReadNextByte();
+    void WriteNextByte(uint8_t value);
+    void WriteByte(uint8_t value);
+    emulator::Result load_config(SystemData *sd) override;
+    emulator::Result load_image(const std::string &file_name);
+    emulator::Result save_image(const std::string &file_name);
+    void unload();
+    void change_protection();
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+    int aim_code();
+    void mark_aim_desync();
+
+    ConfigFields get_config_fields() override;
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    std::vector<DeviceCommandInfo> get_device_commands() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+    //The image is the drive's own business: a snapshot writes what is in it
+    //now, the machine's writes included, and the configuration must not send
+    //the drive back to a file that never had them
+    bool state_owns_file(const std::string &parameter) const override
+        { return parameter == "image"; }
+    emulator::Result send_command(const std::string &command, const std::string &parameters) override;
+};
+
+ComputerDevice * create_FDD(InterfaceManager *im, EmulatorConfigDevice *cd);

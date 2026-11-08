@@ -1,0 +1,1435 @@
+#pragma once
+// The video mode table.  Included by src/drivers/graphics/graphics.c (the firmware's
+// one definition) and by tools/vga_timing_test.c, which checks the VGA half of
+// every entry — so the numbers below are the ones the test reads, not a copy.
+//
+// See video_modes.h for the struct, the clock constants and the rule the VGA
+// pixel clocks follow.
+#include "video_modes.h"
+
+// The 27/54 MHz entries are only ever used at sys_clk 540; graphics_set_sys_clk_mhz()
+// re-derives the divider at boot anyway.
+#define PIO_DIV_540 ((float)CPU_MHZ / (float)TMDS_540_MHZ < 1.0f ? 1.0f : (float)CPU_MHZ / (float)TMDS_540_MHZ)
+#define PIO_DIV_630 ((float)CPU_MHZ / (float)TMDS_630_MHZ < 1.0f ? 1.0f : (float)CPU_MHZ / (float)TMDS_630_MHZ)
+
+#ifndef VGA_HSTX
+#define VGA_HSTX 0
+#endif
+
+// The 720-wide HDMI modes ([4]-[7] and their 75/90 Hz twins [13]-[16]): 720 active
+// px in an 832-px line, i.e. 112 px of horizontal blanking — fp 12 / hsync 64 /
+// bp 36 px (the HSTX test card's SP7) — at the same 25.2 MHz (37.8 MHz fast) pixel
+// clock. Framebuffer bytes (2 px each) below.
+//
+// They used to be 800-px lines (80 px blanking: fp 16 / hsync 32 / bp 32), and an
+// HDMI->VGA converter in front of a CRT took the picture but NO AUDIO in any 720
+// mode on any back-end (PIO, HSTX RAW, HSTX TMDS) while 640x480 played. Moving the
+// island and hsync around inside those 80 px (five layouts) changed nothing; a
+// test card on the same converter bisected it (hw 2026-09-24/25): our 576-line
+// vertical at 27 MHz plays, our 25.2 MHz with an 864 line plays, and 816 / 832 /
+// 848 lines at 25.2 MHz all play — only the 800 line is silent.
+// 816 came first and broke the PIO back-end on PCp2 + Xiaomi TV (sound only after
+// an HDMI replug) at the line counts that give 48.8 Hz (632/633), while other
+// counts played in no monotonic pattern (636 yes, 639 no, 642 yes). 832 x 620 and
+// 824 x 626, both 48.85 Hz, play there (hw 2026-09-25); 832 is the test card's own
+// geometry. The island (44 px) sits wholly inside the 64 px hsync.
+#define HDMI720_HS   32
+#define HDMI720_BP   18
+#define HDMI720_FP   6
+#define HDMI720_LINE 416
+_Static_assert(360 + HDMI720_HS + HDMI720_BP + HDMI720_FP == HDMI720_LINE, "720 line layout");
+
+// const: in FLASH. Was 4.4 KB of .data — the VGA ISR read it per line, so it had
+// to be RAM. The two fields that change at run time live in RAM arrays in
+// graphics.c (s_div / s_vtot), and the ISR reads a RAM copy of the ACTIVE entry
+// (graphics_live_video_mode). 2026-10-10.
+static const struct video_mode_t video_mode[] = {
+    { // [0] 640x480 60Hz
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 25175000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+        // VGA: 25.2 MHz exactly (= 126/5), which is what vga.c's truncated CLKDIV
+        // already produced from the 25.175 nominal at 252/378/504.  Spelled out so
+        // the HSTX backend has an exact number rather than a rounding coincidence.
+        .vga_pixel_clk = 25200000
+    },
+    { // [1] 640x480 50Hz Pentagon 48.82Hz
+        .v_total = 644,
+        .v_active = 480,
+        .freq = 50,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 21 MHz = 126/6, exact at 252/378/504 (div 12/18/24).  h_total 840
+        // keeps the 25.0 kHz line rate of the 19.96 MHz mode it replaces, so
+        // v_total and the vertical geometry stay put; the extra 40 px go to the
+        // porches and the active area is 76.2% of the line instead of 80%.
+        .vga_v_total = 512,           // 25000 / 512 = 48.828 Hz (Pentagon 48.828, exact)
+        .vga_pixel_clk = 21000000,
+        .vga_h_bp_bytes = 34,
+        .vga_h_fp_bytes = 18
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 511,
+        .vga_pixel_clk = 19894737
+#endif
+    },
+    { // [2] 640x480 50Hz 48K 50.08Hz
+        .v_total = 628,
+        .v_active = 480,
+        .freq = 50,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 21 MHz = 126/6, exact at 252/378/504 (div 12/18/24).  h_total 840
+        // keeps the 25.0 kHz line rate of the 19.96 MHz mode it replaces, so
+        // v_total and the vertical geometry stay put; the extra 40 px go to the
+        // porches and the active area is 76.2% of the line instead of 80%.
+        .vga_v_total = 499,           // 25000 / 499 = 50.100 Hz (48K 50.080)
+        .vga_pixel_clk = 21000000,
+        .vga_h_bp_bytes = 34,
+        .vga_h_fp_bytes = 18
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 499,
+        .vga_pixel_clk = 19894737
+#endif
+    },
+    { // [3] 640x480 50Hz 128K 50.02Hz
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 50,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 21 MHz = 126/6, exact at 252/378/504 (div 12/18/24).  h_total 840
+        // keeps the 25.0 kHz line rate of the 19.96 MHz mode it replaces, so
+        // v_total and the vertical geometry stay put; the extra 40 px go to the
+        // porches and the active area is 76.2% of the line instead of 80%.
+        .vga_v_total = 500,           // 25000 / 500 = 50.000 Hz (128K 50.021)
+        .vga_pixel_clk = 21000000,
+        .vga_h_bp_bytes = 34,
+        .vga_h_fp_bytes = 18
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 498,
+        .vga_pixel_clk = 19894737
+#endif
+    },
+    { // [4] 720x576 50Hz Pentagon full border — 25.2MHz pixel (sys_clk=378MHz, div=1.5)
+        .v_total = 619,   // 25.2MHz/832/620 = 48.85Hz (Pentagon 48.83Hz)
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 25175000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 25.2 MHz = 126/5, exact at 252/378/504 (div 10/15/20).  h_total 824
+        // (hs 48 + bp 40 + active 720 + fp 16, the front porch inherited from
+        // h_fp_bytes) holds the 30.6 kHz line rate of the 27 MHz mode it replaces
+        // within 0.3%, so v_total barely moves and the active area grows from
+        // 81.8% of the line to 87.4%.
+        .vga_v_total = 626,           // 30582.5 / 626 = 48.854 Hz (Pentagon 48.828)
+        .vga_pixel_clk = 25200000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 20,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 628,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#endif
+    },
+    { // [5] 720x576 50Hz 48K full border — 25.2MHz pixel
+        .v_total = 604,   // 25.2MHz/832/605 = 50.06Hz (48K 50.08Hz)
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 25175000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 25.2 MHz = 126/5, exact at 252/378/504 (div 10/15/20).  h_total 824
+        // (hs 48 + bp 40 + active 720 + fp 16, the front porch inherited from
+        // h_fp_bytes) holds the 30.6 kHz line rate of the 27 MHz mode it replaces
+        // within 0.3%, so v_total barely moves and the active area grows from
+        // 81.8% of the line to 87.4%.
+        .vga_v_total = 611,           // 30582.5 / 611 = 50.053 Hz (48K 50.080)
+        .vga_pixel_clk = 25200000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 20,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 614,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#endif
+    },
+    { // [6] 720x576 50Hz 128K full border — 25.2MHz pixel
+        .v_total = 604,   // 25.2MHz/832/605 = 50.06Hz (128K 50.02Hz)
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 25175000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 25.2 MHz = 126/5, exact at 252/378/504 (div 10/15/20).  h_total 824
+        // (hs 48 + bp 40 + active 720 + fp 16, the front porch inherited from
+        // h_fp_bytes) holds the 30.6 kHz line rate of the 27 MHz mode it replaces
+        // within 0.3%, so v_total barely moves and the active area grows from
+        // 81.8% of the line to 87.4%.
+        .vga_v_total = 611,           // 30582.5 / 611 = 50.053 Hz (128K 50.021)
+        .vga_pixel_clk = 25200000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 20,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 612,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#endif
+    },
+    { // [7] 720x480 60Hz half border
+        .v_total = 504,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 25175000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+#if VGA_HSTX
+        // VGA: 25.2 MHz = 126/5, exact at 252/378/504 (div 10/15/20).  h_total 824
+        // (hs 48 + bp 40 + active 720 + fp 16, the front porch inherited from
+        // h_fp_bytes) holds the 30.6 kHz line rate of the 27 MHz mode it replaces
+        // within 0.3%, so v_total barely moves and the active area grows from
+        // 81.8% of the line to 87.4%.
+        .vga_v_total = 510,           // 30582.5 / 510 = 59.966 Hz (was 58.890 — the old comment's h_total 864 was really 880)
+        .vga_pixel_clk = 25200000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 20,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#else
+        // Preserve the v1.0.6 PIO geometry for analogue monitors.
+        .vga_v_total = 521,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 24,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 8,   // pinned: was inherited from h_fp_bytes (the HDMI 720 line moved it)
+        .vga_screen_width = 360
+#endif
+    },
+    { // [8] 720x576 60Hz full border — 25.2MHz pixel (non-standard: v_active>v_total)
+        .v_total = 524,   // 25.2MHz/800/524 ≈ 60.1Hz; v_active=576>524 so all lines are active
+        .v_active = 576,
+        .freq = 60,
+        .pixel_clk = 25175000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 16,
+        .h_bp_bytes = 16,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV,
+        // VGA: 25.2 MHz exactly, as [0].  Everything else is left alone —
+        // v_active 576 > v_total 524 means every line is active and the vsync
+        // window at 581..586 is never reached, which is what this mode has
+        // always done on VGA.
+        .vga_pixel_clk = 25200000
+    },
+
+    // ---------------------------------------------------------------------
+    // 37.8 MHz pixel clock (sys_clk 378 MHz, PIO divider 1.0 — no fractional
+    // divider at all).  Byte-for-byte the tables above: same h_total (800 px),
+    // same v_total, so the line rate is 47.25 kHz and every refresh is exactly
+    // x1.5.  Each sits at its standard twin's index + VMODE_FAST_OFFSET, which
+    // is what graphics_fast_mode() resolves for VIDEO::Reset().
+    //
+    // NOTE the refresh is the DISPLAY's, not the machine's: with V-Sync on the
+    // emulated frame rate follows it, so these modes force V-Sync off (see
+    // resolveConstraints in UiStage.cpp).
+    // ---------------------------------------------------------------------
+    { // [9] 640x480 90Hz — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/524 = 90.17Hz (x1.5 of mode [0])
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 90,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [10] 640x480 75Hz Pentagon — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/644 = 73.37Hz (x1.5 of mode [1], Pentagon 48.83 x 1.5)
+        .v_total = 644,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [11] 640x480 75Hz 48K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/628 = 75.24Hz (x1.5 of mode [2])
+        .v_total = 628,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [12] 640x480 75Hz 128K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/800/629 = 75.12Hz (x1.5 of mode [3])
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 400,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [13] 720x576 75Hz Pentagon — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/832/620 = 73.28Hz (x1.5 of mode [4])
+        .v_total = 619,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [14] 720x576 75Hz 48K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/832/605 = 75.10Hz (x1.5 of mode [5])
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [15] 720x576 75Hz 128K — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/832/605 = 75.10Hz (x1.5 of mode [6])
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 75,
+        .pixel_clk = 37800000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+    { // [16] 720x480 90Hz — 37.8MHz pixel (sys_clk=378MHz, div=1.0)
+        // 37.8MHz/832/505 = 89.97Hz (x1.5 of mode [7]), half border
+        .v_total = 504,
+        .v_active = 480,
+        .freq = 90,
+        .pixel_clk = 37800000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = HDMI720_HS,
+        .h_bp_bytes = HDMI720_BP,
+        .h_fp_bytes = HDMI720_FP,
+        .line_bytes = HDMI720_LINE,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_FAST,
+        .tmds_mhz = TMDS_FAST_MHZ
+    },
+
+    // ---------------------------------------------------------------------
+    // sys_clk 540 MHz (needs 1.80 V on the boards tried). 25.2 MHz would be a 2.143
+    // divider there, so every standard mode has a 27 MHz twin (540 / 270 = 2.0):
+    // same active area, a wider line (856 / 864 px) and the line count chosen so
+    // the refresh matches its twin. Indices = twin + VMODE_540_OFFSET; VIDEO::Reset
+    // switches to them when the CPU runs at 540. The 90/75 Hz set has no twin
+    // (540 / 378 = 1.43) and is hidden at 540.
+    // ---------------------------------------------------------------------
+    { // [17] 640x480 60Hz @540 — 27MHz/856/525 = 60.08Hz
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 27000000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 48,
+        .h_fp_bytes = 12,
+        .line_bytes = 428,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 856 px
+        ,
+        .vga_v_total = 526,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 50,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 320
+#endif
+    },
+    { // [18] 640x480 50Hz Pentagon @540 — 27MHz/856/646 = 48.83Hz
+        .v_total = 645,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 48,
+        .h_fp_bytes = 12,
+        .line_bytes = 428,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 512,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
+    },
+    { // [19] 640x480 50Hz 48K @540 — 27MHz/856/630 = 50.07Hz
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 48,
+        .h_fp_bytes = 12,
+        .line_bytes = 428,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 499,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
+    },
+    { // [20] 640x480 50Hz 128K @540 — 27MHz/856/631 = 49.99Hz
+        .v_total = 630,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 48,
+        .h_fp_bytes = 12,
+        .line_bytes = 428,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 500,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
+    },
+    { // [21] 720x576 50Hz Pentagon @540 — 27MHz/864/640 = 48.83Hz
+        .v_total = 639,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 34,
+        .h_fp_bytes = 6,
+        .line_bytes = 432,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 628,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
+    },
+    { // [22] 720x576 50Hz 48K @540 — 27MHz/864/624 = 50.08Hz
+        .v_total = 623,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 34,
+        .h_fp_bytes = 6,
+        .line_bytes = 432,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
+    },
+    { // [23] 720x576 50Hz 128K @540 — CEA 576p50, VIC 17: 27MHz/864/625 = 50.00Hz
+        .v_total = 624,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 27000000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 34,
+        .h_fp_bytes = 6,
+        .line_bytes = 432,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
+    },
+    { // [24] 720x480 60Hz @540 — 27MHz/864/521 = 59.98Hz
+        .v_total = 520,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 27000000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 34,
+        .h_fp_bytes = 6,
+        .line_bytes = 432,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 511,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
+    },
+    { // [25] 720x576 60Hz (v_active > v_total, as [8]) @540 — 27MHz/864/525
+        .v_total = 524,
+        .v_active = 576,
+        .freq = 60,
+        .pixel_clk = 27000000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 34,
+        .h_fp_bytes = 6,
+        .line_bytes = 432,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_540_MHZ
+    },
+    { // [26] 1024x768 59Hz x4 @540 only — 54MHz/1152/794 = 59.04Hz, centre 256x192 of the 320x240 fb
+        .v_total = 793,
+        .v_active = 768,
+        .freq = 59,
+        .pixel_clk = 54000000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 576,
+        .v_offset = 24,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_XGA_MHZ,
+        .x4_offset = 32
+    },
+    { // [27] 1024x768 59Hz x3 @540 only — same timing as [26]; the whole 320x240 fb as 960x720, centred
+        .v_total = 793,
+        .v_active = 768,
+        .freq = 59,
+        .pixel_clk = 54000000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 24,
+        .h_fp_bytes = 8,
+        .line_bytes = 576,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = TMDS_XGA_MHZ,
+        .x3 = 1
+    },
+
+    // ---------------------------------------------------------------------
+    // The big modes at ~50 Hz per machine: ONE entry per (pixel clock, scale). The
+    // per-machine line count is not in the table — graphics_big_mode_fit() writes
+    // v_total from the machine's frame rate when the mode is picked (the entries are
+    // RAM, and the HDMI ISR takes a v_total change live). [28]..[31] are shared;
+    // then the PIO set or the HSTX (TMDS expander) set. The x3 line layouts of the
+    // PIO path are in hdmi.c (hdmi_x3_layouts[x3 - 1]); HSTX only reads the scale.
+    // ---------------------------------------------------------------------
+    { // [28] 1024x768 x4 @504 (HSTX also @252) — 50.4MHz/1280 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 805,
+        .v_active = 768,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 72,
+        .h_fp_bytes = 8,
+        .line_bytes = 640,
+        .v_offset = 24,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x4_offset = 32,
+        // VGA (PIO): VESA 1024x768@60 (-H -V) line count and rates, the monitor knows it
+        // exactly: 63 MHz, 1304 px line (48.31 kHz), 806 lines, 59.94 Hz — V-Sync off.
+        .vga_v_total = 806,
+        .vga_v_active = 768,
+        .vga_pixel_clk = 63000000,
+        .vga_vsync_start = 771,
+        .vga_vsync_end = 776,
+        .vga_h_sync_bytes = 56,
+        .vga_h_bp_bytes = 74,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 512
+    },
+    { // [29] 1024x768 x3 @504 (HSTX also @252), x3 layout 2 — 50.4MHz/1278 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 807,
+        .v_active = 768,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 71,
+        .h_fp_bytes = 8,
+        .line_bytes = 639,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x3 = 2,
+        // VGA (PIO): VESA 1024x768@60 (-H -V) line count and rates, the monitor knows it
+        // exactly: 63 MHz, 1304 px line (48.31 kHz), 806 lines, 59.94 Hz — V-Sync off.
+        .vga_v_total = 806,
+        .vga_v_active = 768,
+        .vga_pixel_clk = 63000000,
+        .vga_vsync_start = 771,
+        .vga_vsync_end = 776,
+        .vga_h_sync_bytes = 56,
+        .vga_h_bp_bytes = 74,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 512
+    },
+    { // [30] 800x600 x3 @378, x3 layout 3 — 37.8MHz/1008 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 767,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 37800000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 36,
+        .h_bp_bytes = 46,
+        .h_fp_bytes = 22,
+        .line_bytes = 504,
+        .v_offset = 20,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 378,
+        .x3 = 3,
+        // VGA (PIO): VESA 800x600@60 (+H +V) line count and rates, the monitor knows it
+        // exactly: 42 MHz, 1108 px line (37.91 kHz), 628 lines, 60.36 Hz — V-Sync off.
+        .vga_v_total = 628,
+        .vga_v_active = 600,
+        .vga_pixel_clk = 42000000,
+        .vga_vsync_start = 601,
+        .vga_vsync_end = 604,
+        .vga_h_sync_bytes = 77,
+        .vga_h_bp_bytes = 53,
+        .vga_h_fp_bytes = 24,
+        .vga_screen_width = 400
+    },
+    { // [31] 800x600 x2 @378 — 37.8MHz/1008 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 767,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 37800000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 36,
+        .h_bp_bytes = 46,
+        .h_fp_bytes = 22,
+        .line_bytes = 504,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 378,
+        .x2_pad = 20
+    },
+    { // [32] 1280x720 x3 (16:9) @504, PIO x3 layout 6 (HSTX also @252); tight 64-px blanking — 50.4MHz/1344 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 767,
+        .v_active = 720,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 725,
+        .vsync_end = 730,
+        .screen_width = 640,
+        .h_sync_bytes = 24,
+        .h_bp_bytes = 7,
+        .h_fp_bytes = 1,
+        .line_bytes = 672,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x3 = 6
+    },
+    { // [33] 1280x720 x3 (16:9) @540, PIO x3 layout 7 (HSTX: 540 /2) — 54.0MHz/1440 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 767,
+        .v_active = 720,
+        .freq = 50,
+        .pixel_clk = 54000000,
+        .vsync_start = 725,
+        .vsync_end = 730,
+        .screen_width = 640,
+        .h_sync_bytes = 33,
+        .h_bp_bytes = 15,
+        .h_fp_bytes = 32,
+        .line_bytes = 720,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 540,
+        .x3 = 7
+    },
+    { // [34] 1440x576 x3 (16:9; the 360x288 fb x3 across, x2 down) @504, x3 layout 8 — 50.4MHz/1614 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 720,
+        .h_sync_bytes = 36,
+        .h_bp_bytes = 30,
+        .h_fp_bytes = 21,
+        .line_bytes = 807,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x3 = 8,
+        .x2_pad = 1   // = rows x2 from the 360x288 fb
+    },
+    { // [35] 1440x576 x3 (16:9) @540 = CEA 1440x576p50 (VIC 30 on the 128K line count), x3 layout 9 — 54.0MHz/1728 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 54000000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 720,
+        .h_sync_bytes = 63,
+        .h_bp_bytes = 69,
+        .h_fp_bytes = 12,
+        .line_bytes = 864,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 540,
+        .x3 = 9,
+        .x2_pad = 1
+    },
+#if defined(HDMI_HSTX) && HDMI_HSTX == 2
+    { // [36] 1024x768 x4 @378 (clk_hstx 378 /1) — 75.6MHz/1920 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 805,
+        .v_active = 768,
+        .freq = 50,
+        .pixel_clk = 75600000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 368,
+        .h_fp_bytes = 16,
+        .line_bytes = 960,
+        .v_offset = 24,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 756,
+        .x4_offset = 32
+    },
+    { // [37] 1024x768 x3 @378 (clk_hstx 378 /1) — 75.6MHz/1920 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 805,
+        .v_active = 768,
+        .freq = 50,
+        .pixel_clk = 75600000,
+        .vsync_start = 771,
+        .vsync_end = 777,
+        .screen_width = 512,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 368,
+        .h_fp_bytes = 16,
+        .line_bytes = 960,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 756,
+        .x3 = 1
+    },
+    { // [38] 800x600 x3 @252 /1, @504 /2 (clk_hstx 252) — 50.4MHz/1600 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 644,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 320,
+        .h_fp_bytes = 16,
+        .line_bytes = 800,
+        .v_offset = 20,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x3 = 3
+    },
+    { // [39] 800x600 x2 @252 /1, @504 /2 (clk_hstx 252) — 50.4MHz/1600 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 644,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 50400000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 320,
+        .h_fp_bytes = 16,
+        .line_bytes = 800,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x2_pad = 20
+    },
+    { // [40] 800x600 x3 @540 /2 (clk_hstx 270) — 54.0MHz/1728 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 54000000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 384,
+        .h_fp_bytes = 16,
+        .line_bytes = 864,
+        .v_offset = 20,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 540,
+        .x3 = 3
+    },
+    { // [41] 800x600 x2 @540 /2 (clk_hstx 270) — 54.0MHz/1728 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 54000000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 384,
+        .h_fp_bytes = 16,
+        .line_bytes = 864,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 540,
+        .x2_pad = 20
+    },
+    { // [42] 1280x720 x3 @378 (clk_hstx 378 /1), 1980-px line as CEA 720p50, blanking moved into the back porch — 75.6MHz/1980 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 781,
+        .v_active = 720,
+        .freq = 50,
+        .pixel_clk = 75600000,
+        .vsync_start = 725,
+        .vsync_end = 730,
+        .screen_width = 640,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 302,
+        .h_fp_bytes = 16,
+        .line_bytes = 990,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 756,
+        .x3 = 1
+    },
+    { // [43] 1280x720 @60 x3, HSTX @378 (clk_hstx 378 /1) — 75.6MHz/1680 px x 750 lines = 60.00 Hz (60 Hz: no per-machine refit, V-Sync off)
+        .v_total = 749,
+        .v_active = 720,
+        .freq = 60,
+        .pixel_clk = 75600000,
+        .vsync_start = 725,
+        .vsync_end = 730,
+        .screen_width = 640,
+        .h_sync_bytes = 32,
+        .h_bp_bytes = 152,
+        .h_fp_bytes = 16,
+        .line_bytes = 840,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 756,
+        .x3 = 1
+    }
+#else
+    { // [36] 800x600 x3 @504 (PIO 1.5), x3 layout 4 — 33.6MHz/1056 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 651,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 33600000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 46,
+        .h_fp_bytes = 34,
+        .line_bytes = 528,
+        .v_offset = 20,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 336,
+        .x3 = 4
+    },
+    { // [37] 800x600 x2 @504 (PIO 1.5) — 33.6MHz/1056 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 651,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 33600000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 44,
+        .h_fp_bytes = 20,
+        .line_bytes = 528,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 336,
+        .x2_pad = 20,
+        // VGA (PIO): VESA 800x600@60 (+H +V) line count and rates, the monitor knows it
+        // exactly: 42 MHz, 1108 px line (37.91 kHz), 628 lines, 60.36 Hz — V-Sync off.
+        .vga_v_total = 628,
+        .vga_v_active = 600,
+        .vga_pixel_clk = 42000000,
+        .vga_vsync_start = 601,
+        .vga_vsync_end = 604,
+        .vga_h_sync_bytes = 77,
+        .vga_h_bp_bytes = 53,
+        .vga_h_fp_bytes = 24,
+        .vga_screen_width = 400
+    },
+    { // [38] 800x600 x3 @540 (PIO 1.5), x3 layout 5 — 36.0MHz/1152 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 36000000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 48,
+        .h_bp_bytes = 46,
+        .h_fp_bytes = 82,
+        .line_bytes = 576,
+        .v_offset = 20,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 360,
+        .x3 = 5
+    },
+    { // [39] 800x600 x2 @540 (PIO 1.5) — 36.0MHz/1152 px; v_total = Pentagon, refitted per machine (graphics_big_mode_fit)
+        .v_total = 639,
+        .v_active = 600,
+        .freq = 50,
+        .pixel_clk = 36000000,
+        .vsync_start = 601,
+        .vsync_end = 605,
+        .screen_width = 400,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 44,
+        .h_fp_bytes = 68,
+        .line_bytes = 576,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 360,
+        .x2_pad = 20
+    }
+#endif
+    ,
+    // 1440x480 @60 x3 (16:9) — the 60 Hz twin of 1440x576: the 360x240 fb x3 across, x2
+    // down. Shared by both back-ends: [44]/[45] on HSTX, [40]/[41] on PIO (VMODE_SD60_*).
+    { // 1440x480 @60 x3 @504, x3 layout 11 — 50.4MHz/1602 px x 525 lines = 59.93 Hz (60 Hz: no per-machine refit, V-Sync off)
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 50400000,
+        .vsync_start = 489,
+        .vsync_end = 495,
+        .screen_width = 720,
+        .h_sync_bytes = 36,
+        .h_bp_bytes = 30,
+        .h_fp_bytes = 15,
+        .line_bytes = 801,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 504,
+        .x3 = 11,
+        .x2_pad = 1
+    },
+    { // 1440x480 @60 x3 @540 = CEA 1440x480p60 (VIC 15), x3 layout 10 — 54.0MHz/1716 px x 525 lines = 59.94 Hz (60 Hz: no per-machine refit, V-Sync off)
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 54000000,
+        .vsync_start = 489,
+        .vsync_end = 495,
+        .screen_width = 720,
+        .h_sync_bytes = 63,
+        .h_bp_bytes = 57,
+        .h_fp_bytes = 18,
+        .line_bytes = 858,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_540,
+        .tmds_mhz = 540,
+        .x3 = 10,
+        .x2_pad = 1
+    }
+#if defined(HDMI_HSTX) && HDMI_HSTX
+    ,
+    // ---------------------------------------------------------------------
+    // sys_clk 630 MHz on HSTX: clk_hstx can only be clk_sys / 1..4 (a two-bit field),
+    // so 126 MHz (the 25.2 MHz pixel) is out of reach. 630 / 4 = 157.5 MHz gives a
+    // 31.5 MHz pixel, and every standard mode has a twin there: SAME line rate and
+    // SAME line count as the 25.2 MHz mode (the line is 1.25x as long: 1000 / 1040 px),
+    // so the refresh is identical per machine; only the horizontal blanking grows.
+    // Indices = twin + VMODE_630_BASE (graphics_630_mode). The PIO back-end does not
+    // use them: it runs the 25.2 MHz modes at divider 2.5. The lines are longer than
+    // conv_color's HDMI_TL_MAX_WORDS, so the expander takes heap line buffers (hdmi.c).
+    // ---------------------------------------------------------------------
+    { // 630 twin of [0] 640x480 60Hz — 31.5MHz/1000/525
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 832 px
+        ,
+        .vga_v_total = 526,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 48,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 8,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [1] 640x480 50Hz Pentagon — 31.5MHz/1000/645
+        .v_total = 644,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 513,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [2] 640x480 50Hz 48K — 31.5MHz/1000/629
+        .v_total = 628,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 500,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [3] 640x480 50Hz 128K — 31.5MHz/1000/630
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 501,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [4] 720x576 50Hz Pentagon — 31.5MHz/1040/620
+        .v_total = 619,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 628,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [5] 720x576 50Hz 48K — 31.5MHz/1040/605
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 612,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [6] 720x576 50Hz 128K — 31.5MHz/1040/605
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [7] 720x480 60Hz — 31.5MHz/1040/505
+        .v_total = 504,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 511,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [8] 720x576 60Hz (v_active > v_total, as [8]) — 31.5MHz/1000/525
+        .v_total = 524,
+        .v_active = 576,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 40,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 20,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+    }
+#endif
+};

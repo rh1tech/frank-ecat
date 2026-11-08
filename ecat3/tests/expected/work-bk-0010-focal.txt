@@ -1,0 +1,2 @@
+[port-sys-rd.value] &100140
+[display.resolution] 256x256

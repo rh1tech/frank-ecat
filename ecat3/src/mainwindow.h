@@ -1,0 +1,359 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Main window header
+
+#pragma once
+
+#include <QComboBox>
+#include <QImage>
+#include <QLabel>
+#include <QMainWindow>
+#include <QSlider>
+#include <QToolButton>
+#include <QTranslator>
+
+#include "emulator/emulator.h"
+#include "emulator/debug.h"
+#include "emulator/devices/common/fdd.h"
+#include "emulator/devices/common/tape.h"
+
+QT_BEGIN_NAMESPACE
+namespace Ui { class MainWindow; }
+QT_END_NAMESPACE
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    //speed_q: --speed in quarters, -1 for the one of the ini (Emulator::set_speed())
+    MainWindow(const QString &config_file = QString(), const QString &script_file = QString(), int speed_q = -1, QWidget *parent = nullptr);
+    ~MainWindow();
+
+    //A script given on the command line may end with EXIT <code>. The code
+    //is kept here for main(), which turns it into the status of the process
+    int script_exit_code() const { return rec_exit_code; }
+
+    Emulator *e;
+
+#ifdef ENABLE_MCP
+    //Starts the MCP server. Called before show(): in this mode the window
+    //stays hidden until the client asks for a machine
+    void enable_mcp(bool trace);
+
+    //Called by McpBridge on the GUI thread. mcp_load_config() returns an error
+    //message, empty on success
+    QString mcp_load_config(const QString &file_name);
+    QString mcp_current_machine() const;
+    void    mcp_show_window();
+#endif
+
+protected:
+    void keyPressEvent( QKeyEvent * event) override;
+    void keyReleaseEvent( QKeyEvent * event) override;
+    void resizeEvent(QResizeEvent * event) override;
+    void paintEvent(QPaintEvent * event) override;
+    void closeEvent(QCloseEvent *event) override;
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
+private slots:
+    //run_embedded starts the @script of a configuration extension; false
+    //when something else is about to drive the machine (a script from the
+    //command line, a replayed recording, an MCP client)
+    void load_config(QString file_name, bool set_default, bool run_embedded = true);
+
+    void onDeviceMenuCalled(unsigned int i);
+
+    void on_action_Cold_restart_triggered();
+
+    void on_action_Soft_restart_triggered();
+
+    void on_actionCPUState_triggered();
+
+    void set_volume(int value);
+    void set_mute(bool muted);
+
+    void on_action_Select_a_machine_triggered();
+
+    void on_actionOpen_triggered();
+
+    void on_actionDebugger_triggered();
+    void on_actionDumps_triggered();
+
+    //void show_screen();
+
+    void on_action_Exit_triggered();
+
+    void fdd_open(unsigned int n);
+    void fdd_eject(unsigned int n);
+    void fdd_wp(unsigned int n);
+    void fdd_write(unsigned int n);
+
+    void hdd_open(unsigned int n);
+    void hdd_eject(unsigned int n);
+    void hdd_wp(unsigned int n);
+
+    //Remembered disks: the configuration's image back into the drive
+    void fdd_default(unsigned int n);
+    void hdd_default(unsigned int n);
+
+    void update_fdds();                 //The lamps of the floppy and hard disk drives
+
+    void on_actionScreenshot_triggered();
+    void on_actionVideo_triggered();
+    void on_actionSaveState_triggered();
+
+    void on_actionAbout_triggered();
+
+    void on_actionTape_triggered();
+    void on_actionKeyboard_triggered();
+    void on_actionSerial_triggered();
+
+    void on_actionRecOpen_triggered();
+    void on_actionRecSave_triggered();
+    void on_actionRecord_triggered();
+    void on_actionRecPlay_triggered();
+    void on_actionRecRewind_triggered();
+    void on_actionRecStop_triggered();
+    void on_actionRecPanel_toggled(bool checked);
+    void on_actionDiskAutosave_toggled(bool checked);
+    void on_actionDiskBackups_toggled(bool checked);
+    void on_actionRememberDisks_toggled(bool checked);
+    void on_actionBlendFrames_toggled(bool checked);
+    void on_actionFastPaste_toggled(bool checked);
+    void on_actionPasteText_triggered();
+    void on_actionForgetDisks_triggered();
+
+    void rec_tick();
+
+signals:
+    void send_a_key(QKeyEvent *event, bool press);
+    void send_volume(int value);
+    void send_muted(bool muted);
+    void send_reset(bool cool);
+    void send_resize();
+    void send_stop();
+
+private:
+    //The tool bar button that stops and resumes the processor. Its icon and
+    //tool tip follow the state of the CPU, which the debug windows and the
+    //scripts change too, so it is refreshed from the same timer as the
+    //recording panel rather than only when it is clicked
+    void update_cpu_state_action();
+    //-1 until the first refresh, then the DEBUG_ mode the icon was drawn for
+    int cpu_state_shown = -1;
+
+    //Opens a debug window on one processor. A machine may have several, each
+    //with its own address space and breakpoints
+    void open_debugger_for(CPU * cpu);
+
+    //The one window of the I/O ports (DL11 lines, printers), opened or raised
+    class SerialWindow * open_serial_window();
+    //Logging to a file in it may be cut only with the user's consent: asked
+    //before the machine is switched or the program closes
+    bool serial_close_allowed();
+
+    //Puts a window where it was the last time a window of the same key was
+    //closed on this configuration (on any, the first time), and remembers
+    //where it is when it closes
+    void remember_geometry(QDialog * w, const QString & key);
+
+    //The debug windows open on a configuration, kept in [DebugWindows] of the
+    //ini under its settings key and opened again with it. Only for a machine
+    //the user opened: a script, a replay or an MCP client gets none of them,
+    //and its run leaves the list as it was
+    void save_debug_windows();
+    void restore_debug_windows();
+    bool debug_windows_kept = false;
+
+    Ui::MainWindow *ui;
+
+    QWidget * screen;
+    VideoRenderer * renderer;
+
+    std::unique_ptr<IniSettings> m_settings;
+    QTranslator translator;
+    QTranslator qtTranslator;
+
+    DebugWindowsManager * DWM;
+
+    QSlider * volume;
+    QToolButton * mute;
+
+    QToolButton * fdd_button[8];
+    // QToolButton * tape_button = nullptr;
+    QAction * tape_action = nullptr;
+    QAction * keyboard_action = nullptr;
+    QAction * buttons_separator = nullptr;
+    QList<QAction*> option_toolbar_actions;
+    QMenu * fdd_menu[8];
+    std::vector<FDD*> fdds;
+
+    //Винчестеры машины. Кнопка у каждого своя, как у дисководов, но моргать
+    //ей нечем: обращения к диску идут пачками и рисовать их нечем
+    QToolButton * hdd_button[4];
+    QMenu * hdd_menu[4];
+    // Any device of class "hdd", driven through its commands (load, eject,
+    // protect) and fields (attached, file, protected) the way a script drives it
+    std::vector<ComputerDevice*> hdds;
+    void hdd_show(unsigned int n);
+    unsigned int hdds_found = 0;
+    void fdd_show(unsigned int n);
+    //Writes what a drive holds into the ini when the setting is on
+    void disk_changed(ComputerDevice * dev);
+    //Puts a disk the machine changed into its image file, when the setting is
+    //on. Called once the lamp is out and before the disk leaves the drive
+    void fdd_autosave(unsigned int n);
+    void fdd_autosave_all();
+    //A machine a script or a replay drives: as with the remembered disks, what
+    //it writes stays in memory, its run must not change the images
+    bool fdd_autosave_held = false;
+    bool fdd_image_shipped(const QString &path);
+    //The generation of the disk a backup was made for, per drive: one backup
+    //for a disk from its loading on
+    std::vector<long long> fdd_backup_gen;
+    //Set by those who drive the machine themselves (a replay, MCP): the next
+    //load_config() leaves the configuration's disks in the drives
+    bool no_disk_restore = false;
+    //FDC * fdc;
+    // TapeRecorder * tape;
+    unsigned int fdds_found = 0;
+    QTimer * fdd_timer;
+    QString last_path;
+    bool fdd_blinker;
+
+    bool first_show = true;
+    QString first_config;
+    QString cur_config;                 //Configuration currently loaded
+
+#ifdef ENABLE_MCP
+    bool mcp_mode = false;
+    bool mcp_screen_menu = false;       //CreateScreenMenu() must run once only
+    QString mcp_load_error;             //Filled instead of showing a message box
+    class McpBridge * mcp_bridge = nullptr;
+#endif
+
+    //Set from the command line, see main.cpp
+    QString cmdline_config;
+    bool startup_load = false;          //The machine of the command line is being loaded
+    bool cmdline_starting = false;      //The machine of a command line script is being loaded
+    QString script_file;
+
+    QString resolve_startup_path(const QString &file_name) const;
+    void start_script(bool from_cmdline = true);
+
+    //------------------------- Action recording ---------------------------//
+    //The recording and the replay share one buffer, the one of the script
+    //engine, so a session can be recorded, replayed, cut and continued
+    enum RecState { RecIdle, RecRecording, RecPlaying, RecPaused };
+
+    //A dropdown, or a button that stays pressed (combo is null then)
+    struct OptionCombo {
+        std::string device;
+        unsigned int option;
+        QComboBox * combo;
+        QAction * toggle;
+    };
+
+    RecState rec_state = RecIdle;
+    QAction * rec_panel_separator = nullptr;   //Tool bar entries of the recording block
+    QAction * rec_panel_widget = nullptr;
+    QLabel * rec_label = nullptr;
+    QTimer * rec_timer = nullptr;
+    bool rec_ui_shown = false;          //The status bar block appears with the first recording or file
+    bool rec_cmdline = false;           //A script from the command line: EXIT closes the window
+    int rec_exit_code = 0;              //EXIT <code> of that script, returned from main()
+    size_t rec_seen_pc = 0;             //Commands before it were checked for option changes
+    uint64_t rec_total_ms = 0;
+    QString rec_file;                   //Last opened or saved .ecat
+    QList<OptionCombo> option_combos;   //Device option dropdowns and buttons of the tool bar
+
+    bool rec_save();
+    void rec_stop_all();
+    void rec_update_ui();
+    void rec_refresh_total();
+    void rec_sync_option_combos(size_t from, size_t to);
+    QString rec_machine_string() const;
+    bool rec_machine_matches(const std::string &machine) const;
+    static QString format_mmss(uint64_t ms);
+
+    bool switch_language(const QString &lang, bool init);
+    void add_languages();
+
+    void CreateDevicesMenu();
+    void CreateDebugMenuItems();
+    //The Debug menu items of the windows that ask for one (register_debug_window())
+    std::vector<QAction*> m_debug_items;
+    void UpdateToolbar();
+    void CreateScreenMenu();
+    void CreateFDDMenu(unsigned int n);
+    void CreateHDDMenu(unsigned int n);
+
+    void set_title();
+
+    //------------------------- Machine mouse ------------------------------//
+    //A click on the screen hands the host mouse over to the mouse of the
+    //machine, if one is plugged in: the pointer is hidden and kept in the
+    //middle of the screen, and its movement becomes steps. Ctrl-Alt, the
+    //middle button or leaving the window gives it back
+    bool mouse_captured = false;
+    QPoint mouse_center;                //Global position the pointer is put back to
+    QPoint mouse_last;                  //Global position of the previous move
+    double mouse_acc_x = 0;             //Fraction of a step not sent yet
+    double mouse_acc_y = 0;
+    int mouse_rec_x = 0;                //Steps sent but not recorded yet
+    int mouse_rec_y = 0;
+    int mouse_buttons = 0;              //Bit 0 - left (button 1), bit 1 - right (button 2)
+    int mouse_speed = 25;               //Percent: steps a line of the machine's screen crossed by the host pointer
+    QMenu * sound_latency_menu = nullptr; //Settings > Sound latency, made once
+    QMenu * mouse_speed_menu = nullptr; //Display > Mouse speed, made once
+    bool screenshot_as_shown = false;   //Settings > Screenshot type: the picture of the window, not the machine's pixels
+    QMenu * screenshot_menu = nullptr;  //Settings > Screenshot type, made once
+    QMenu * style_menu = nullptr;       //Settings > Interface style, made once
+    QString default_style;              //The style Qt chose itself, for "Default"
+    QImage picture_as_shown(const std::vector<uint8_t> &raw, unsigned int sx, unsigned int sy);
+
+    //------------------------- Video recording ----------------------------//
+    //Settings > Video: the codec, the frame rate, the folder and ffmpeg. The
+    //frames follow the screenshot type: the machine's pixels come from the
+    //render thread of the core, the window's picture from here
+    QMenu * video_menu = nullptr;       //Settings > Video, made once
+    QMenu * key_remap_menu = nullptr;   //Settings > Keyboard, made once
+    QMenu * speed_menu = nullptr;       //Emulation > Speed, made once
+    //Display > High precision, made once and shown for a display that has the
+    //mode; per machine in [Display] of the ini
+    QAction * precise_action = nullptr;
+    void update_precise_action();       //Made if need be, follows the machine's display
+    //The Turbo button: released - 1x, pressed - turbo_speed, the speed of the
+    //menu. A choice in the menu presses it unless it is 1x
+    QAction * turbo_action = nullptr;
+    int turbo_speed = 4;                //Quarters, [Core] speed
+    void apply_speed();                 //Turbo and turbo_speed into the emulator
+    void choose_speed(int v);           //A speed of the menu, the menu made or not
+    //SPEED of a script or MCP sets the emulator past the window: the button
+    //and the title follow it by polling, the ini keeps the menu's choice
+    QTimer * speed_timer = nullptr;
+    int shown_speed = -1;               //Quarters the button and the title show
+    void sync_speed();
+    QString speed_text(int quarters);   //"0,25x" by the language of the window
+    static const int SPEEDS_Q[7];       //The choices, in quarters (Emulator::set_speed()), 0 - as fast as possible
+    QTimer * video_timer = nullptr;     //Follows the recording and its finishing
+    QTimer * video_frame_timer = nullptr;   //The window's picture, for the renderers that do not hand it over
+    bool video_active = false;          //A recording or its finishing is under way
+    QString find_ffmpeg();
+    void video_start();
+    void video_stop();
+    void video_tick();
+    void video_update_action();
+    void video_send_shown_frame();
+    QTimer * mouse_timer = nullptr;     //Records the steps in portions
+
+    void mouse_capture(bool on);
+    void mouse_send(bool buttons_changed);
+    void mouse_record(bool buttons_changed);
+    void mouse_flush();
+
+};

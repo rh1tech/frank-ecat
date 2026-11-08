@@ -1,0 +1,370 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: HFE container (HxC Floppy Emulator v1) and FM/MFM bit cell codecs
+
+#include <cstring>
+
+#include "dsk_tools/core.h"
+
+namespace dsk_tools {
+
+namespace {
+
+    inline bool cell(const BYTES & cells, size_t bit)
+    {
+        return (cells[bit >> 3] >> (bit & 7)) & 1;
+    }
+
+    inline void put_cell(BYTES & cells, size_t bit, bool v)
+    {
+        if (v) cells[bit >> 3] |= (uint8_t)(1u << (bit & 7));
+        else   cells[bit >> 3] &= (uint8_t)~(1u << (bit & 7));
+    }
+
+    // 16 cells from a bit position, the first one is the highest bit
+    inline uint16_t window(const BYTES & cells, size_t bit)
+    {
+        uint16_t w = 0;
+        for (int i = 0; i < 16; i++) w = (uint16_t)((w << 1) | (cell(cells, bit + i) ? 1 : 0));
+        return w;
+    }
+
+    inline uint8_t data_bits(uint16_t w)
+    {
+        uint8_t d = 0;
+        for (int i = 0; i < 8; i++) d = (uint8_t)((d << 1) | ((w >> (14 - 2 * i)) & 1));
+        return d;
+    }
+
+    // The 16 cells of an FM byte with this clock pattern
+    uint16_t fm_cells(uint8_t clock, uint8_t data)
+    {
+        uint16_t w = 0;
+        for (int b = 7; b >= 0; b--)
+            w = (uint16_t)((w << 2) | (((clock >> b) & 1) << 1) | ((data >> b) & 1));
+        return w;
+    }
+
+    // Every 16 cell window of the track in turn; when match takes one for a
+    // mark the scan goes on right after it
+    template <typename F>
+    void scan_windows(const BYTES & cells, size_t bits, F match)
+    {
+        if (bits < 16) return;
+        size_t bit = 0;
+        uint16_t w = window(cells, 0);
+        for (;;) {
+            if (match(bit, w)) {
+                bit += 16;
+                if (bit + 16 > bits) break;
+                w = window(cells, bit);
+                continue;
+            }
+            if (bit + 17 > bits) break;
+            w = (uint16_t)((w << 1) | (cell(cells, bit + 16) ? 1 : 0));
+            bit++;
+        }
+    }
+
+    // Bytes out of the cells, the byte grid taken anew at every mark: a
+    // track written by a drive need not start on a byte boundary, nor keep
+    // the same phase from one field to the next. The bytes before the first
+    // mark follow its phase, and so does the end of the track after the last
+    void decode_segments(const BYTES & cells, size_t bits, const std::vector<size_t> & marks,
+                         size_t len, BYTES & data, BYTES & special)
+    {
+        data.assign(len, 0);
+        special.assign(len, 0);
+        if (bits < 16 || len == 0) return;
+        const size_t first_phase = marks.empty() ? 0 : marks[0] % 16;
+        // Segment k starts at the byte of mark k and runs up to the next one
+        for (size_t k = 0; k <= marks.size(); k++) {
+            const size_t phase = (k == 0) ? first_phase : marks[k - 1] % 16;
+            const size_t from_byte = (k == 0) ? 0 : marks[k - 1] / 16;
+            const size_t to_byte = (k < marks.size()) ? marks[k] / 16 : len;
+            for (size_t i = from_byte; i < to_byte && i < len; i++) {
+                const size_t bit = i * 16 + phase;
+                if (bit + 16 > bits) break;
+                data[i] = data_bits(window(cells, bit));
+            }
+            if (k < marks.size() && marks[k] / 16 < len) special[marks[k] / 16] = 1;
+        }
+    }
+
+}
+
+//----------------------------- Container ----------------------------------//
+
+Result hfe_read(const BYTES & file, HfeImage & img)
+{
+    if (file.size() < 512 + sizeof(HXC_HFE_TRACK))
+        return Result::error(ErrorCode::LoadIncorrectFile, QT_TRANSLATE_NOOP("errors", "File is too small"));
+    HXC_HFE_HEADER hdr;
+    memcpy(&hdr, file.data(), sizeof(hdr));
+    if (memcmp(hdr.HEADERSIGNATURE, "HXCPICFE", 8) != 0)
+        return Result::error(ErrorCode::LoadIncorrectFile, QT_TRANSLATE_NOOP("errors", "Invalid HFE signature"));
+    if (hdr.number_of_track == 0 || hdr.number_of_side == 0 || hdr.number_of_side > 2)
+        return Result::error(ErrorCode::LoadIncorrectFile, QT_TRANSLATE_NOOP("errors", "Invalid HFE parameters"));
+
+    img.tracks = hdr.number_of_track;
+    img.sides = hdr.number_of_side;
+    img.bitrate = hdr.bitRate;
+    img.rpm = hdr.floppyRPM;
+    img.encoding = hdr.track_encoding;
+    img.interface_mode = hdr.floppyinterfacemode;
+    img.write_allowed = hdr.write_allowed != 0x00;
+    img.double_step = hdr.single_step == 0x00;
+    img.cells.assign((size_t)img.tracks * img.sides, BYTES());
+
+    const size_t lut = (size_t)hdr.track_list_offset * 512;
+    if (lut + (size_t)img.tracks * sizeof(HXC_HFE_TRACK) > file.size())
+        return Result::error(ErrorCode::LoadIncorrectFile, QT_TRANSLATE_NOOP("errors", "Invalid HFE parameters"));
+
+    for (int t = 0; t < img.tracks; t++) {
+        HXC_HFE_TRACK ti;
+        memcpy(&ti, file.data() + lut + (size_t)t * sizeof(HXC_HFE_TRACK), sizeof(ti));
+        const size_t base = (size_t)ti.offset * 512;
+        // track_len is both sides together: every 512 byte block holds 256
+        // bytes of side 0, then 256 of side 1
+        const size_t side_len = ti.track_len / 2;
+        const size_t blocks = (ti.track_len + 511) / 512;
+        if (base + blocks * 512 > file.size())
+            return Result::error(ErrorCode::LoadIncorrectFile, QT_TRANSLATE_NOOP("errors", "Invalid HFE parameters"));
+        for (int s = 0; s < img.sides; s++) {
+            BYTES &out = img.cells[(size_t)t * img.sides + s];
+            out.reserve(side_len);
+            for (size_t b = 0; b < blocks && out.size() < side_len; b++) {
+                const uint8_t * part = file.data() + base + b * 512 + (size_t)s * 256;
+                const size_t n = (side_len - out.size() < 256) ? side_len - out.size() : 256;
+                out.insert(out.end(), part, part + n);
+            }
+        }
+    }
+    return Result::ok();
+}
+
+void hfe_write(const HfeImage & img, BYTES & file)
+{
+    file.clear();
+    HXC_HFE_HEADER hdr;
+    memset(&hdr, 0xFF, sizeof(hdr));
+    memcpy(hdr.HEADERSIGNATURE, "HXCPICFE", 8);
+    hdr.formatrevision = 0;
+    hdr.number_of_track = (uint8_t)img.tracks;
+    hdr.number_of_side = (uint8_t)img.sides;
+    hdr.track_encoding = img.encoding;
+    hdr.bitRate = img.bitrate;
+    hdr.floppyRPM = img.rpm;
+    hdr.floppyinterfacemode = img.interface_mode;
+    hdr.write_protected = 0xFF;
+    hdr.track_list_offset = 1;
+    hdr.write_allowed = img.write_allowed ? 0xFF : 0x00;
+    hdr.single_step = img.double_step ? 0x00 : 0xFF;
+    const uint8_t * h = reinterpret_cast<const uint8_t*>(&hdr);
+    file.insert(file.end(), h, h + sizeof(hdr));
+    file.resize(512, 0xFF);
+
+    // The track list: one block is enough for 128 tracks
+    const size_t lut_blocks = ((size_t)img.tracks * sizeof(HXC_HFE_TRACK) + 511) / 512;
+    const size_t lut = file.size();
+    file.resize(lut + lut_blocks * 512, 0xFF);
+
+    for (int t = 0; t < img.tracks; t++) {
+        size_t side_len = 0;
+        for (int s = 0; s < img.sides; s++) {
+            const BYTES &c = img.cells[(size_t)t * img.sides + s];
+            if (c.size() > side_len) side_len = c.size();
+        }
+        const size_t blocks = (side_len + 255) / 256;
+        HXC_HFE_TRACK ti;
+        ti.offset = (uint16_t)(file.size() / 512);
+        ti.track_len = (uint16_t)(side_len * 2);
+        memcpy(file.data() + lut + (size_t)t * sizeof(ti), &ti, sizeof(ti));
+
+        const size_t base = file.size();
+        file.resize(base + blocks * 512, 0);
+        for (int s = 0; s < 2; s++) {
+            // A single sided image still has the second half of each block
+            const BYTES &c = img.cells[(size_t)t * img.sides + (s < img.sides ? s : 0)];
+            for (size_t b = 0; b < blocks; b++)
+                for (size_t i = 0; i < 256; i++) {
+                    const size_t k = b * 256 + i;
+                    file[base + b * 512 + (size_t)s * 256 + i] = (s < img.sides && k < c.size()) ? c[k] : 0xAA;
+                }
+        }
+    }
+}
+
+//----------------------------- MFM ----------------------------------------//
+
+// A data cell is the bit; a clock cell is 1 between two zero bits. A sync
+// byte drops one clock: A1 gives 4489, C2 gives 5224
+void mfm_encode(const uint8_t * data, const uint8_t * special, size_t len, BYTES & cells)
+{
+    cells.assign(len * 2, 0);
+    bool prev = false;
+    size_t bit = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint16_t w = 0;
+        for (int b = 7; b >= 0; b--) {
+            const bool d = (data[i] >> b) & 1;
+            const bool c = !prev && !d;
+            w = (uint16_t)((w << 2) | (c ? 2 : 0) | (d ? 1 : 0));
+            prev = d;
+        }
+        if (special != nullptr && special[i]) {
+            if (data[i] == 0xA1) w = 0x4489;
+            else if (data[i] == 0xC2) w = 0x5224;
+        }
+        for (int k = 15; k >= 0; k--) put_cell(cells, bit++, (w >> k) & 1);
+    }
+}
+
+// Only 4489 is a sync here: the 5224 of the index mark also turns up,
+// shifted, inside an ordinary 4E gap (9254 9254 ...) and would move the byte
+// grid there
+void mfm_decode(const BYTES & cells, size_t len, BYTES & data, BYTES & special)
+{
+    const size_t bits = cells.size() * 8;
+    std::vector<size_t> marks;
+    scan_windows(cells, bits, [&](size_t bit, uint16_t w) {
+        if (w != 0x4489) return false;
+        marks.push_back(bit);
+        return true;
+    });
+    decode_segments(cells, bits, marks, len, data, special);
+}
+
+//----------------------------- FM -----------------------------------------//
+
+// Every data bit follows a clock cell of 1; an address mark has a clock
+// pattern of its own: C7 for FE, FB, F8, D7 for the index mark FC
+void fm_encode(const uint8_t * data, const uint8_t * special, size_t len, BYTES & cells)
+{
+    cells.assign(len * 2, 0);
+    size_t bit = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t clock = 0xFF;
+        if (special != nullptr && special[i]) clock = (data[i] == 0xFC) ? 0xD7 : 0xC7;
+        for (int b = 7; b >= 0; b--) {
+            put_cell(cells, bit++, (clock >> b) & 1);
+            put_cell(cells, bit++, (data[i] >> b) & 1);
+        }
+    }
+}
+
+void fm_decode(const BYTES & cells, size_t len, BYTES & data, BYTES & special)
+{
+    static const uint16_t mark_cells[4] = {
+        fm_cells(0xC7, 0xFE), fm_cells(0xC7, 0xFB), fm_cells(0xC7, 0xF8), fm_cells(0xD7, 0xFC)
+    };
+    const size_t bits = cells.size() * 8;
+    std::vector<size_t> marks;
+    scan_windows(cells, bits, [&](size_t bit, uint16_t w) {
+        if (w != mark_cells[0] && w != mark_cells[1] && w != mark_cells[2] && w != mark_cells[3]) return false;
+        marks.push_back(bit);
+        return true;
+    });
+    decode_segments(cells, bits, marks, len, data, special);
+}
+
+//----------------------------- Apple II GCR -------------------------------//
+
+namespace {
+
+    // The cells a bit takes, measured over the long runs of 1 bits that the gaps
+    // of every formatted track have; 2 for a track without them
+    double gcr_cells_per_bit(const std::vector<size_t> & ones)
+    {
+        size_t cells = 0, bits = 0, run_cells = 0, run_bits = 0;
+        for (size_t i = 1; i <= ones.size(); i++) {
+            const size_t gap = (i < ones.size()) ? ones[i] - ones[i - 1] : 0;
+            if (gap >= 1 && gap <= 3) {
+                run_cells += gap;
+                run_bits++;
+                continue;
+            }
+            if (run_bits >= 32) {
+                cells += run_cells;
+                bits += run_bits;
+            }
+            run_cells = run_bits = 0;
+        }
+        return bits ? (double)cells / bits : 2.0;
+    }
+
+}
+
+void gcr_encode(const uint8_t * bits, size_t bit_count, BYTES & cells)
+{
+    cells.assign((bit_count * 2 + 7) / 8, 0);
+    for (size_t i = 0; i < bit_count; i++)
+        if ((bits[i >> 3] >> (7 - (i & 7))) & 1) put_cell(cells, 2 * i + 1, true);
+}
+
+void gcr_decode(const BYTES & cells, BYTES & nibbles)
+{
+    nibbles.clear();
+    const size_t n = cells.size() * 8;
+    std::vector<size_t> ones;
+    bool odd = false, even = false;
+    for (size_t c = 0; c < n; c++)
+        if (cell(cells, c)) {
+            ones.push_back(c);
+            if (c & 1) odd = true; else even = true;
+        }
+    if (ones.empty()) return;
+
+    // The disk bits: the cells of the transitions when they all keep to one cell
+    // of their pairs. Otherwise a clock counts them, as the controller's logic
+    // does: a write splice shifts the pairs by a cell, and the cells of a disk
+    // read by a flux reader drift. Each transition ends as many bits as clock
+    // periods since the last one; the clock moves an eighth of the way to it, the
+    // period a 256th, after it is measured first, as a disk turning a little slower
+    // than its cells were counted puts a transition a cell late now and then: a
+    // gap of 1.5 periods by a period of 2
+    std::vector<uint8_t> bits;
+    if (!(odd && even)) {
+        bits.assign(n / 2, 0);
+        for (size_t i = 0; i < ones.size(); i++) bits[ones[i] / 2] = 1;
+    } else {
+        double period = gcr_cells_per_bit(ones);
+        double clock = (double)ones[0];
+        const long lead = (long)((double)ones[0] / period);
+        bits.assign((size_t)lead, 0);
+        bits.push_back(1);
+        for (size_t i = 1; i < ones.size(); i++) {
+            const double at = (double)ones[i];
+            long count = (long)((at - clock) / period + 0.5);
+            if (count < 1) count = 1;
+            bits.insert(bits.end(), (size_t)(count - 1), 0);
+            bits.push_back(1);
+            const double expected = clock + count * period;
+            clock = expected + (at - expected) / 8;
+            period += (at - expected) / count / 256;
+            if (period < 1.5) period = 1.5;
+            if (period > 2.5) period = 2.5;
+        }
+        long count = (long)(((double)n - ones.back() + ones[0]) / period + 0.5);
+        if (count - 1 - lead > 0) bits.insert(bits.end(), (size_t)(count - 1 - lead), 0);
+    }
+
+    // The latch: a 0 shifted into the empty latch leaves it empty, and a nibble
+    // is the eight bits from a 1 on. The track is a ring: a turn brings the latch
+    // into step, the nibbles that start in the next one are the track's
+    const size_t len = bits.size();
+    size_t at = 0;
+    while (at < 2 * len) {
+        while (at < 2 * len && !bits[at % len]) at++;
+        if (at >= 2 * len) break;
+        if (at >= len) {
+            uint8_t v = 0;
+            for (size_t k = 0; k < 8; k++) v = (uint8_t)((v << 1) | bits[(at + k) % len]);
+            nibbles.push_back(v);
+        }
+        at += 8;
+    }
+}
+
+} // namespace

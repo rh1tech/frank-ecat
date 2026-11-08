@@ -1,0 +1,9 @@
+=== Первая секунда ===
+[panel.phase] 3
+[cpu.irq2_requests] 0
+=== Тумблер выключен ===
+[panel.prt] 0
+[cpu.irq2_requests] 0
+=== Тумблер включён ===
+[panel.prt] 1
+[cpu.irq2_requests] 50

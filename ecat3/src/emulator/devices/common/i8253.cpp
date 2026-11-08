@@ -1,0 +1,412 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Intel 8253 (КР580ВИ53) programmable timer
+
+#include <cstring>
+
+#include "i8253.h"
+#include "emulator/utils.h"
+
+//Номера строк в таблице управления режимами
+//Каждая строка соответствует своему событию
+#define MODE_SET_OUT            0		//Значение OUT после установки режима (0, 1)
+#define COUNTER_LOAD_DEC_VALUE  1		//Значение декремента (0=>1, 1=>2)
+#define COUNTER_LOAD_AUTO_START 2       //Автозапуск после загрузки счетчика
+#define COUNTER_START_OUT       3		//Значение OUT после запуска счета (0, 1, инверсия)
+#define COUNTER_END_OUT         4		//Значение OUT после конца счета (0, 1, не влияет)
+#define COUNTER_END_RESTART     5       //Авто-перезапуск счета
+#define GATE_0_OUT              6		//Значение OUT если GATE=0
+#define GATE_0_STOP             7		//Останов счета по GATE=0
+#define GATE_01_OUT             8		//Значение OUT по положительному фронту GATE
+#define GATE_01_RESET           9       //Перезапуск счета по положительному фронту GATE
+
+//Добавляем по два лишних значения, чтобы было по 8 байт
+const uint8_t I8253_MODES[10][8] =
+                                    {{0, 1, 1, 1, 1, 1, 1, 1}, //MODE_SET_OUT
+                                     {0, 0, 0, 1, 0, 0, 0, 1}, //COUNTER_LOAD_DEC_VALUE
+                                     {1, 0, 1, 1, 1, 0, 1, 1}, //COUNTER_LOAD_AUTO_START
+                                     {0, 0, 1, 2, 1, 1, 1, 2}, //COUNTER_START_OUT
+                                     {1, 1, 0, 3, 0, 0, 0, 3}, //COUNTER_END_OUT
+                                     {0, 0, 1, 1, 0, 0, 1, 1}, //COUNTER_END_RESTART
+                                     {3, 3, 1, 1, 3, 3, 1, 1}, //GATE_0_OUT
+                                     {1, 0, 1, 1, 1, 0, 1, 1}, //GATE_0_STOP
+                                     {3, 0, 3, 3, 3, 3, 3, 3}, //GATE_01_OUT
+                                     {0, 1, 1, 1, 0, 1, 1, 1}};//GATE_01_RESET
+
+I8253::I8253(InterfaceManager *im, EmulatorConfigDevice *cd):
+      AddressableDevice(im, cd)
+    , i_address(this, im, 2, "address", MODE_R)
+    , i_data(this, im, 8, "data", MODE_R)
+    , i_output(this, im, 3, "output", MODE_W)
+    , i_gate(this, im, 3, "gate", MODE_R, 1)
+    , i_clk(this, im, 3, "clk", MODE_R, 2)
+    , per_channel_clock(false)
+    , ext_clock_mask(0)
+{
+    m_clocked = true;   //clock() is overridden here
+    for (int i = 0; i < 3; i++) {
+        ch_clock_multiplier[i] = 1;
+        ch_clock_divider[i] = 1;
+        ch_clock_stored[i] = 0;
+    }
+    init();
+    memset(&Gates, 1, sizeof(Gates)); //Allow counting just if gates are not connected
+}
+
+emulator::Result I8253::load_config(SystemData *sd)
+{
+    emulator::Result res = AddressableDevice::load_config(sd);
+    if (!res) return res;
+
+    const std::string param_names[3] = {"clock0", "clock1", "clock2"};
+    for (int ch = 0; ch < 3; ch++) {
+        std::string s = cd->get_parameter(param_names[ch], false).value;
+        if (!s.empty()) {
+            size_t pos = s.find('/');
+            if (pos != std::string::npos) {
+                ch_clock_multiplier[ch] = parse_numeric_value(s.substr(0, pos));
+                ch_clock_divider[ch] = parse_numeric_value(s.substr(pos + 1));
+            } else {
+                ch_clock_multiplier[ch] = parse_numeric_value(s);
+                ch_clock_divider[ch] = 1;
+            }
+            per_channel_clock = true;
+        }
+    }
+
+    //Канал с подведенной линией такта считает ее фронты, а не такты своего
+    //домена: clock() его не трогает вовсе
+    ext_clock_mask = (i_clk.linked == 0) ? 0 : (i_clk.linked_bits & 0x07);
+
+    return emulator::Result::ok();
+}
+
+void I8253::reset(const bool cold)
+{
+    AddressableDevice::reset(cold);
+    init();
+}
+
+void I8253::init()
+{
+    memset(&Modes,       0, sizeof(Modes));
+    memset(&IsBCD,       0, sizeof(IsBCD));
+    memset(&Orders,      0, sizeof(Orders));
+    memset(&Indexes,     0, sizeof(Indexes));
+    memset(&Counting,    0, sizeof(Counting));
+    memset(&StartData,   0, sizeof(StartData));
+    memset(&LowByte,     0, sizeof(LowByte));
+    memset(&Counters,    0, sizeof(Counters));
+    memset(&NeedRestart, 0, sizeof(NeedRestart));
+    memset(&Loaded,      0, sizeof(Loaded));
+    memset(&Latched,     0, sizeof(Latched));
+    memset(&ch_clock_stored, 0, sizeof(ch_clock_stored));
+}
+
+void I8253::StartCount(unsigned int A)
+{
+    //A channel its gate holds does not start: OUT keeps the level the gate
+    //gave it, and the rising edge of the gate reloads the count and starts it.
+    //The Микроша ROM loads channel 2 with the gate down, and flipping OUT here
+    //left it stuck at 0 - the level that, ANDed with PC1, silences the speaker
+    if (Gates[A] == 0 && I8253_MODES[GATE_0_STOP][Modes[A]] == 1) {
+        Reload(A);
+        return;
+    }
+    SetOut(A, COUNTER_START_OUT);
+    //Загружаем регистры счетчиков
+    Reload(A);
+    //Разрешаем счет
+    if (Gates[A]==1) Counting[A] = 1;
+}
+
+void I8253::SetOut(unsigned int A, unsigned int Mode)
+{
+    const unsigned int M = I8253_MODES[Mode][Modes[A]];
+    const unsigned int V = i_output.value;
+    const unsigned int Mask = 1 << A;
+    switch (M) {
+        case 0: i_output.change(V & ~Mask); break; //0
+        case 1: i_output.change(V | Mask);  break; //1
+        case 2: i_output.change(V ^ Mask);  break; //Инверсия
+        default: break;
+    }
+}
+
+void I8253::Count(const unsigned int A, const unsigned int Increment)
+{
+    //Проверяем, загружен ли счетчик
+    if (Loaded[A] == 1)
+    {
+        if (NeedRestart[A] == 1)
+        {
+            StartCount(A);
+            NeedRestart[A] = 0;
+        };
+        if (Counting[A] == 1)
+        {
+            unsigned int I2 = Increment;
+            //Умножаем значение на 2 для двойного декремента
+            if (I8253_MODES[COUNTER_LOAD_DEC_VALUE][Modes[A]] == 1)
+                I2 = I2 << 1;
+            const int Ctr = static_cast<int>(Counters[A*2]) + static_cast<int>(Counters[A*2+1])*256;
+            const int V = Ctr - static_cast<int>(I2);
+            if ((V > 0) || (Ctr == 0))
+            {
+                //Сохраняем значение для следующего цикла
+                Counters[A*2] = static_cast<uint8_t>(V);
+                Counters[A*2+1] = static_cast<uint8_t>(V >> 8);
+            } else {
+                //Достигнут конец
+                //Устанавливаем выход
+                SetOut(A, COUNTER_END_OUT);
+                //Запрещаем счет
+                Counting[A] = 0;
+                //Рестарт счета, если надо
+                if (I8253_MODES[COUNTER_END_RESTART][Modes[A]] == 1)
+                    NeedRestart[A] = 1;
+            };
+        };
+    };
+}
+
+void I8253::Reload(unsigned int A)
+{
+    Counters[A*2] = StartData[A*2];
+    Counters[A*2+1] = StartData[A*2+1];
+}
+
+unsigned int I8253::get_value(unsigned int address)
+{
+    const unsigned a = address & 0x03;
+    unsigned result;
+    if (a==3)
+        result = 0;
+    else {
+        //A latched count stays until the program has read it; without a
+        //latch the read sees the counter as it runs
+        result = Latched[a] ? ReadData[a*2 + Indexes[a]] : Counters[a*2 + Indexes[a]];
+        Indexes[a] = Indexes[a] ^ 0x01;
+        if (Orders[a] != 3 || Indexes[a] == 0) Latched[a] = 0;
+    }
+    return result;
+}
+
+unsigned I8253::get_direct(unsigned address)
+{
+    //Same byte get_value() would return, but the high/low byte toggle is left
+    //where it is: a LOG or an open port window must not shift what the next
+    //read of the counter gives the program
+    const unsigned a = address & 0x03;
+    if (a==3) return 0;
+    return Latched[a] ? ReadData[a*2 + Indexes[a]] : Counters[a*2 + Indexes[a]];
+}
+
+void I8253::set_value(const unsigned address, const unsigned value, bool force)
+{
+    const unsigned a = address & 0x03;
+    if (a==3) {
+        //control word
+        unsigned int C = (value >> 6) & 0x03;				 	//Номер канала
+        //Каналов три. Слово с номером 3 ВИ53 не принимает (у ВИ54 это команда
+        //обратного чтения), а здесь оно писало бы за массивы каналов
+        if (C == 3) return;
+        if ((value & 0x30) != 0)
+        {
+            IsBCD[C] = value & 0x01;  				//BCD-режим
+            Orders[C] = (value >> 4) & 0x03; //Число байтов
+            Modes[C] = (value >> 1) & 0x07;  //Режим работы канала
+            //Обнуляем счетчик загруженных данных
+            Loaded[C] = 0;
+            Indexes[C] = 0;
+            if (Orders[C] == 2) Indexes[C]++; //Только старший
+            //Запрещаем счет
+            Counting[C] = 0;
+            //Устанавливаем OUT
+            unsigned int V = I8253_MODES[MODE_SET_OUT][Modes[C]];
+            i_output.change( (i_output.value & ~(1 << C)) | (V << C));
+        } else {
+            //Фиксация счетчиков для чтения
+            //Both bytes are latched at once: the Поиск-1 BIOS times the
+            //tape signal with the full count of channel 0
+            ReadData[C*2] = Counters[C*2];
+            ReadData[C*2+1] = Counters[C*2+1];
+            Latched[C] = 1;
+            Indexes[C] = 0;
+            //Следующие строки надо включить если окажется,
+            //что данные не всегда читаются по два, и нужно учесть влияние режима
+            //if (Orders[C] == 2) Indexes[C]++;
+        }
+    } else {
+        //counters. A count of two bytes reaches the counter whole, as on
+        //the chip: a reload between the two writes takes the old count, not
+        //the new low byte with the old high one
+        if (Orders[a] == 3 && Indexes[a] == 0)
+            LowByte[a] = static_cast<uint8_t>(value);
+        else if (Orders[a] == 3) {
+            StartData[a*2] = LowByte[a];
+            StartData[a*2+1] = static_cast<uint8_t>(value);
+        } else
+            StartData[a*2+Indexes[a]] = static_cast<uint8_t>(value);
+        Indexes[a] = Indexes[a] ^ 0x01;
+        //Если надо загрузить только один байт,
+        //или уже загружено два, запускаем процесс
+        if ((Orders[a] != 3) || (Indexes[a]==0))
+        {
+            Loaded[a] = 1;
+            //In modes 2 and 3 a count written while the channel runs waits for
+            //the next reload and leaves OUT alone. Restarting here flipped OUT
+            //on every write: the cassette BIOS of the Поиск-1 writes channel 2
+            //anew after each edge, and every bit got a spurious one
+            if (I8253_MODES[COUNTER_LOAD_AUTO_START][Modes[a]] != 0
+                && !(Counting[a] == 1 && (Modes[a] & 2) != 0))
+                NeedRestart[a] = 1;
+        };
+    }
+}
+
+void I8253::clock(const unsigned counter)
+{
+    if (!per_channel_clock && ext_clock_mask == 0) {
+        Count(0, counter);
+        Count(1, counter);
+        Count(2, counter);
+    } else {
+        for (int ch = 0; ch < 3; ch++) {
+            if (ext_clock_mask & (1u << ch)) continue;
+            if (ch_clock_multiplier[ch] == ch_clock_divider[ch]) {
+                Count(ch, counter);
+            } else {
+                ch_clock_stored[ch] += counter * ch_clock_multiplier[ch];
+                unsigned int ch_clock = ch_clock_stored[ch] / ch_clock_divider[ch];
+                if (ch_clock > 0) {
+                    Count(ch, ch_clock);
+                    ch_clock_stored[ch] -= ch_clock * ch_clock_divider[ch];
+                }
+            }
+        }
+    }
+}
+
+void I8253::interface_callback(unsigned callback_id, const unsigned new_value, const unsigned old_value)
+{
+    //Внешний такт: считаем фронты той линии, что подведена к каналу
+    if (callback_id == 2)
+    {
+        for (unsigned int A=0; A<3; A++)
+        {
+            if (!(ext_clock_mask & (1u << A))) continue;
+            const unsigned C0 = (old_value >> A) & 0x01;
+            const unsigned C1 = (new_value >> A) & 0x01;
+            if (C1 == 1 && C0 == 0) Count(A, 1);
+        }
+        return;
+    }
+
+    for (unsigned int A=0; A<3; A++)
+    {
+        const unsigned G0 = (old_value >> A) & 0x01;
+        const unsigned G1 = (new_value >> A) & 0x01;
+        if (G1!=G0)
+        {
+            if (G1==0)
+            {
+                SetOut(A, GATE_0_OUT);
+                if (I8253_MODES[GATE_0_STOP][Modes[A]] == 1) Counting[A] = 0;
+            } else {
+                //G1=1
+                Counting[A] = 1;
+                SetOut(A, GATE_01_OUT);
+                if (I8253_MODES[GATE_01_RESET][Modes[A]] == 1) Reload(A);
+            };
+            Gates[A] = G1;
+        };
+    };
+}
+
+void I8253::save_state(StateWriter &w)
+{
+    AddressableDevice::save_state(w);
+    w.array("modes", Modes, 3);
+    w.array("is_bcd", IsBCD, 3);
+    w.array("orders", Orders, 3);
+    w.array("indexes", Indexes, 3);
+    w.array("loaded", Loaded, 3);
+    w.array("counting", Counting, 3);
+    w.array("start_data", StartData, 6);
+    w.array("low_byte", LowByte, 3);
+    w.array("counters", Counters, 6);
+    w.array("read_data", ReadData, 6);
+    w.array("latched", Latched, 3);
+    w.array("gates", Gates, 3);
+    w.array("need_restart", NeedRestart, 3);
+    //Fractional phase of a divided channel clock, the same thing
+    //ComputerDevice::clock_stored is for the device as a whole
+    if (per_channel_clock) w.array("ch_clock_stored", ch_clock_stored, 3);
+}
+
+emulator::Result I8253::load_state(const StateReader &r)
+{
+    emulator::Result res = AddressableDevice::load_state(r);
+    if (!res) return res;
+    r.array("modes", Modes, 3);
+    r.array("is_bcd", IsBCD, 3);
+    r.array("orders", Orders, 3);
+    r.array("indexes", Indexes, 3);
+    r.array("loaded", Loaded, 3);
+    r.array("counting", Counting, 3);
+    r.array("start_data", StartData, 6);
+    r.array("low_byte", LowByte, 3);
+    r.array("counters", Counters, 6);
+    r.array("read_data", ReadData, 6);
+    r.array("latched", Latched, 3);
+    r.array("gates", Gates, 3);
+    r.array("need_restart", NeedRestart, 3);
+    r.array("ch_clock_stored", ch_clock_stored, 3);
+    return emulator::Result::ok();
+}
+
+std::vector<DeviceFieldInfo> I8253::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = AddressableDevice::get_device_fields();
+    r.push_back({"counters",    "Current values of the three counters",     false});
+    r.push_back({"start",       "Initial values of the three counters",     false});
+    r.push_back({"modes",       "Operating modes of the three channels",    false});
+    r.push_back({"outputs",     "State of the three output lines",          false});
+    r.push_back({"gates",       "State of the three gate inputs",           false});
+    return r;
+}
+
+bool I8253::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    //Counters are kept as low/high byte pairs, so they are joined back here
+    if (field == "counters" || field == "start")
+    {
+        const uint8_t * src = (field == "counters")?Counters:StartData;
+        out.numeric = true;
+        out.width = 16;
+        for (unsigned int i = 0; i < 3; i++)
+            out.values.push_back(src[i*2] + (src[i*2+1] << 8));
+        return true;
+    }
+
+    if (field == "modes" || field == "outputs" || field == "gates")
+    {
+        out.numeric = true;
+        for (unsigned int i = 0; i < 3; i++)
+        {
+            if (field == "modes")   out.values.push_back(Modes[i]);
+            else if (field == "gates") out.values.push_back(Gates[i]);
+            else out.values.push_back((i_output.value >> i) & 1);
+        }
+        return true;
+    }
+
+    return AddressableDevice::get_field(field, from, to, out);
+}
+
+ComputerDevice * create_i8253(InterfaceManager *im, EmulatorConfigDevice *cd)
+{
+    return new I8253(im, cd);
+}

@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Threading compatibility layer for MinGW 4.9.2
+
+#pragma once
+
+#include <cstdint>
+
+// Detection: MinGW < 5 ships Win32 threading model without std::thread/std::mutex.
+// Manual overrides allow testing either path on any compiler.
+#if defined(FORCE_QT_THREADING)
+    #define USE_QT_THREADING 1
+#elif defined(FORCE_STD_THREADING)
+    #define USE_QT_THREADING 0
+#elif defined(__MINGW32__) && defined(__GNUC__) && (__GNUC__ < 5)
+    #define USE_QT_THREADING 1
+#else
+    #define USE_QT_THREADING 0
+#endif
+
+#if defined(ECAT_SINGLE_THREAD)
+
+//frank-ecat: the microcontroller runs the emulator on one core, with no
+//threads: the locks are no-ops, an event is a flag, the clock is the platform's
+//(ecat_platform_now_ms / ecat_platform_sleep_ms, given by the firmware).
+//Emulator::run() and its threads are not used there.
+
+extern "C" uint64_t ecat_platform_now_ms(void);
+extern "C" void ecat_platform_sleep_ms(unsigned int ms);
+
+class compat_mutex
+{
+public:
+    void lock() {}
+    void unlock() {}
+    bool try_lock() { return true; }
+};
+
+class compat_event
+{
+public:
+    void set() { m_set = true; }
+    bool wait_ms(unsigned int ms)
+    {
+        if (!m_set && ms) ecat_platform_sleep_ms(ms);
+        const bool was = m_set;
+        m_set = false;
+        return was;
+    }
+private:
+    volatile bool m_set = false;
+};
+
+inline void compat_sleep_ms(unsigned int ms) { ecat_platform_sleep_ms(ms); }
+inline uint64_t compat_now_ms() { return ecat_platform_now_ms(); }
+
+typedef int compat_thread_id;
+inline compat_thread_id compat_this_thread_id() { return 1; }
+inline void compat_yield() {}
+
+#elif USE_QT_THREADING
+
+#include <functional>
+
+#include <QThread>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QElapsedTimer>
+#include <QWaitCondition>
+
+// QThread subclass that accepts a lambda, matching std::thread usage pattern.
+// Heap-allocated via create() because QThread is non-movable.
+class EmuThread : public QThread
+{
+public:
+    template<typename F>
+    static EmuThread* create(F&& func)
+    {
+        EmuThread* t = new EmuThread();
+        t->m_func = std::forward<F>(func);
+        t->start();
+        return t;
+    }
+
+    void join()
+    {
+        wait();
+    }
+
+private:
+    EmuThread() : QThread(nullptr) {}
+
+    void run() override
+    {
+        m_func();
+    }
+
+    std::function<void()> m_func;
+};
+
+typedef QMutex compat_mutex;
+
+// A flag one thread raises and another waits for, with a timeout. Unlike a
+// sleep, the wait ends the moment the flag goes up: Windows 11 may end
+// Sleep(1) only on its 15.6 ms tick, timeBeginPeriod(1) or not
+class compat_event
+{
+public:
+    void set()
+    {
+        QMutexLocker lock(&m_mutex);
+        m_set = true;
+        m_cond.wakeOne();
+    }
+    // True when the flag was up (and is now down again), false on the timeout
+    bool wait_ms(unsigned int ms)
+    {
+        QMutexLocker lock(&m_mutex);
+        if (!m_set) m_cond.wait(&m_mutex, ms);
+        const bool was = m_set;
+        m_set = false;
+        return was;
+    }
+private:
+    QMutex m_mutex;
+    QWaitCondition m_cond;
+    bool m_set = false;
+};
+
+// Wall clock helpers. An external driver waiting for a command to complete
+// needs a real timeout: emulated time stops when the CPU does, so a wait
+// counted in emulated milliseconds would never expire on a wedged machine
+inline void compat_sleep_ms(unsigned int ms)
+{
+    QThread::msleep(ms);
+}
+
+inline uint64_t compat_now_ms()
+{
+    static QElapsedTimer timer;
+    if (!timer.isValid()) timer.start();
+    return static_cast<uint64_t>(timer.elapsed());
+}
+
+typedef Qt::HANDLE compat_thread_id;
+
+inline compat_thread_id compat_this_thread_id()
+{
+    return QThread::currentThreadId();
+}
+
+inline void compat_yield()
+{
+    QThread::yieldCurrentThread();
+}
+
+#else // USE_QT_THREADING == 0
+
+#include <thread>
+#include <mutex>
+#include <chrono>
+#include <condition_variable>
+
+typedef std::mutex compat_mutex;
+
+// A flag one thread raises and another waits for, with a timeout. Unlike a
+// sleep, the wait ends the moment the flag goes up: Windows 11 may end
+// Sleep(1) only on its 15.6 ms tick, timeBeginPeriod(1) or not
+class compat_event
+{
+public:
+    void set()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_set = true;
+        }
+        m_cond.notify_one();
+    }
+    // True when the flag was up (and is now down again), false on the timeout
+    bool wait_ms(unsigned int ms)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cond.wait_for(lock, std::chrono::milliseconds(ms), [this]() { return m_set; });
+        const bool was = m_set;
+        m_set = false;
+        return was;
+    }
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cond;
+    bool m_set = false;
+};
+
+inline void compat_sleep_ms(unsigned int ms)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+inline uint64_t compat_now_ms()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+typedef std::thread::id compat_thread_id;
+
+inline compat_thread_id compat_this_thread_id()
+{
+    return std::this_thread::get_id();
+}
+
+inline void compat_yield()
+{
+    std::this_thread::yield();
+}
+
+#endif
+
+// RAII lock guard for compat_mutex
+class compat_lock_guard
+{
+public:
+    explicit compat_lock_guard(compat_mutex & m) : m_mutex(m) { m_mutex.lock(); }
+    ~compat_lock_guard() { m_mutex.unlock(); }
+private:
+    compat_mutex & m_mutex;
+    compat_lock_guard(const compat_lock_guard &);
+    compat_lock_guard & operator=(const compat_lock_guard &);
+};

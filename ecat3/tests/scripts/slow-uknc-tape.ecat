@@ -1,0 +1,76 @@
+# УК-НЦ: полный оборот ленты в кассетном Бейсике (картридж romctr_basic.bin).
+#
+# Программа пишется на ленту командой SAVE, снятый сигнал сохраняется файлом
+# .uknc.tap, программа стирается командой NEW, лента перезаряжается этим файлом и
+# читается обратно командой LOAD. Файл сравнивается с эталоном, так что тест
+# ловит и ошибки распознавания сигнала, и ошибки кодирования, а LOAD - ещё и
+# контрольную сумму, которую ПЗУ проверяет после данных.
+#
+# Программа длиннее 128 слов: Бейсик пишет файл с её началом и блоки без
+# заголовка с остальным (функции 020 и 021 драйвера), здесь их два.
+#
+# Магнитофоном занимается ПЗУ периферийного процессора: запись - переключение
+# разряда 1 регистра 177716 из прерывания таймера по нулю, чтение - перепады на
+# входе, которые таймер ловит как внешнее событие (вектор 310) и отдаёт время
+# между ними регистром 177714.
+# @timeout 120
+
+MACHINE "uknc/UKNC-basic.ext"
+LOGDEFS _16,_8
+
+WAIT _12000
+# Бейсик - кассета ПЗУ 1 варианта машины без винчестера
+KEY _100,_100,2
+WAIT _200
+KEY _100,_100,ret
+WAIT _15000
+
+TYPE "10 FOR I=1 TO 3\n"
+WAIT _500
+TYPE "20 PRINT I,I*I\n"
+WAIT _500
+TYPE "30 NEXT I\n"
+WAIT _500
+TYPE "40 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "50 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "60 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "70 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "80 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "90 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "100 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+TYPE "110 REM ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+WAIT _500
+
+PRINT "=== Запись на ленту ==="
+COMMAND tape.record(1)
+TYPE "SAVE \"TST\"\n"
+WAIT _30000
+COMMAND tape.record(0)
+LOG tape.recorded
+COMMAND tape.save("../results/slow-uknc-tape.uknc.tap")
+
+PRINT "=== Чтение обратно ==="
+TYPE "NEW\n"
+WAIT _500
+COMMAND tape.load("../results/slow-uknc-tape.uknc.tap")
+LOG tape.size
+TYPE "LOAD \"TST\"\n"
+WAIT _500
+COMMAND tape.play()
+WAITFOR tape.mode == 0, _60000
+WAIT _1000
+LOG pp-timer.events
+
+TYPE "LIST\n"
+WAIT _1000
+TYPE "RUN\n"
+WAIT _1500
+SCREEN "../results/slow-uknc-tape.png"
+EXIT

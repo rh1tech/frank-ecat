@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Software Qt renderer
+
+#pragma once
+
+#include <QLabel>
+#include <QPainter>
+#include <QMutex>
+#include "emulator/renderer.h"
+
+class QtRenderWidget : public QLabel
+{
+private:
+    QImage display_image;
+    mutable QMutex image_mutex;
+
+public:
+    QtRenderWidget(QWidget *parent = nullptr) : QLabel(parent) {}
+
+    //Called from the emulator's render thread: the image is handed over under
+    //the mutex, and the repaint is asked for on the thread that owns the widget
+    void set_image(const QImage& image)
+    {
+        {
+            QMutexLocker locker(&image_mutex);
+            display_image = image;
+        }
+        QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+    }
+
+    //The scaled picture the widget draws, GUI thread
+    QImage displayed_image() const
+    {
+        QMutexLocker locker(&image_mutex);
+        return display_image;
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QMutexLocker locker(&image_mutex);
+        if (display_image.isNull()) {
+            locker.unlock();
+            QLabel::paintEvent(event);
+            return;
+        }
+
+        QImage temp_image = display_image;
+        locker.unlock();
+
+        QPainter painter(this);
+        const QRect r(
+        (width() - temp_image.width()) / 2,
+        (height() - temp_image.height()) / 2,
+        temp_image.width(),
+        temp_image.height()
+        );
+        painter.drawImage(r, temp_image);
+    }
+};
+
+class QtRenderer: public VideoRenderer
+{
+private:
+    QImage * surface = nullptr;
+    QtRenderWidget * widget = nullptr;
+    QImage current_display;
+    QImage blended;             //The picture shown when frames are blended
+    int render_w;
+    int render_h;
+    int filtering;
+
+public:
+    QtRenderer():
+        VideoRenderer()
+    {};
+
+    std::string get_name() override
+    {
+        return "Qt";
+    }
+
+    virtual ~QtRenderer() override
+    {
+        if (surface != nullptr) delete surface;
+    };
+
+    void init_screen(void *p, int sx, int sy, double ss, double ps) override
+    {
+        VideoRenderer::init_screen(p, sx, sy, ss, ps);
+        widget = reinterpret_cast<QtRenderWidget *>(p);
+        resize(sx, sy, ss, ps);
+    }
+
+    void stop() override
+    {
+        if (surface != nullptr) delete surface;
+        surface = nullptr;
+    }
+
+    void set_filtering(int value) override
+    {
+        filtering = value;
+    }
+
+    uint8_t * get_buffer() override
+    {
+        if (surface == nullptr) return nullptr;
+        return reinterpret_cast<uint8_t *>(surface->bits());
+    }
+
+    int get_line_bytes() override
+    {
+        return screen_x * 4;
+    }
+
+    void fill(uint32_t c) override
+    {
+        if (surface == nullptr) return;
+        surface->fill(Qt::black);
+    }
+
+    void resize(int sx, int sy, double ss, double ps) override
+    {
+        if (surface != nullptr) delete surface;
+        screen_x = sx;
+        screen_y = sy;
+        screen_ss = ss;
+        screen_ps = ps;
+        surface = new QImage(sx, sy, QImage::Format_RGB32);
+        surface->fill(Qt::black);
+        blended = QImage(sx, sy, QImage::Format_RGB32);
+    }
+
+    void render() override
+    {
+        if (surface == nullptr || widget == nullptr) {
+            return;
+        }
+
+        int rx = widget->width();
+        int ry = widget->height();
+        if (screen_ss == 0) {
+            int border = 20;
+            int rx2 = rx - 2*border;
+            int ry2 = ry - 2*border;
+            float screen_aspect = (float)rx2 / ry2;
+            float image_aspect = (float)screen_x / screen_y * screen_ps;
+
+            if (screen_aspect > image_aspect) {
+                // The window is wider than the picture, the height is the limit
+                render_h = ry2;
+                render_w = (float)ry2 * image_aspect;
+            } else {
+                // The width is the limit
+                render_w = rx2;
+                render_h = (float)rx2 / image_aspect;
+            }
+        } else {
+            render_w = screen_x * screen_ss * screen_ps;
+            render_h = screen_y * screen_ss;
+        }
+
+        if (render_w <= 0 || render_h <= 0) {
+            return;
+        }
+
+        // QImage copy = surface->copy();
+        const QImage * picture = surface;
+        if (blend_frame(surface->constBits(), blended.bits())) picture = &blended;
+        current_display = picture->scaled(
+            render_w, render_h,
+            Qt::IgnoreAspectRatio,
+            (filtering==0)?Qt::FastTransformation:Qt::SmoothTransformation
+            );
+        widget->set_image(current_display);
+    }
+
+    uint32_t MapRGB(uint8_t R, uint8_t G, uint8_t B) override
+    {
+        return 0xFF000000 | (R << 16) | (G << 8) | B;
+    }
+
+    std::vector<uint8_t> get_screenshot() override
+    {
+        std::vector<uint8_t> image;
+        if (surface == nullptr) {
+            return image;
+        }
+        int image_size = screen_x * screen_y * 4;
+        // constBits(), not bits(): the widget holds an implicitly shared copy of
+        // this image, and the non-const bits() would detach it, writing to the
+        // shared reference counter from this thread while the GUI thread reads it
+        const uint8_t * pixels = surface->constBits();
+        image.insert(image.end(), pixels, pixels + image_size);
+        // QImage has a reversed RGB order, so we need to swap R and B parts
+        for (int i=0; i < image_size; i+=4) {
+            uint8_t R = image[i + 2];
+            image[i+2] = image[i];
+            image[i] = R;
+        }
+        return image;
+    }
+
+
+};

@@ -1,0 +1,623 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>901</width>
+    <height>655</height>
+   </rect>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
+  </property>
+  <property name="windowTitle">
+   <string notr="true">MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <property name="sizePolicy">
+    <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+     <horstretch>0</horstretch>
+     <verstretch>0</verstretch>
+    </sizepolicy>
+   </property>
+   <property name="maximumSize">
+    <size>
+     <width>16777215</width>
+     <height>16777215</height>
+    </size>
+   </property>
+   <layout class="QHBoxLayout" name="horizontalLayout">
+    <property name="leftMargin">
+     <number>0</number>
+    </property>
+    <property name="topMargin">
+     <number>0</number>
+    </property>
+    <property name="rightMargin">
+     <number>0</number>
+    </property>
+    <property name="bottomMargin">
+     <number>0</number>
+    </property>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>901</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuFile">
+    <property name="geometry">
+     <rect>
+      <x>275</x>
+      <y>96</y>
+      <width>142</width>
+      <height>117</height>
+     </rect>
+    </property>
+    <property name="title">
+     <string>File</string>
+    </property>
+    <addaction name="action_Select_a_machine"/>
+    <addaction name="separator"/>
+    <addaction name="actionOpen"/>
+    <addaction name="separator"/>
+    <addaction name="actionSaveState"/>
+    <addaction name="action_Exit"/>
+   </widget>
+   <widget class="QMenu" name="menuEmulation">
+    <property name="title">
+     <string>Emulation</string>
+    </property>
+    <widget class="QMenu" name="menuRecording">
+     <property name="title">
+      <string>Action recording</string>
+     </property>
+     <property name="icon">
+      <iconset resource="resources.qrc">
+       <normaloff>:/icons/record</normaloff>:/icons/record</iconset>
+     </property>
+     <addaction name="actionRecOpen"/>
+     <addaction name="actionRecSave"/>
+     <addaction name="separator"/>
+     <addaction name="actionRecord"/>
+     <addaction name="actionRecPlay"/>
+     <addaction name="actionRecRewind"/>
+     <addaction name="actionRecStop"/>
+    </widget>
+    <addaction name="action_Cold_restart"/>
+    <addaction name="action_Soft_restart"/>
+    <addaction name="actionTape"/>
+    <addaction name="actionKeyboard"/>
+    <addaction name="actionPasteText"/>
+    <addaction name="actionSerial"/>
+    <addaction name="menuRecording"/>
+   </widget>
+   <widget class="QMenu" name="menuDebug">
+    <property name="title">
+     <string>Debug</string>
+    </property>
+    <widget class="QMenu" name="menuDevices">
+     <property name="title">
+      <string>Devices</string>
+     </property>
+     <property name="icon">
+      <iconset resource="resources.qrc">
+       <normaloff>:/icons/devices</normaloff>:/icons/devices</iconset>
+     </property>
+     <addaction name="actionDevice_one"/>
+    </widget>
+    <addaction name="actionDebugger"/>
+    <addaction name="actionDumps"/>
+    <addaction name="separator"/>
+    <addaction name="menuDevices"/>
+   </widget>
+   <widget class="QMenu" name="menuHelp">
+    <property name="title">
+     <string>Settings</string>
+    </property>
+    <widget class="QMenu" name="menuDisks">
+     <property name="title">
+      <string>Disks</string>
+     </property>
+     <addaction name="actionDiskAutosave"/>
+     <addaction name="actionDiskBackups"/>
+     <addaction name="separator"/>
+     <addaction name="actionRememberDisks"/>
+     <addaction name="actionForgetDisks"/>
+    </widget>
+    <addaction name="actionLanguage"/>
+    <addaction name="actionRecPanel"/>
+    <addaction name="separator"/>
+    <addaction name="menuDisks"/>
+    <addaction name="separator"/>
+    <addaction name="actionAbout"/>
+   </widget>
+   <widget class="QMenu" name="menuDisplay">
+    <property name="title">
+     <string>Display</string>
+    </property>
+    <widget class="QMenu" name="menuScale">
+     <property name="title">
+      <string>Scale</string>
+     </property>
+     <addaction name="actionScale_one"/>
+    </widget>
+    <widget class="QMenu" name="menuScreen_ratio">
+     <property name="title">
+      <string>Screen ratio</string>
+     </property>
+     <addaction name="actionRatio_one"/>
+    </widget>
+    <widget class="QMenu" name="menuFiltering">
+     <property name="title">
+      <string>Filtering</string>
+     </property>
+     <addaction name="actionFilter_one"/>
+    </widget>
+    <widget class="QMenu" name="menuPersistence">
+     <property name="title">
+      <string>Persistence</string>
+     </property>
+     <addaction name="actionPersistence_one"/>
+    </widget>
+    <addaction name="actionScreenshot"/>
+    <addaction name="actionVideo"/>
+    <addaction name="menuScale"/>
+    <addaction name="menuScreen_ratio"/>
+    <addaction name="menuFiltering"/>
+    <addaction name="actionBlendFrames"/>
+    <addaction name="menuPersistence"/>
+   </widget>
+   <addaction name="menuFile"/>
+   <addaction name="menuEmulation"/>
+   <addaction name="menuDebug"/>
+   <addaction name="menuDisplay"/>
+   <addaction name="menuHelp"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+  <widget class="QToolBar" name="toolBar">
+   <property name="windowTitle">
+    <string notr="true">toolBar</string>
+   </property>
+   <property name="allowedAreas">
+    <set>Qt::ToolBarArea::LeftToolBarArea|Qt::ToolBarArea::TopToolBarArea</set>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>32</width>
+     <height>32</height>
+    </size>
+   </property>
+   <property name="toolButtonStyle">
+    <enum>Qt::ToolButtonStyle::ToolButtonIconOnly</enum>
+   </property>
+   <property name="floatable">
+    <bool>true</bool>
+   </property>
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+   <addaction name="action_Select_a_machine"/>
+   <addaction name="actionOpen"/>
+   <addaction name="separator"/>
+   <addaction name="action_Cold_restart"/>
+   <addaction name="action_Soft_restart"/>
+   <addaction name="actionCPUState"/>
+   <addaction name="separator"/>
+   <addaction name="actionSaveState"/>
+   <addaction name="actionScreenshot"/>
+   <addaction name="actionVideo"/>
+  </widget>
+  <action name="action_Select_a_machine">
+   <property name="enabled">
+    <bool>true</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/tv</normaloff>:/icons/tv</iconset>
+   </property>
+   <property name="text">
+    <string>Select a machine...</string>
+   </property>
+  </action>
+  <action name="action_Exit">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/exit</normaloff>:/icons/exit</iconset>
+   </property>
+   <property name="text">
+    <string>Exit</string>
+   </property>
+  </action>
+  <action name="action_Cold_restart">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/power</normaloff>:/icons/power</iconset>
+   </property>
+   <property name="text">
+    <string>Cold restart</string>
+   </property>
+  </action>
+  <action name="action_Soft_restart">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/reload</normaloff>:/icons/reload</iconset>
+   </property>
+   <property name="text">
+    <string>Soft restart</string>
+   </property>
+  </action>
+  <action name="actionCPUState">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/pause</normaloff>:/icons/pause</iconset>
+   </property>
+   <property name="text">
+    <string>Stop</string>
+   </property>
+   <property name="toolTip">
+    <string>Stop</string>
+   </property>
+  </action>
+  <action name="actionDevice_one">
+   <property name="text">
+    <string notr="true">Device_one</string>
+   </property>
+  </action>
+  <action name="actionOpen">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/open</normaloff>:/icons/open</iconset>
+   </property>
+   <property name="text">
+    <string>Open...</string>
+   </property>
+  </action>
+  <action name="actionSaveState">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/savestate</normaloff>:/icons/savestate</iconset>
+   </property>
+   <property name="text">
+    <string>Save state...</string>
+   </property>
+   <property name="toolTip">
+    <string>Save the state of the machine</string>
+   </property>
+  </action>
+  <action name="actionDebugger">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/terminal</normaloff>:/icons/terminal</iconset>
+   </property>
+   <property name="text">
+    <string>Debugger</string>
+   </property>
+   <property name="toolTip">
+    <string>Open debugger</string>
+   </property>
+  </action>
+  <action name="actionDumps">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/binary</normaloff>:/icons/binary</iconset>
+   </property>
+   <property name="text">
+    <string>Dumps</string>
+   </property>
+   <property name="toolTip">
+    <string>Memory dumps of the machine</string>
+   </property>
+  </action>
+  <action name="actionScreenshot">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/screenshot</normaloff>:/icons/screenshot</iconset>
+   </property>
+   <property name="text">
+    <string>Screenshot</string>
+   </property>
+   <property name="toolTip">
+    <string>Get a screenshot</string>
+   </property>
+  </action>
+  <action name="actionVideo">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/video</normaloff>:/icons/video</iconset>
+   </property>
+   <property name="text">
+    <string>Record video</string>
+   </property>
+   <property name="toolTip">
+    <string>Record video</string>
+   </property>
+  </action>
+  <action name="actionAbout">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/about</normaloff>:/icons/about</iconset>
+   </property>
+   <property name="text">
+    <string>About...</string>
+   </property>
+  </action>
+  <action name="actionScale_one">
+   <property name="text">
+    <string notr="true">Scale_one</string>
+   </property>
+  </action>
+  <action name="actionRatio_one">
+   <property name="text">
+    <string notr="true">Ratio one</string>
+   </property>
+  </action>
+  <action name="actionFilter_one">
+   <property name="text">
+    <string notr="true">Filter one</string>
+   </property>
+  </action>
+  <action name="actionPersistence_one">
+   <property name="text">
+    <string notr="true">Persistence one</string>
+   </property>
+  </action>
+  <action name="actionTape">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/tape</normaloff>:/icons/tape</iconset>
+   </property>
+   <property name="text">
+    <string>Tape</string>
+   </property>
+   <property name="toolTip">
+    <string>Tape recorder</string>
+   </property>
+   <property name="visible">
+    <bool>false</bool>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::TextHeuristicRole</enum>
+   </property>
+  </action>
+  <action name="actionKeyboard">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/keyboard</normaloff>:/icons/keyboard</iconset>
+   </property>
+   <property name="text">
+    <string>Keyboard</string>
+   </property>
+   <property name="toolTip">
+    <string>On-screen keyboard</string>
+   </property>
+   <property name="visible">
+    <bool>false</bool>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::TextHeuristicRole</enum>
+   </property>
+  </action>
+  <action name="actionSerial">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/log</normaloff>:/icons/log</iconset>
+   </property>
+   <property name="text">
+    <string>I/O ports...</string>
+   </property>
+   <property name="visible">
+    <bool>false</bool>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::TextHeuristicRole</enum>
+   </property>
+  </action>
+  <action name="actionRecOpen">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/rec_open</normaloff>:/icons/rec_open</iconset>
+   </property>
+   <property name="text">
+    <string>Open recording...</string>
+   </property>
+   <property name="toolTip">
+    <string>Open a recording</string>
+   </property>
+  </action>
+  <action name="actionRecSave">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/file_save</normaloff>:/icons/file_save</iconset>
+   </property>
+   <property name="text">
+    <string>Save recording...</string>
+   </property>
+   <property name="toolTip">
+    <string>Save the recording</string>
+   </property>
+  </action>
+  <action name="actionRecord">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/record</normaloff>:/icons/record</iconset>
+   </property>
+   <property name="text">
+    <string>Start recording</string>
+   </property>
+   <property name="toolTip">
+    <string>Start recording</string>
+   </property>
+  </action>
+  <action name="actionRecPlay">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/play</normaloff>:/icons/play</iconset>
+   </property>
+   <property name="text">
+    <string>Play recording</string>
+   </property>
+   <property name="toolTip">
+    <string>Play the recording</string>
+   </property>
+  </action>
+  <action name="actionRecRewind">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/rewind</normaloff>:/icons/rewind</iconset>
+   </property>
+   <property name="text">
+    <string>Rewind recording</string>
+   </property>
+   <property name="toolTip">
+    <string>Rewind to the beginning</string>
+   </property>
+  </action>
+  <action name="actionRecStop">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/stop</normaloff>:/icons/stop</iconset>
+   </property>
+   <property name="text">
+    <string>Stop recording/playback</string>
+   </property>
+   <property name="toolTip">
+    <string>Stop recording or playback</string>
+   </property>
+  </action>
+  <action name="actionRecPanel">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Recording panel</string>
+   </property>
+   <property name="toolTip">
+    <string>Show the recording buttons on the tool bar</string>
+   </property>
+  </action>
+  <action name="actionBlendFrames">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Blend frames</string>
+   </property>
+   <property name="toolTip">
+    <string>Pictures a program alternates from frame to frame are shown as a steady mix instead of a flicker: every point is the mean of its colour and the previous different one</string>
+   </property>
+  </action>
+  <action name="actionDiskAutosave">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Autosave</string>
+   </property>
+   <property name="toolTip">
+    <string>Write a changed disk into its image file when the drive lamp goes out</string>
+   </property>
+  </action>
+  <action name="actionDiskBackups">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Backups</string>
+   </property>
+   <property name="toolTip">
+    <string>Keep the previous image file, with the time in its name, on the first autosave of a disk. The images that come with the program are always kept</string>
+   </property>
+  </action>
+  <action name="actionRememberDisks">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Remember choice</string>
+   </property>
+   <property name="toolTip">
+    <string>Put the disks chosen last into the drives when a machine is loaded</string>
+   </property>
+  </action>
+  <action name="actionFastPaste">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Fast paste</string>
+   </property>
+   <property name="toolTip">
+    <string>Paste text typing a key every 100 ms instead of every 200 ms</string>
+   </property>
+  </action>
+  <action name="actionPasteText">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/paste</normaloff>:/icons/paste</iconset>
+   </property>
+   <property name="text">
+    <string>Paste text</string>
+   </property>
+   <property name="toolTip">
+    <string>Type the text from the clipboard on the machine's keyboard</string>
+   </property>
+  </action>
+  <action name="actionForgetDisks">
+   <property name="text">
+    <string>Forget all chosen</string>
+   </property>
+  </action>
+  <action name="actionLanguage">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/icons/language</normaloff>:/icons/language</iconset>
+   </property>
+   <property name="text">
+    <string>Language</string>
+   </property>
+  </action>
+ </widget>
+ <resources>
+  <include location="resources.qrc"/>
+ </resources>
+ <connections/>
+</ui>

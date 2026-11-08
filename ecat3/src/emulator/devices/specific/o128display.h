@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Orion-128 display controller device
+
+#pragma once
+
+#include "emulator/core.h"
+
+class O128Display: public GenericDisplay
+{
+private:
+    unsigned int mode;
+    unsigned int frame;
+    unsigned int base_address;
+
+    Port * port_mode;
+    Port * port_frame;
+
+    //The ports call back on a write (follow_port); polled only when they cannot
+    Interface i_mode_data;
+    Interface i_frame_data;
+    bool m_poll_ports = false;
+    void apply_ports();
+    RAM * page_main;
+    RAM * page_color;
+
+    //Palettes in the pixel format of the renderer, built once in set_renderer().
+    //render_all() repaints 0x3000 bytes - 98304 pixels - on every write to the
+    //video memory, and MapRGB() is a virtual call
+    uint32_t rgba_mono[4];
+    uint32_t rgba_4colors[8];
+    uint32_t rgba_16colors[16];
+
+    void render_byte(unsigned int address);
+
+protected:
+    virtual void render_all(bool force_render) override;
+
+public:
+    O128Display(InterfaceManager *im, EmulatorConfigDevice *cd);
+
+    virtual void clock(unsigned int counter) override;
+    void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
+    void state_restored() override;
+    virtual emulator::Result load_config(SystemData *sd) override;
+    void set_renderer(VideoRenderer &vr) override;
+
+    virtual void memory_callback(unsigned int callback_id, unsigned int address) override;
+
+    virtual void get_screen_constraints(unsigned int * sx, unsigned int * sy) override;
+
+    std::vector<DeviceFieldInfo> get_device_fields() override;
+    bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;
+    void save_state(StateWriter &w) override;
+    emulator::Result load_state(const StateReader &r) override;
+};
+
+ComputerDevice * create_o128display(InterfaceManager *im, EmulatorConfigDevice *cd);

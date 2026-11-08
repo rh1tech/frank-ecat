@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2026 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Configuration defines
+
+#pragma once
+
+#define PROJECT_NAME "@PROJECT_NAME@"
+#define VERSION_MAJOR "@PROJECT_VERSION_MAJOR@"
+#define VERSION_MINOR "@PROJECT_VERSION_MINOR@"
+#define VERSION_PATCH "@PROJECT_VERSION_PATCH@"
+#define PROJECT_VERSION "@ECAT_VERSION@"
+
+#cmakedefine EXTERNAL_Z80
+#cmakedefine CPU_STOPPED
+
+// Fallback for translation markers when building without QObject
+#ifndef QT_TRANSLATE_NOOP
+#define QT_TRANSLATE_NOOP(scope, x) x
+#endif

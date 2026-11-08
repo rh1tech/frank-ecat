@@ -1,0 +1,52 @@
+# frank-ecat
+#
+# Note: the vendored eCat3 tree (ecat3/) ships data named *.map (keyboard maps),
+# *.dis (disassembler tables), *.bin, *.hex and *.log as machine files, so the
+# build-output patterns below are anchored to this repository's own tree.
+
+# Build trees (firmware, host console builds), generated release images
+/build*/
+/release/
+/*.uf2
+/*.elf
+/*.bin
+/*.hex
+/*.map
+/*.dis
+
+# CMake outside a build tree
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+cmake-build-*/
+
+# eCat3 (as upstream ignores them, ecat3/.gitignore there):
+# test run results, the developer's settings written from deploy/.ecat.ini,
+# user configurations, the software library, the generated globals.h
+/ecat3/tests/results/
+/ecat3/deploy/ecat.ini
+/ecat3/deploy/ecat-exts/
+/ecat3/library/
+/ecat3/src/globals.h
+ecat3-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Logs and captures
+/*.log
+openocd.log
+screenlog.0
+/captures/
+
+# Editors and systems
+.vscode/
+.idea/
+.DS_Store
+.DS_Store?
+._*
+.Trashes
+Thumbs.db
+*~

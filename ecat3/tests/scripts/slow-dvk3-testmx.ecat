@@ -1,0 +1,59 @@
+# ДВК-3: старый заводской тест КНГМД MX TESTMX (с системного диска MY) на
+# пустой дискете во втором приводе: тип накопителя 1 (НГМД-6022, МС5301,
+# МС5306 - 40 дорожек), разметка F и комплекс L: запись и чтение случайных
+# чисел, поиск дорожек, период вращения, время перемещения и подвода головок.
+#
+# F пишет каждый цилиндр с разрядом 12 MXCS (верхняя сторона) и проверяет
+# чтением обеих сторон: на двустороннем приводе проходит, на одностороннем
+# (головка одна, линию стороны он не слушает) - «ошибка стороны дискеты».
+# @timeout 900
+MACHINE "dvk/DVK-3.cfg"
+COMMAND mx1.load("../files/mx-blank.img")
+WAIT _2000
+KEY _100,_50,ret
+WAIT _300
+TYPE "BMY"
+KEY _100,_50,ret
+WAIT _20000
+KEY _100,_50,ret
+WAIT _1000
+COMMAND panel.option(1,0)
+TYPE "R TESTMX"
+KEY _100,_50,ret
+WAIT _5000
+# Тип накопителя 1, привод 1
+TYPE "1"
+KEY _100,_50,ret
+WAIT _2000
+TYPE "1"
+KEY _100,_50,ret
+WAIT _3000
+TYPE "F"
+WAIT _60000
+TYPE "L"
+WAIT _300000
+
+LOGDEFS _16,_8
+LOG mx.writes
+LOG mx.underruns
+# Хвост последней дорожки, как её разметил тест: после 11 секторов одно
+# слово дорожка * 2 + сторона (000116), не три слова RT-11. Дорожки лежат на
+# диске слово в слово, и .mfm хранит их без потерь: после сохранения и
+# загрузки хвост тот же (плоский .dsk пересобрал бы его по образцу RT-11)
+PRINT "=== Хвост дорожки 39 ==="
+LOG mx.disk(_1424,_1434)
+COMMAND mx1.save("../../tests/results/slow-dvk3-testmx.mfm")
+COMMAND mx1.eject()
+COMMAND mx1.load("../../tests/results/slow-dvk3-testmx.mfm")
+PRINT "=== Он же после .mfm ==="
+LOG mx.disk(_1424,_1434)
+PRINT "=== После .hfe: дорожки и пометки те же (checksum) ==="
+LOG mx1.checksum
+COMMAND mx1.save("../../tests/results/slow-dvk3-testmx.hfe")
+COMMAND mx1.eject()
+COMMAND mx1.load("../../tests/results/slow-dvk3-testmx.hfe")
+LOG mx1.checksum
+LOG mx.disk(_1424,_1434)
+PRINT "=== Экран ==="
+LOG display.text
+EXIT

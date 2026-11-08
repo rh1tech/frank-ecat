@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# frank-ecat — eCat3 (retro computers emulator) on RP2350 (FRANK M2)
+#
+# Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+# https://github.com/rh1tech/frank-ecat
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# commit-msg — refuse a commit whose message or identity credits an AI.
+#
+# The first of several gates and not the strongest: it only protects a
+# clone that has opted in with tools/install-hooks.sh, and it never runs
+# for a commit authored through GitHub's web surface.
+#
+# Bypass, if you genuinely must:  git commit --no-verify
+# (pre-push will still catch it before it leaves the machine.)
+
+set -uo pipefail
+exec "$(git rev-parse --show-toplevel)/tools/check-attribution.sh" --message "$1"

@@ -1,0 +1,35 @@
+[my.commands] &000052
+=== Сектора с меткой удаления ===
+[my1.deleted] &000200
+[my1.deleted] &000200
+=== После .hfe: дорожки и пометки те же (checksum) ===
+[my1.checksum] &32102610107
+[my1.checksum] &32102610107
+[my1.deleted] &000200
+=== Экран ===
+[display.text] 
+                             lin  rus  wr             9600  0 0 0  0 0 0  0 0 1
+        t e s t   k m d   i   n g m d
+
+                   ustanowka parametrow
+                   formatirowanie
+              ---> funkcionalxnyj test
+                   zapisx
+                   ~tenie
+                   wybor ustrojstwa
+
+
+
+--------------------------------------------------------------------------------
+test samodiagnostiki.
+wybor dorovki.
+~tenie zagolowka.
+zapisx.
+~tenie.
+~tenie dorovki.
+zapisx s metkoj.
+~tenie s metkoj.
+otrabotka IE.otrabotka RESET   prohod  1
+
+
+

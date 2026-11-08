@@ -1,0 +1,66 @@
+// Агат-9 с ячейкой звукового синтеза 5/2 (ЯЗС) в слоте 1 ($C090-$C09F) и
+// двумя дисководами: 840 Кб на контроллере слота 5 и 140 Кб на контроллере
+// слота 6 ($C0E0-$C0EF, загрузчик в $C600).
+@extends agat/Agat-9.cfg
+@version Агат-9 (ЯЗС)
+@protected
+
+fdd0:image = music-d.dsk
+
+// Прерывание ячейки - открытый коллектор на линии IRQ: ячейка берет линию
+// остальной машины и выдает процессору обе
+cpu:~irq = yazs.irq
+
+// Звук ячейки подмешивается к динамику; ячейка объявлена раньше динамика,
+// чтобы считать свой отрезок времени до того, как он его выслушает
+sound:mix = yazs
+// Ударный 7 шипит на 6-13 кГц, а фильтр динамика по умолчанию режет выше 5 кГц,
+// и звуковое устройство по умолчанию открывается на 22050 Гц - без верхов выше 11 кГц.
+// Срез 10 кГц оставляет шипение, но приглушает его самые резкие верха
+sound:lpf = 16000
+// Срез фильтра виден в редакторе конфигурации (у остальных машин - нет)
+sound:lpf_editable = 1
+sound:sample_rate = 44100
+// Громкость ячейки по умолчанию 400: громкие места с ударными выходят за шкалу,
+// и ограничитель их мягко сжимает, а не срезает
+sound:limiter = 1
+
+@before sound
+yazs : agat-yazs {
+	~irq_in = display.500hz
+}
+
+@before display
+boot140 : rom {
+	size = 256
+	image = flop140.boot.v2.bin
+}
+
+fdc140 : agat-fdc140 {
+	drives = fdd1
+	speed_mode = fast
+	soft_reset = 0
+}
+
+fdd1 : fdd {
+	title = 140K
+	sides = 1
+	tracks = 35
+	sectors = 16
+	sector_size = 256
+	mode = mfm_agat_140
+	image = IKP7_140.dsk
+	files = "All formats (*.dsk *.do *.po *.mfm *.nic *.nib *.hfe);;Disk images 140K (*.dsk *.do *.po);;HXC MFM (*.mfm);;NIB (*.nib);;NIC (*.nic);;HxC Floppy Emulator (*.hfe)"
+	files_save = "Disk images 140K (*.dsk *.do *.po);;HXC MFM (*.mfm);;HxC Floppy Emulator (*.hfe)"
+	selector_value = 0
+	soft_reset = 0
+	~select  = fdc140.select[0-1]
+	~motor_on = !fdc140.motor_on
+}
+
+@before mapper:@memory[$C0D0-$C0DF]
+mapper:@memory[$C090-$C09F] = yazs
+mapper:@memory[$C0E0-$C0EF] = fdc140
+
+@before mapper:@memory[$C700-$C7FF]
+mapper:@memory[$C600-$C6FF] = boot140 {mode = r}

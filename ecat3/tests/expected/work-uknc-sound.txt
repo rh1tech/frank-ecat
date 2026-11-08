@@ -1,0 +1,57 @@
+=== в покое звука нет ===
+[sound.control] &000000
+[sound.level] &000000
+=== нажатие клавиши щёлкает динамиком ===
+[sound.control] &000001
+[sound.level] &000001
+[sound.control] &000000
+=== разряды 7 и 8: тон нижнего отвода, полупериод 8.2 мс ===
+[pp-timer.period] &000020
+[sound.control] &000003
+[sound.level] &000001
+[sound.level] &000000
+[sound.level] &000001
+[sound.level] &000000
+=== уставка двигает тон: до отвода 9 счётчик не доходит ===
+[pp-timer.reload] &000777
+[sound.level] &000000
+[sound.level] &000000
+[sound.level] &000001
+=== полная уставка возвращает тон ===
+[sound.level] &000001
+[sound.level] &000000
+[sound.level] &000001
+=== разряд 7 в нуле глушит сетку ===
+[sound.control] &000002
+[sound.level] &000000
+[sound.level] &000000
+[sound.level] &000000
+=== Covox на порту A параллельного порта ===
+[lpt.device] covox
+[covox.plugged] &000001
+[pp-printer.a] &000200
+[covox.value] &000177
+[pp-printer.a] &000377
+[covox.value] &000000
+[pp-printer.a] &000000
+[covox.value] &000377
+=== вынутый из гнезда ЦАП молчит ===
+[lpt.device] none
+[covox.plugged] &000000
+=== звуковой модуль: пока он молчит, в миксе его нет ===
+[sound.mixed] -
+=== AY2: слово выбирает регистр, байт пишет данные ===
+[asm-ay2.register] &000010
+[asm-ay2.regs] &000007: &077 &017
+[asm-ay2.level] &001750
+AY2 зазвучал и занял долю, AY1 и AY3 - нет
+[sound.mixed] asm-ay2
+чтение регистров модуля даёт 0
+[ppu-mapper.value16] &177362: &000000
+=== ЦАП модуля: байт без инверсии ===
+[asm-dac.value] &000200
+[sound.mixed] asm-ay2 asm-dac
+сброс возвращает модуль в молчание
+[asm-ay2.regs] &000007: &000 &000
+[asm-dac.value] &000000
+[sound.mixed] -

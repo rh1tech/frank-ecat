@@ -1,0 +1,2841 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Main emulator class, source
+
+#include "dsk_tools/core.h"
+// MSVC resolves the "utils.h" inside dsk_tools.h against the includer's directory,
+// where it finds emulator/utils.h. Pull in the real one explicitly.
+#include "libs/dsk_tools/src/utils.h"
+#include "host_helpers.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+
+#ifdef _WIN32
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#else
+    #include <pthread.h>
+    #include <sched.h>
+#endif
+
+#include "globals.h"
+
+#include "core.h"
+#include "emulator.h"
+#include "emulator/config.h"
+#include "emulator/utils.h"
+#include "emulator/disasm.h"
+#include "emulator/state_save.h"
+#include "emulator/script/script_parser.h"
+#include "libs/lodepng/lodepng.h"
+
+#include "emulator/devices/cpu/i8080.h"
+#include "emulator/devices/common/i8255.h"
+#include "emulator/devices/common/sound.h"
+#include "emulator/devices/common/speaker.h"
+#include "emulator/devices/common/ay8910.h"
+#include "emulator/devices/common/covox.h"
+#include "emulator/devices/common/tape.h"
+#include "emulator/devices/common/scankeyboard.h"
+#include "emulator/devices/specific/o128display.h"
+#include "emulator/devices/common/wd1793.h"
+#include "emulator/devices/common/fdd.h"
+#include "emulator/devices/common/joystick.h"
+#include "emulator/devices/common/mouse.h"
+#include "emulator/devices/common/connector.h"
+#include "emulator/devices/common/i8257.h"
+#include "emulator/devices/common/i8275.h"
+#include "emulator/devices/common/i8275display.h"
+#include "emulator/devices/common/i8251.h"
+#include "emulator/devices/common/dl11.h"
+#include "emulator/devices/common/k1801vp1_033.h"
+#include "emulator/devices/common/printer.h"
+#include "emulator/devices/common/i8253.h"
+#include "emulator/devices/common/i8259.h"
+#include "emulator/devices/common/am9519.h"
+#include "emulator/devices/common/scn2661.h"
+#include "emulator/devices/common/mc146818.h"
+#include "emulator/devices/common/register.h"
+#include "emulator/devices/common/mux.h"
+#include "emulator/devices/cpu/z80.h"
+#include "emulator/devices/common/page_mapper.h"
+#include "emulator/devices/common/plane_pair.h"
+#include "emulator/devices/common/indirect_memory.h"
+#include "emulator/devices/common/wait_map.h"
+#include "emulator/devices/common/generator.h"
+#include "emulator/devices/cpu/6502.h"
+#include "emulator/devices/cpu/k1801vm1.h"
+#include "emulator/devices/cpu/i8086.h"
+#include "emulator/devices/cpu/ie15.h"
+#include "emulator/devices/specific/agat_fdc140.h"
+#include "emulator/devices/specific/agat_fdc840.h"
+#include "emulator/devices/specific/agat_7_display.h"
+#include "emulator/devices/specific/agat_9_display.h"
+#include "emulator/devices/common/mapkeyboard.h"
+#include "emulator/devices/common/ram_address.h"
+#include "emulator/devices/specific/irisha_display.h"
+#include "emulator/devices/specific/bk_display.h"
+#include "emulator/devices/specific/poisk.h"
+#include "emulator/devices/specific/bk_timer.h"
+#include "emulator/devices/specific/bk_fdc.h"
+#include "devices/common/gmd70.h"
+#include "emulator/devices/common/ram_address.h"
+#include "emulator/devices/specific/agat_9_mapper.h"
+#include "emulator/devices/specific/apple2_mmu.h"
+#include "emulator/devices/specific/apple2_iou.h"
+#include "emulator/devices/specific/apple2_video.h"
+#include "emulator/devices/specific/pravetz_keyboard.h"
+#include "emulator/devices/specific/liberty_fdc.h"
+#include "emulator/devices/specific/apple2_cards.h"
+#include "emulator/devices/specific/apple2_disk2.h"
+#include "emulator/devices/common/ins8250.h"
+#include "emulator/devices/specific/agat_yazs.h"
+#include "emulator/devices/specific/uknc_channels.h"
+#include "emulator/devices/specific/uknc_display.h"
+#include "emulator/devices/specific/uknc_graphics.h"
+#include "emulator/devices/specific/uknc_hdd.h"
+#include "emulator/devices/specific/uknc_ram_timing.h"
+#include "emulator/devices/specific/smk512.h"
+#include "emulator/devices/specific/a16m.h"
+#include "emulator/devices/specific/uknc_timer.h"
+#include "emulator/devices/specific/uknc_keyboard.h"
+#include "emulator/devices/specific/uknc_mouse.h"
+#include "emulator/devices/specific/ms7004.h"
+#include "emulator/devices/specific/dvk_ksm_display.h"
+#include "emulator/devices/specific/dvk_ie15.h"
+#include "emulator/devices/specific/dvk_mx.h"
+#include "emulator/devices/specific/dvk_kgd.h"
+#include "emulator/devices/specific/dvk_dx.h"
+#include "emulator/devices/specific/dvk_lks.h"
+#include "emulator/devices/specific/e85_sys.h"
+#include "emulator/devices/specific/e85_comm.h"
+#include "emulator/devices/specific/e85_video.h"
+#include "emulator/devices/specific/e85_kngmd.h"
+#include "emulator/devices/specific/e85_knmd.h"
+#include "emulator/devices/specific/e85_mc1702.h"
+#include "emulator/devices/cpu/i8051.h"
+#include "emulator/devices/specific/dvk_panel.h"
+#include "emulator/devices/specific/dvk_kcgd.h"
+#include "emulator/devices/specific/dvk_kmd.h"
+#include "emulator/devices/specific/dvk_dw.h"
+#include "emulator/devices/specific/uknc_sound.h"
+#include "emulator/devices/specific/argo_keyboard.h"
+#include "emulator/devices/specific/argo_memory.h"
+#include "emulator/devices/specific/zx_keyboard.h"
+#include "emulator/devices/specific/oric_ula.h"
+#include "emulator/devices/common/via6522.h"
+#include "emulator/devices/specific/unior_memory.h"
+
+
+Emulator::Emulator(std::string work_path, std::string data_path, std::string software_path, std::string ini_file, VideoRenderer * renderer):
+      work_path(work_path)
+    , data_path(data_path)
+    , software_path(software_path)
+    , loaded(false)
+    , busy(false)
+    //Assigned by the emulation thread once the machine is up. Until then, and
+    //after a machine that failed to load took its devices down with it, there
+    //is nothing to point at - and the GUI can reach key_event() at any moment
+    , cpu(nullptr)
+    , mm(nullptr)
+    , display(nullptr)
+    , keyboard(nullptr)
+    //The destructor deletes both. Without this, quitting before the first
+    //machine has loaded - a script file that is not there, a bad argument -
+    //deletes whatever the stack happened to hold
+    , dm(nullptr)
+    , im(nullptr)
+    , clock_counter(0)
+    , renderer(renderer)
+    , m_running(false)
+    , m_ready(false)
+    , m_paste_active(false)
+    , m_calls_pending(false)
+    , m_video_from_screen(false)
+    , m_video_locked(false)
+    , m_script_state(SCRIPT_NONE)
+    , settings(ini_file)
+{
+
+    // connect(this, &Emulator::finished, this, &Emulator::stop_emulation, Qt::DirectConnection);
+
+}
+
+std::string Emulator::read_setup(std::string section, std::string ident, std::string def_val)
+{
+    return settings.get(section, ident, def_val);
+}
+
+std::string Emulator::get_last_path()
+{
+    std::string path = read_setup("Startup", "last_path", "");
+    if (path.empty()) path = software_path;
+    return path;
+}
+
+void Emulator::set_last_path(const std::string &path)
+{
+    write_setup("Startup", "last_path", path);
+}
+
+void Emulator::write_setup(std::string section, std::string ident, std::string new_val)
+{
+    settings.set(section, ident, new_val);
+    //The value stays in memory, so the running machine sees it; only the file
+    //is left alone
+    if (m_settings_readonly) return;
+    settings.save();
+}
+
+
+void Emulator::drop_machine()
+{
+    //The sound outputs it takes the samples from are about to go
+    stop_video_recording();
+
+    //Whatever stopped the old machine is no news about the next one
+    clear_machine_error();
+
+    //Not only a loaded machine: one that failed on the way in has its devices
+    //too, some of them with an audio device already open
+    delete dm;
+    delete im;
+    dm = nullptr;
+    im = nullptr;
+    //Only now: every device holds a ComputerDevice::cd pointing into it
+    m_config.free_devices();
+    loaded = false;
+    //The devices these point at have just been destroyed. If the machine
+    //being loaded now fails on the way in, nothing must be left pointing
+    //into them: the window stays open and its keys keep arriving
+    cpu = nullptr;
+    mm = nullptr;
+    display = nullptr;
+    keyboard = nullptr;
+    domains.clear();
+    joysticks.clear();
+    mice.clear();
+    //The debugger's state was about that machine
+    m_debug_paused = false;
+    m_debug_attached = false;
+    m_stepping = false;
+    m_step_cpu = nullptr;
+    {
+        compat_lock_guard lock(m_debug_mutex);
+        m_debug_cpu = nullptr;
+        m_debug_reason = DSTOP_NONE;
+        m_debug_listener = nullptr;
+    }
+}
+
+emulator::Result Emulator::load_config(std::string file_name)
+{
+    drop_machine();
+
+    emulator::Result res = emulator::Result::ok();
+    try {
+        res = build_machine(file_name);
+    } catch (const std::exception &ex) {
+        //A required parameter that is missing throws, and so may a device
+        //constructor; no frontend expects an exception from a load
+        res = emulator::Result::error(emulator::ErrorCode::ConfigError, ex.what());
+    }
+
+    if (!res)
+    {
+        //Half a machine is of no use to anybody, and the frontend would go on
+        //listing its devices. What is left is a machine with no devices
+        drop_machine();
+        dm = new DeviceManager();
+        im = new InterfaceManager(dm);
+    }
+    return res;
+}
+
+emulator::Result Emulator::build_machine(const std::string &file_name)
+{
+    dm = new DeviceManager();
+    im = new InterfaceManager(dm);
+
+    register_devices();
+
+    //The script of the previous extension belongs to that machine, and so
+    //does its directory in the file search. One loaded explicitly stays: a
+    //replay or a MACHINE line may be what switches machines. The emulation
+    //thread is stopped by now, a demo may still be waiting in a WAIT
+    if (m_embedded_loaded && script)
+    {
+        script->stop();
+        script->clear();
+        sd.script_path.clear();
+    }
+    m_embedded_loaded = false;
+
+    //A .cfg as it is, or an extension applied to its base. Kept for the
+    //lifetime of the machine: every ComputerDevice::cd points into it, and
+    //the snapshot writer writes it out as the state's own configuration
+    EmulatorConfig &config = m_config;
+    MachinePaths paths;
+    paths.computers_path = work_path;
+    paths.cache_path = cache_path;
+    emulator::Result res = load_machine_description(file_name, paths, config, m_source);
+    if (!res) return res;
+
+    EmulatorConfigDevice * system = config.get_device("system");
+    if (system == nullptr)
+        return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{Emulator|" + std::string(QT_TRANSLATE_NOOP("Emulator", "Device 'system' not found in config")) + "}");
+    //The file asked for names the machine (ini keys, MACHINE of a recording),
+    //the base is where its own files are
+    sd.system_file = file_name;
+    sd.system_path = dsk_tools::get_file_path(m_source.base_cfg);
+    sd.ext_path = m_source.ext_path;
+    sd.system_type = system->get_parameter("type").value;
+    sd.system_name = system->get_parameter("name").value;
+    sd.system_version = system->get_parameter("version", false).value;
+    sd.system_charmap = system->get_parameter("charmap", false).value;
+    sd.software_path = software_path;
+    sd.data_path = data_path;
+    //From here on every value without a prefix is read in the notation this
+    //machine uses. Validated by EmulatorConfig::apply_radix()
+    sd.radix = system->radix;
+    set_default_radix(sd.radix);
+    sd.read_setup = [this](const std::string &section, const std::string &ident, const std::string &def) {
+        return this->read_setup(section, ident, def);
+    };
+
+    sd.allowed_files = system->get_parameter("files", false).value;
+
+    load_charmap();
+
+    for (unsigned int i=0; i<config.get_devices_count(); i++)
+    {
+        EmulatorConfigDevice * d = config.get_device(i);
+        if (!d->type.empty())
+        {
+            res = dm->add_device(im, d);
+            if (!res) return res;
+        }
+    }
+    res = dm->load_devices_config(&sd);
+    if (!res) return res;
+    apply_saved_device_options();
+
+    //A snapshot's options, so that the tool bar is built showing them rather
+    //than the configuration and the ini. apply_state() applies them once more
+    //after the reset, where the rest of the snapshot is restored
+    if (m_source.is_state && !m_source.state.empty()) {
+        EmulatorConfig state;
+        std::string problems;
+        if (state.load_from_text(m_source.state)) apply_state_options(state, problems);
+    }
+
+    //What the configuration put into the drives, before the ini changes it:
+    //"Default image" goes back to it, and an entry equal to it is not kept
+    m_disk_defaults.clear();
+    if (!m_source.is_state) {
+        std::vector<ComputerDevice*> devs = disk_devices();
+        for (size_t i = 0; i < devs.size(); i++) m_disk_defaults[devs[i]->name] = disk_state(devs[i]);
+        if (m_restore_disks) restore_disks();
+    }
+    loaded = true;
+    return emulator::Result::ok();
+}
+
+//----------------------------- Saved state ---------------------------------//
+
+emulator::Result Emulator::save_state(const std::string &file_name)
+{
+    if (!loaded) return emulator::Result::error(emulator::ErrorCode::CommandFailed,
+        "{Emulator|" + std::string(QT_TRANSLATE_NOOP("Emulator", "No machine is loaded")) + "}");
+
+    StateSaveRequest request;
+    request.file_name = file_name;
+    request.config = &m_config;
+    request.dm = dm;
+    request.sd = &sd;
+    request.machine = dsk_tools::get_filename(m_source.base_cfg);
+    request.version = sd.system_version.empty() ? sd.system_name : sd.system_version;
+    request.clock = clock_counter;
+
+    //The positions are rebased on the one furthest behind. Kept as they are,
+    //the first timer_proc() after a restore would find every domain past its
+    //target, subtract it from all of them and wrap a uint64_t - and the
+    //machine would never run again. Only the difference between them means
+    //anything, and that is preserved exactly
+    uint64_t base = 0;
+    for (size_t i = 0; i < domains.size(); i++)
+        if (i == 0 || domains[i].norm < base) base = domains[i].norm;
+    for (size_t i = 0; i < domains.size(); i++)
+        request.domains.push_back(domains[i].norm - base);
+
+    return write_state_file(request);
+}
+
+void Emulator::request_state(const std::string &file_name)
+{
+    compat_lock_guard lock(m_state_mutex);
+    m_state_file = file_name;
+    m_state_error.clear();
+    m_state_requested = true;
+    m_state_serial++;
+}
+
+bool Emulator::state_pending()
+{
+    compat_lock_guard lock(m_state_mutex);
+    return m_state_requested;
+}
+
+std::string Emulator::take_state_error()
+{
+    compat_lock_guard lock(m_state_mutex);
+    std::string r;
+    r.swap(m_state_error);
+    return r;
+}
+
+//Consumed at a slice boundary, where every domain has finished a whole slice.
+//A script does not come through here: its tick() already runs between two
+//instructions of the emulation thread, which is a finer and repeatable moment
+void Emulator::store_state()
+{
+    std::string file;
+    uint64_t serial = 0;
+    {
+        compat_lock_guard lock(m_state_mutex);
+        if (!m_state_requested) return;
+        file = m_state_file;
+        serial = m_state_serial;
+    }
+    const emulator::Result res = save_state(file);
+    {
+        compat_lock_guard lock(m_state_mutex);
+        //Cleared last, so that the flag means "finished", not "started": the
+        //caller waits on it and then reads the error. A request that came in
+        //while this file was being written is still to be served - it keeps
+        //the flag up and is taken at the next slice
+        if (serial == m_state_serial) {
+            if (!res) m_state_error = res.message;
+            m_state_requested = false;
+        }
+    }
+}
+
+void Emulator::apply_state_options(EmulatorConfig &state, std::string &problems)
+{
+    for (unsigned int i = 0; i < state.get_devices_count(); i++)
+    {
+        EmulatorConfigDevice * sd_dev = state.get_device(static_cast<int>(i));
+        if (sd_dev->name == "system") continue;
+        ComputerDevice * d = dm->get_device_by_name(sd_dev->name, false);
+        if (d == nullptr) continue;
+        for (size_t k = 0; k < sd_dev->parameters.size(); k++)
+        {
+            const EmulatorConfigParameter &p = sd_dev->parameters[k];
+            if (p.name != "option" || p.left_range.size() < 3) continue;
+            try {
+                const unsigned int id = parse_numeric_value(
+                    p.left_range.substr(1, p.left_range.size() - 2), 10);
+                d->set_device_option(id, parse_numeric_value(p.value));
+            } catch (std::exception &e) {
+                problems += sd_dev->name + ".option: " + e.what() + "\n";
+            }
+        }
+    }
+}
+
+emulator::Result Emulator::apply_state()
+{
+    m_state_report.clear();
+    if (!m_source.is_state || m_source.state.empty()) return emulator::Result::ok();
+
+    EmulatorConfig state;
+    emulator::Result res = state.load_from_text(m_source.state);
+    if (!res) return res;
+
+    std::string problems;
+
+    //Pass 1: the options first. Connector::set_device_option() plugs and
+    //unplugs whole devices, which decides who drives which line, and a
+    //display option changes the surface. Everything below assumes the machine
+    //is already wired the way the snapshot found it. This also overrides what
+    //apply_saved_device_options() took from the ini: the snapshot wins
+    apply_state_options(state, problems);
+
+    //Pass 2: the devices themselves, in the order they were declared. Each
+    //one restores its own lines through ComputerDevice::load_state()
+    for (unsigned int i = 0; i < state.get_devices_count(); i++)
+    {
+        EmulatorConfigDevice * sd_dev = state.get_device(static_cast<int>(i));
+        if (sd_dev->name == "system") continue;
+
+        ComputerDevice * d = dm->get_device_by_name(sd_dev->name, false);
+        if (d == nullptr)
+        {
+            //Not an error: the configuration is in the same file, so a
+            //section with no device means the file was edited by hand
+            problems += "no device named '" + sd_dev->name + "'\n";
+            continue;
+        }
+        if (!sd_dev->type.empty() && sd_dev->type != d->type)
+        {
+            problems += sd_dev->name + ": state says '" + sd_dev->type
+                      + "', the machine has '" + d->type + "'\n";
+            continue;
+        }
+
+        std::vector<char> used(sd_dev->parameters.size(), 0);
+        std::string error;
+        StateReader r(sd_dev, &sd, &used, &error);
+        res = d->load_state(r);
+        if (!res) return res;
+        if (!error.empty()) return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{MachineState|Saved state} " + error);
+
+        for (size_t k = 0; k < used.size(); k++)
+            if (!used[k] && sd_dev->parameters[k].name != "option")
+                problems += sd_dev->name + "." + sd_dev->parameters[k].key() + ": unknown here\n";
+    }
+
+    //Pass 3: caches that depend on a line or on another device's buffer
+    for (unsigned int i = 0; i < dm->device_count; i++)
+        dm->get_device(i)->device->state_restored();
+
+    //Pass 4: what belongs to the machine as a whole
+    EmulatorConfigDevice * sys = state.get_device("system");
+    if (sys != nullptr)
+    {
+        std::vector<char> used(sys->parameters.size(), 0);
+        std::string error;
+        StateReader r(sys, &sd, &used, &error);
+
+        unsigned int radix = sd.radix;
+        if (r.u("radix", radix) && (radix == 2 || radix == 8 || radix == 10 || radix == 16))
+        {
+            sd.radix = radix;
+            set_default_radix(radix);
+        }
+        r.n64("clock", clock_counter);
+        //Rebased by the writer, so the positions are small and the first
+        //slice after the restore behaves like any other
+        for (size_t k = 0; k < domains.size(); k++)
+            r.n64(("domain[" + std::to_string(k) + "]").c_str(), domains[k].norm);
+        if (!error.empty()) return emulator::Result::error(emulator::ErrorCode::ConfigError,
+            "{MachineState|Saved state} " + error);
+    }
+
+    //The host is holding nothing at the moment a snapshot is opened. The
+    //keyboard's own lists of held keys were emptied by the reset this runs
+    //after, and nothing restores them: a key that comes back down would stay
+    //down forever, auto repeat included. Only the machine side of a keyboard
+    //- its code register and ready trigger, which are ports - is restored, so
+    //a program waiting for a keystroke sees exactly what it saw
+    {
+        compat_lock_guard lock(m_host_keys_mutex);
+        m_host_keys.clear();
+    }
+
+    m_state_report = problems;
+    return emulator::Result::ok();
+}
+
+std::string Emulator::settings_key()
+{
+    const std::string name = dsk_tools::get_filename(sd.system_file);
+    return name.substr(0, name.find('.'));
+}
+
+void Emulator::apply_saved_device_options()
+{
+    std::string config_key = settings_key();
+
+    for (unsigned int i = 0; i < dm->device_count; i++) {
+        ComputerDevice * dev = dm->get_device(i)->device.get();
+        DeviceOptions options = dev->get_device_options();
+        for (size_t j = 0; j < options.size(); j++) {
+            const DeviceOption & opt = options[j];
+            if (!opt.values.empty()) {
+                std::string settings_key = config_key + "_" + dev->name + "_" + std::to_string(opt.id);
+                std::string saved = read_setup("DeviceOptions", settings_key, "");
+                if (!saved.empty()) {
+                    //Written by the window, but the ini is the user's file: an
+                    //entry that does not parse is skipped, not thrown
+                    try {
+                        dev->set_device_option(opt.id, static_cast<unsigned int>(std::stoul(saved)));
+                    } catch (const std::exception &) {
+                    }
+                }
+            }
+        }
+    }
+
+    //The high precision mode of the display, also chosen per machine; on unless
+    //the user turned it off
+    GenericDisplay * d = dynamic_cast<GenericDisplay*>(dm->get_device_by_name("display", false));
+    if (d != nullptr && d->precise_available())
+        d->set_precise(read_setup("Display", "precise_" + config_key, "1") == "1");
+}
+
+//----------------------------- Remembered disks -----------------------------//
+
+static const char * const DISKS_SECTION = "Disks";
+
+std::vector<ComputerDevice*> Emulator::disk_devices()
+{
+    std::vector<ComputerDevice*> r;
+    if (dm == nullptr) return r;
+    for (unsigned int i = 0; i < dm->device_count; i++) {
+        ComputerDevice * dev = dm->get_device(i)->device.get();
+        if (dev->device_class == "fdd" || dev->device_class == "hdd") r.push_back(dev);
+    }
+    return r;
+}
+
+//The directory holding computers/ and software/: paths under it are written
+//relative to it, so the entries survive the installation being moved
+std::string Emulator::root_path() const
+{
+    std::string p = work_path;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    while (!p.empty() && p[p.size() - 1] == '/') p.erase(p.size() - 1);
+    size_t slash = p.rfind('/');
+    return slash == std::string::npos ? std::string() : p.substr(0, slash + 1);
+}
+
+static std::string relative_to(const std::string &root, const std::string &path)
+{
+    std::string p = path;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    if (root.empty() || p.size() <= root.size()) return p;
+#ifdef _WIN32
+    if (str_tolower(p.substr(0, root.size())) == str_tolower(root)) return p.substr(root.size());
+#else
+    if (p.compare(0, root.size(), root) == 0) return p.substr(root.size());
+#endif
+    return p;
+}
+
+//The file that was opened, not the base of its chain: an .ext standing on a
+//.cfg has entries of its own and leaves those of the .cfg alone
+std::string Emulator::machine_disk_key(const std::string &device) const
+{
+    return relative_to(root_path(), sd.system_file) + "|" + device;
+}
+
+DiskChoice Emulator::disk_state(ComputerDevice * dev)
+{
+    DiskChoice c;
+    DeviceFieldValue v;
+    //A floppy drive keeps the bare name in "file" and the whole one in "path";
+    //the hard disks keep the whole one in "file"
+    bool loaded = false;
+    if (dev->get_field("loaded", 0, 0, v) || dev->get_field("attached", 0, 0, v))
+        loaded = !v.values.empty() && v.values[0] != 0;
+    if (loaded) {
+        v = DeviceFieldValue();
+        if ((dev->get_field("path", 0, 0, v) && !v.text.empty()) || dev->get_field("file", 0, 0, v))
+            c.file = relative_to(root_path(), v.text);
+    }
+    v = DeviceFieldValue();
+    if (dev->get_field("protected", 0, 0, v)) c.protect = !v.values.empty() && v.values[0] != 0;
+    return c;
+}
+
+DiskChoice Emulator::disk_default(const std::string &device) const
+{
+    std::map<std::string, DiskChoice>::const_iterator it = m_disk_defaults.find(device);
+    return it == m_disk_defaults.end() ? DiskChoice() : it->second;
+}
+
+//An entry is relative to the root when it lies under it; the configuration's
+//own image may be relative to wherever the machine was found (a frontend that
+//names it by a relative path), so it is looked for the way the drive did.
+//Empty when the file is not there
+std::string Emulator::disk_path(const std::string &file)
+{
+    std::string path = find_file_location(&sd, is_absolute_path(file) ? file : root_path() + file);
+    if (path.empty() && !is_absolute_path(file)) path = find_file_location(&sd, file);
+    return path;
+}
+
+//Runs where the devices are owned: from build_machine(), or through invoke()
+void Emulator::apply_disk_choice(ComputerDevice * dev, const DiskChoice &c)
+{
+    DiskChoice now = disk_state(dev);
+    if (c.file.empty()) {
+        if (!now.file.empty()) dev->send_command("eject", "");
+    } else if (c.file != now.file) {
+        std::string path = disk_path(c.file);
+        //An image that is gone, or will not load, leaves the configuration's
+        if (path.empty()) return;
+        if (!dev->send_command("load", format_script_arg(path))) return;
+    }
+    if (disk_state(dev).protect != c.protect)
+        dev->send_command("protect", c.protect ? "1" : "0");
+}
+
+void Emulator::restore_disks()
+{
+    std::vector<ComputerDevice*> devs = disk_devices();
+    for (size_t i = 0; i < devs.size(); i++) {
+        std::string key = machine_disk_key(devs[i]->name);
+        if (!settings.has(DISKS_SECTION, key)) continue;
+        //"<path>|<protect>"; the ini is the user's file, so anything else is skipped
+        std::string value = settings.get(DISKS_SECTION, key);
+        size_t bar = value.rfind('|');
+        if (bar == std::string::npos) continue;
+        DiskChoice c;
+        c.file = value.substr(0, bar);
+        c.protect = value.substr(bar + 1) == "1";
+        try {
+            apply_disk_choice(devs[i], c);
+        } catch (const std::exception &) {
+        }
+    }
+}
+
+void Emulator::remember_disk(ComputerDevice * dev)
+{
+    //A snapshot carries its media itself, and they are no file on disk
+    if (!loaded || m_source.is_state) return;
+    DiskChoice c = disk_state(dev);
+    std::string key = machine_disk_key(dev->name);
+    if (c == disk_default(dev->name))
+        settings.remove(DISKS_SECTION, key);
+    else
+        settings.set(DISKS_SECTION, key, c.file + "|" + (c.protect ? "1" : "0"));
+    if (!m_settings_readonly) settings.save();
+}
+
+bool Emulator::has_remembered_disk(const std::string &device)
+{
+    if (!loaded || m_source.is_state) return false;
+    return settings.has(DISKS_SECTION, machine_disk_key(device));
+}
+
+void Emulator::record_disk_choice(ComputerDevice * dev, const DiskChoice &from, const DiskChoice &to)
+{
+    if (from.file != to.file) {
+        if (to.file.empty())
+            record_command(dev->name, "eject", "");
+        else {
+            std::string path = disk_path(to.file);
+            record_command(dev->name, "load", format_script_arg(path.empty() ? to.file : path));
+        }
+    }
+    if (from.protect != to.protect) record_command(dev->name, "protect", to.protect ? "1" : "0");
+}
+
+void Emulator::restore_default_disk(ComputerDevice * dev)
+{
+    if (!loaded || m_source.is_state) return;
+    DiskChoice before = disk_state(dev);
+    DiskChoice def = disk_default(dev->name);
+    invoke([&]() { apply_disk_choice(dev, def); });
+    record_disk_choice(dev, before, disk_state(dev));
+    settings.remove(DISKS_SECTION, machine_disk_key(dev->name));
+    if (!m_settings_readonly) settings.save();
+}
+
+void Emulator::forget_all_disks()
+{
+    settings.remove_section(DISKS_SECTION);
+    if (!m_settings_readonly) settings.save();
+}
+
+void Emulator::record_disk_changes()
+{
+    if (!loaded || m_source.is_state) return;
+    std::vector<ComputerDevice*> devs = disk_devices();
+    for (size_t i = 0; i < devs.size(); i++)
+        record_disk_choice(devs[i], disk_default(devs[i]->name), disk_state(devs[i]));
+}
+
+void Emulator::load_charmap()
+{
+    // Initialize all to default character
+    for (auto& ch : charmap) {
+        ch = ".";
+    }
+
+    if (!sd.system_charmap.empty())
+    {
+        std::string file_path = data_path + sd.system_charmap + ".chr";
+        dsk_tools::UTF8_ifstream f(file_path);
+        if (!f.good()) return;
+
+        f.seekg(0, std::ios::end);
+        std::streampos size = f.tellg();
+        f.seekg(0, std::ios::beg);
+        std::string content(static_cast<size_t>(size), '\0');
+        f.read(&content[0], size);
+
+        std::vector<std::string> chars = dsk_tools::split_utf8_chars(content);
+        unsigned int count = 0;
+        for (size_t i = 0; i < chars.size() && count < 256; i++)
+        {
+            if (chars[i] != "\x0D" && chars[i] != "\x0A") charmap[count++] = chars[i];
+        }
+    }
+}
+
+const std::string & Emulator::translate_char(unsigned int char_code)
+{
+    if (char_code >= 256) {
+        return charmap[0];  // Return default character
+    }
+    return charmap[char_code];
+}
+
+int Emulator::char_code(const std::string &utf8) const
+{
+    if (utf8.empty()) return -1;
+    //The control codes last: an unmapped code is shown as the default
+    //character, and the printable one of that look is the one meant
+    for (unsigned int n = 0; n < charmap.size(); n++) {
+        const unsigned int i = (n + 32) % charmap.size();
+        if (charmap[i] == utf8) return (int)i;
+    }
+    return -1;
+}
+
+//----------------------- Why the machine stopped ----------------------------//
+
+void Emulator::set_machine_error(const std::string &message, bool fatal)
+{
+    compat_lock_guard lock(m_error_mutex);
+    //The first cause is the one worth telling; a fatal one wins over a device
+    //that merely stopped the machine
+    if (!m_machine_error.empty() && (m_machine_fatal || !fatal)) return;
+    m_machine_error = message.empty() ? std::string("unknown error") : message;
+    m_machine_fatal = fatal;
+}
+
+std::string Emulator::machine_error(bool * fatal) const
+{
+    compat_lock_guard lock(m_error_mutex);
+    if (fatal != nullptr) *fatal = m_machine_fatal;
+    return m_machine_error;
+}
+
+void Emulator::clear_machine_error()
+{
+    compat_lock_guard lock(m_error_mutex);
+    m_machine_error.clear();
+    m_machine_fatal = false;
+}
+
+//--------------------- Calls from other threads ----------------------------//
+
+void Emulator::invoke(const std::function<void()> &fn)
+{
+    PendingCall call(&fn);
+    bool queued = false;
+    {
+        compat_lock_guard lock(m_calls_mutex);
+        if (m_calls_open && !(m_calls_thread == compat_this_thread_id()))
+        {
+            m_calls.push_back(&call);
+            m_calls_pending = true;
+            queued = true;
+        }
+    }
+
+    if (!queued)
+    {
+        //Nobody to race with, or this is the emulation thread asking itself
+        fn();
+        return;
+    }
+
+    //The emulation thread looks at the queue at least once a millisecond, so
+    //this is normally over within one; a call that takes long (an image being
+    //read) is not worth a core spinning for it
+    unsigned int spins = 0;
+    while (!call.done)
+    {
+        if (++spins < 5000) compat_yield(); else compat_sleep_ms(1);
+    }
+
+    if (call.failed) throw std::runtime_error(call.error);
+}
+
+void Emulator::run_pending_calls()
+{
+    std::vector<PendingCall*> calls;
+    {
+        compat_lock_guard lock(m_calls_mutex);
+        calls.swap(m_calls);
+        m_calls_pending = false;
+    }
+
+    for (size_t i = 0; i < calls.size(); i++)
+    {
+        PendingCall * c = calls[i];
+        try {
+            (*c->fn)();
+        } catch (const std::exception &ex) {
+            c->failed = true;
+            c->error = ex.what();
+        }
+        //Its owner wakes up on this and the entry is gone with its stack frame
+        c->done = true;
+    }
+}
+
+void Emulator::close_calls()
+{
+    {
+        compat_lock_guard lock(m_calls_mutex);
+        m_calls_open = false;
+    }
+    //Whoever got in before the door closed is still waiting
+    run_pending_calls();
+}
+
+void Emulator::reset(bool cold)
+{
+    if (!loaded || dm == nullptr) return;
+    invoke([this, cold]() { dm->reset_devices(cold); });
+}
+
+//----------------------------- Scripting ----------------------------------//
+
+ScriptEngine * Emulator::script_engine()
+{
+    //Created once and kept: the emulation thread dereferences the pointer on
+    //every instruction, so it must never be replaced while the machine runs
+    if (!script) script.reset(new ScriptEngine(this));
+    return script.get();
+}
+
+ScriptRecorder * Emulator::script_recorder()
+{
+    if (!recorder) recorder.reset(new ScriptRecorder(script_engine()));
+    return recorder.get();
+}
+
+emulator::Result Emulator::load_script(const std::string &file_name)
+{
+    ScriptEngine * s = script_engine();
+
+    emulator::Result res = s->load(file_name);
+    if (!res) return res;
+
+    //Devices look up files next to the script first, so that a script and the
+    //images it uses can live in one directory
+    sd.script_path = s->get_path();
+    return emulator::Result::ok();
+}
+
+bool Emulator::has_embedded_script() const
+{
+    return loaded && !m_source.script.empty();
+}
+
+emulator::Result Emulator::load_embedded_script()
+{
+    ScriptEngine * s = script_engine();
+
+    //Named after the extension: the log goes next to it, and relative names
+    //in the script resolve there first
+    emulator::Result res = s->load_text(m_source.script, m_source.file, m_source.script_line);
+    if (!res) return res;
+    sd.script_path = s->get_path();
+    m_embedded_loaded = true;
+    return emulator::Result::ok();
+}
+
+void Emulator::set_script_file(const std::string &file_name)
+{
+    ScriptEngine * s = script_engine();
+    s->set_file_name(file_name);
+    sd.script_path = s->get_path();
+}
+
+uint64_t Emulator::ticks_per_ms() const
+{
+    if (!loaded || cpu == nullptr || cpu->clock < 1000) return 1;
+    return cpu->clock / 1000;
+}
+
+void Emulator::record_key(unsigned int code, unsigned int native, bool press)
+{
+    if (!recorder || !recorder->is_recording()) return;
+    //A key a key group swallowed did not reach the machine at all; with it,
+    //though, the key that held the group may have come up (hold mode)
+    if (keyboard && keyboard->last_host_swallowed()) {
+        code = keyboard->last_host_released();
+        if (code == _FFFF) return;
+        native = 0;
+        press = false;
+    }
+    //Remember the press, so a held-back release can be written as its pair
+    const unsigned int plain = code & ~(unsigned int)EmuKey::Keypad;
+    size_t i = 0;
+    for (; i < m_recorded_down.size(); i++) {
+        //By the physical key when both have one ("@" may come up as "2")
+        if (native != 0 && m_recorded_down[i].scan != 0) {
+            if (m_recorded_down[i].scan == native) break;
+        } else if (((unsigned int)m_recorded_down[i].key & ~(unsigned int)EmuKey::Keypad) == plain) break;
+    }
+    if (press) {
+        if (i == m_recorded_down.size()) {
+            HostKey h;
+            h.scan = native;
+            h.key = (int)code;
+            m_recorded_down.push_back(h);
+        }
+    } else if (i < m_recorded_down.size()) {
+        if (native == 0) {
+            code = (unsigned int)m_recorded_down[i].key;
+            native = m_recorded_down[i].scan;
+        }
+        m_recorded_down.erase(m_recorded_down.begin() + i);
+    }
+    //The key the machine got, not the one typed: a replay is not remapped
+    recorder->key(keyboard ? keyboard->remap_key(code) : code, native, press, clock_counter);
+}
+
+void Emulator::record_command(const std::string &device, const std::string &member, const std::string &params)
+{
+    if (recorder && recorder->is_recording()) recorder->command(device, member, params, clock_counter);
+}
+
+void Emulator::record_verb(unsigned int verb, const std::vector<std::string> &args)
+{
+    record_verb_at(verb, args, clock_counter);
+}
+
+void Emulator::record_verb_at(unsigned int verb, const std::vector<std::string> &args, uint64_t clock)
+{
+    if (recorder && recorder->is_recording()) recorder->verb(verb, args, clock);
+}
+
+std::string Emulator::script_machine() const
+{
+    return script?script->get_machine():std::string("");
+}
+
+void Emulator::arm_script(bool on)
+{
+    m_script_state = on ? SCRIPT_ARMED : SCRIPT_NONE;
+}
+
+void Emulator::start_script()
+{
+    //run() may be taking the armed script at this very moment: whoever moves
+    //the state away from SCRIPT_ARMED first starts it, the other does not
+    int state = SCRIPT_ARMED;
+    if (!m_script_state.compare_exchange_strong(state, SCRIPT_NONE)) {
+        m_script_state = SCRIPT_NONE;
+        if (state == SCRIPT_RUN) return;
+    }
+    if (script) script->start(clock_counter);
+}
+
+void Emulator::stop_script()
+{
+    if (script) script->stop();
+}
+
+bool Emulator::script_active() const
+{
+    return script && script->is_active();
+}
+
+bool Emulator::script_finished() const
+{
+    return !script || script->is_finished();
+}
+
+bool Emulator::script_exit_requested() const
+{
+    return script && script->is_exit_requested();
+}
+
+int Emulator::script_exit_code() const
+{
+    return script?script->get_exit_code():0;
+}
+
+//What the emulation thread does before its first slice: the clock domains, the
+//devices the emulator talks to, the reset and a saved state. False when the
+//machine cannot run (the error is set and m_running cleared). Split out of
+//run() so that a frontend without threads (frank-ecat, ECAT_EMBEDDED) does the
+//same on its own loop
+bool Emulator::prepare_machine()
+{
+    //One domain per processor, master first. load_devices_config() has
+    //already put them in that order
+    const std::vector<CPU*> &cpu_list = dm->get_cpus();
+    if (cpu_list.empty()) {
+        set_machine_error("No processor found in the configuration", true);
+        m_running = false;
+        return false;
+    }
+
+    cpu = cpu_list[0];
+
+    //LCM of every frequency, so that a domain's position can be counted
+    //in whole units of a common time. For 8 MHz and 6.25 MHz the scales
+    //come out 25 and 32 - the 32:25 interleave the УК-НЦ really has.
+    //With one processor the LCM is its own clock and every scale is 1
+    uint64_t lcm = cpu_list[0]->clock;
+    for (size_t i = 1; i < cpu_list.size(); i++) {
+        const uint64_t c = cpu_list[i]->clock;
+        uint64_t a = lcm, b = c;
+        while (b != 0) { const uint64_t t = a % b; a = b; b = t; }
+        lcm = (a != 0) ? (lcm / a * c) : lcm;
+    }
+
+    domains.clear();
+    for (size_t i = 0; i < cpu_list.size(); i++) {
+        ClockDomain d;
+        d.cpu = cpu_list[i];
+        d.scale = (cpu_list[i]->clock != 0) ? (lcm / cpu_list[i]->clock) : 1;
+        d.norm = 0;
+        domains.push_back(d);
+    }
+
+    mm = cpu->mm;
+    if (!mm) {
+        set_machine_error("The processor has no memory mapper", true);
+        m_running = false;
+        return false;
+    }
+
+    //Not required=true: that throws, and nothing catches here. A
+    //machine without either loads fine and would end the process
+    display = dynamic_cast<GenericDisplay*>(dm->get_device_by_name("display", false));
+    if (!display) {
+        set_machine_error("No display device named \"display\" in the configuration", true);
+        m_running = false;
+        return false;
+    }
+
+    keyboard = dynamic_cast<Keyboard*>(dm->get_device_by_name("keyboard", false));
+    if (!keyboard) {
+        set_machine_error("No keyboard device named \"keyboard\" in the configuration", true);
+        m_running = false;
+        return false;
+    }
+    keyboard->set_remap_mode(m_key_remap);
+    //What was pasted into the machine before is not this one's
+    paste_clear();
+
+    joysticks.clear();
+    std::vector<ComputerDevice*> joystick_devices = dm->find_devices_by_class("joystick");
+    for (size_t i = 0; i < joystick_devices.size(); i++)
+        joysticks.push_back(dynamic_cast<Joystick*>(joystick_devices[i]));
+
+    mice.clear();
+    std::vector<ComputerDevice*> mouse_devices = dm->find_devices_by_class("mouse");
+    for (size_t i = 0; i < mouse_devices.size(); i++)
+        if (HostMouse * m = dynamic_cast<HostMouse*>(mouse_devices[i])) mice.push_back(m);
+
+    clock_freq = this->cpu->clock;
+
+    for (size_t i = 0; i < domains.size(); i++) domains[i].norm = 0;
+    clock_counter = 0;
+
+    //A machine opened from a .ecats: everything is built and reset,
+    //nothing has been clocked yet, and this thread owns all of it -
+    //which is the only moment a whole machine can be replaced at once.
+    //Doing it here is also what makes every frontend support a saved
+    //state without a line of its own: they all load and then run()
+    //The reset and the restore run outside the loop below and its
+    //catch, and an exception leaving this thread ends the process
+    try {
+        reset(true);
+
+        const emulator::Result res = apply_state();
+        if (!res)
+        {
+            //The same way a device refusing what the guest asked is
+            //reported: the machine stands still and the message waits
+            set_machine_error(res.message, false);
+            for (size_t i = 0; i < domains.size(); i++)
+                domains[i].cpu->m_debug = DEBUG_STOPPED;
+        }
+    } catch (const std::exception &ex) {
+        set_machine_error(ex.what(), true);
+        m_running = false;
+        return false;
+    }
+
+    //A script armed by the frontend starts at this very clock, not
+    //at whatever moment the frontend gets to call start_script()
+    int armed = SCRIPT_ARMED;
+    if (script && m_script_state.compare_exchange_strong(armed, SCRIPT_RUN))
+        script->start(clock_counter);
+
+    m_machine_frame_clock = clock_counter;
+    m_ready = true;
+    return true;
+}
+
+void Emulator::run()
+{
+    if (loaded)
+    {
+        if (m_running) return;
+
+        m_ready = false;
+        m_running = true;
+
+        //From here on the machine belongs to the emulation thread, and a call
+        //from any other one waits for it - also while that thread is still
+        //setting the machine up
+        {
+            compat_lock_guard lock(m_calls_mutex);
+            m_calls_open = true;
+            m_calls_thread = compat_thread_id();
+        }
+
+#ifdef ECAT_SINGLE_THREAD
+        //frank-ecat: no threads. The machine is set up here; the firmware's
+        //main loop then drives it with slice() and render_tick()
+        m_calls_thread = compat_this_thread_id();
+        if (prepare_machine()) display->set_frame_event(&m_frame_event);
+        m_embedded_frames = display ? display->frames_done() : 0;
+        m_embedded_last_render = compat_now_ms();
+    }
+}
+
+void Emulator::slice(uint64_t elapsed_us)
+{
+    if (!m_running || !m_ready) return;
+    if (m_calls_pending) run_pending_calls();
+    try {
+        timer_proc(slice_ticks(elapsed_us));
+    } catch (const std::exception &ex) {
+        busy = false;
+        set_machine_error(ex.what(), true);
+        m_running = false;
+    } catch (...) {
+        busy = false;
+        set_machine_error("unknown exception in the emulation", true);
+        m_running = false;
+    }
+}
+
+//A frame the display reports as whole is shown at once; a display without
+//frames (or a stopped machine) every 20 ms, as the render thread does
+bool Emulator::render_tick()
+{
+    if (!m_running || !m_ready || !display) return false;
+    const uint64_t now = compat_now_ms();
+    const unsigned frames = display->frames_done();
+    if (frames != m_embedded_frames || now - m_embedded_last_render >= 20) {
+        m_embedded_frames = frames;
+        m_embedded_last_render = now;
+        render_screen();
+        return true;
+    }
+    return false;
+}
+#else
+
+#if USE_QT_THREADING
+        emulationThread = EmuThread::create([this]() {
+#else
+        emulationThread = std::thread([this]() {
+#endif
+            {
+                compat_lock_guard lock(m_calls_mutex);
+                m_calls_thread = compat_this_thread_id();
+            }
+            CallsGuard calls_guard(this);
+
+            setThreadPriority(true);
+
+            if (!prepare_machine()) return;
+
+#if USE_QT_THREADING
+            QElapsedTimer timer;
+            timer.start();
+            qint64 lastUsecs = timer.nsecsElapsed() / 1000;
+            while (m_running) {
+                if (m_calls_pending) run_pending_calls();
+
+                qint64 nowUsecs = timer.nsecsElapsed() / 1000;
+                qint64 elapsed = nowUsecs - lastUsecs;
+
+                if (elapsed < 1000 && m_speed_q != 0) {
+                    QThread::yieldCurrentThread();
+                    continue;
+                }
+
+                lastUsecs = nowUsecs;
+#else
+            //steady_clock, not high_resolution_clock: the latter is an alias of
+            //system_clock in libstdc++, and a clock corrected backwards by NTP
+            //would freeze the machine until the wall clock caught up again
+            auto lastTime = std::chrono::steady_clock::now();
+            while (m_running) {
+                //Between two slices: every instruction is finished, and what
+                //another thread wants done to the machine is done here
+                if (m_calls_pending) run_pending_calls();
+
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastTime).count();
+
+                if (elapsed < 1000 && m_speed_q != 0) {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                lastTime = now;
+#endif
+
+                //Everything the machine missed while the host was busy
+                //elsewhere is caught up with, without a ceiling at 1x (another
+                //speed has one, see slice_ticks()): emulated time
+                //has to track the wall clock, and a slice capped here would
+                //lose the difference for good - a machine under load would run
+                //slow, which is exactly what the test suite measures against
+                uint64_t time_ticks = slice_ticks((uint64_t)elapsed);
+
+                //A SCREEN of a script is taken by the render thread, a frame or
+                //so of wall time later, while the machine runs on: at 1x that
+                //is a few emulated milliseconds, at MAX a second. At any speed
+                //but 1x the machine waits for the picture instead, which also
+                //makes SCREEN show the moment it was asked for. 1x is left as
+                //it always was: its references were taken that way
+                const bool hold = m_speed_q != 4 && is_screenshot_pending();
+                if (hold != m_shot_hold) {
+                    m_shot_hold = hold;
+                    if (hold) m_frame_event.set();
+                }
+                if (hold) time_ticks = 0;
+
+                //Last resort: an exception leaving this thread ends the whole
+                //process without a word. Devices report through
+                //DeviceManager::error() instead, but a stray std::stoi or a
+                //bad_alloc must not take the application down with it
+                //The message is kept for the frontend: a window that simply froze,
+                //a console run that waited forever for a script that could no
+                //longer finish, is all this used to leave behind
+                try {
+                    timer_proc(time_ticks);
+                } catch (const std::exception &ex) {
+                    busy = false;
+                    set_machine_error(ex.what(), true);
+                    m_running = false;
+                } catch (...) {
+                    busy = false;
+                    set_machine_error("unknown exception in the emulation thread", true);
+                    m_running = false;
+                }
+            }
+        });
+
+#if USE_QT_THREADING
+        renderThread = EmuThread::create([this]() {
+#else
+        renderThread = std::thread([this]() {
+#endif
+#ifdef _WIN32
+            //The default timer of Windows ticks every 15.6 ms, and a sleep ends
+            //on a tick: 20 ms became 31, and the screen ran at 31 frames a
+            //second instead of 50 (measured). A 1 ms period for as long as the
+            //render thread lives - the emulation thread spins anyway, so the
+            //power this costs is already being spent
+            timeBeginPeriod(1);
+#endif
+            //A display that reports the end of its frames (frame_complete():
+            //the БК, the УК-НЦ, the Агат, the ВГ75 machines) is shown as soon
+            //as a frame is whole. A free 50 Hz tick against the machine's own
+            //50.08 Hz used to come just before the frame as often as just
+            //after it: 18% of the УК-НЦ frames were never shown, and the
+            //others waited 12 ms on average (25 ms in one case of ten) - a
+            //lag the mouse made plain. The other displays, and every display
+            //of a stopped machine, keep the tick: frames due at fixed moments,
+            //not 20 ms after the previous one was done, so the time a frame
+            //takes and the sleep overshoot do not add up into a slower rate.
+            //The page works the same way: the canvas is put when the frame is
+            //whole, and the browser shows it with its next repaint
+            const int64_t TICK_US = 20000;
+            //A machine without frames for this long is shown by the tick
+            const int64_t FRAMES_LOST_US = 40000;
+            //A machine running faster than real time is not shown faster than this
+            const int64_t MIN_GAP_US = 8000;
+#if USE_QT_THREADING
+            QElapsedTimer clock;
+            clock.start();
+            auto now_us = [&clock]() -> int64_t { return clock.nsecsElapsed() / 1000; };
+#else
+            const auto start = std::chrono::steady_clock::now();
+            auto now_us = [start]() -> int64_t {
+                return std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+            };
+#endif
+            int64_t next_tick = now_us();
+            int64_t last_render = next_tick - TICK_US;
+            //Until the display reports a frame, the tick shows it from the start
+            int64_t last_frame = next_tick - FRAMES_LOST_US;
+            unsigned seen_frames = 0;
+            bool seen_valid = false;
+            while (m_running) {
+                if (!m_ready) {
+#if USE_QT_THREADING
+                    QThread::yieldCurrentThread();
+#else
+                    std::this_thread::yield();
+#endif
+                    continue;
+                }
+                const int64_t now = now_us();
+                bool due = false;
+                //Slowed down (Emulation > Speed), a machine reports its
+                //frames as much less often: not a lost frame, and the tick
+                //would show it half drawn
+                const int q = m_speed_q;
+                const int64_t lost_us = (q > 0 && q < 4) ? FRAMES_LOST_US * 4 / q : FRAMES_LOST_US;
+                //Not before m_ready: the emulation thread finds the display
+                //only while it sets the machine up
+                if (!seen_valid) display->set_frame_event(&m_frame_event);
+                const unsigned frames = display->frames_done();
+                if (!seen_valid) { seen_frames = frames; seen_valid = true; }
+                if (frames != seen_frames) {
+                    last_frame = now;
+                    if (now - last_render >= MIN_GAP_US) {
+                        seen_frames = frames;
+                        due = true;
+                    }
+                }
+                //Time stands still for a SCREEN (see the emulation loop):
+                //the picture is shown, and taken, at once
+                if (!due && m_shot_hold && now - last_render >= MIN_GAP_US) due = true;
+                if (!due && now - last_frame >= lost_us && now >= next_tick) {
+                    due = true;
+                    //A frame that came too late is not made up for with a
+                    //burst of quick ones: the schedule starts again from now
+                    next_tick += TICK_US;
+                    if (next_tick <= now) next_tick = now + TICK_US;
+                }
+                if (due) {
+                    render_screen();
+                    last_render = now;
+                }
+
+                //Asleep until the display reports a frame, or the tick, or the
+                //end of the gap a frame already reported waits for. Woken by an
+                //event, not by polling: Windows 11 may end Sleep(1) on its
+                //15.6 ms tick despite timeBeginPeriod(1) (it does not promise a
+                //fine timer to a process whose window is covered or hidden),
+                //and a 1 ms poll then showed the frame 8 ms late on average
+                int64_t wake = next_tick;
+                if (display->frames_done() != seen_frames || m_shot_hold)
+                    wake = last_render + MIN_GAP_US;
+                else if (last_frame + lost_us > wake)
+                    wake = last_frame + lost_us;
+                const int64_t wait_us = wake - now_us();
+                if (wait_us <= 0) continue;
+                m_frame_event.wait_ms(static_cast<unsigned int>((wait_us + 999) / 1000));
+            }
+#ifdef _WIN32
+            timeEndPeriod(1);
+#endif
+        });
+    }
+}
+#endif // ECAT_SINGLE_THREAD
+
+void Emulator::stop_emulation()
+{
+    //While the emulation thread is still there to stop the sound capture
+    stop_video_recording();
+
+    if (this->loaded)
+    {
+        m_running = m_ready = false;
+
+#if defined(ECAT_SINGLE_THREAD)
+        //no threads to join
+#elif USE_QT_THREADING
+        if (renderThread) {
+            renderThread->join();
+            delete renderThread;
+            renderThread = nullptr;
+        }
+        if (emulationThread) {
+            emulationThread->join();
+            delete emulationThread;
+            emulationThread = nullptr;
+        }
+#else
+        if (renderThread.joinable()) {
+            renderThread.join();
+        }
+
+        if (emulationThread.joinable()) {
+            emulationThread.join();
+        }
+#endif
+        renderer->stop();
+    }
+}
+
+//------------------------------ Debugger ----------------------------------//
+
+//The listener is called under the lock: a window that removes it on its way
+//out is then sure no call is still on its way to it
+void Emulator::debug_notify(CPU * c, int reason)
+{
+    compat_lock_guard lock(m_debug_mutex);
+    m_debug_cpu = c;
+    m_debug_reason = reason;
+    m_debug_serial++;
+    if (m_debug_listener) m_debug_listener();
+}
+
+CPU * Emulator::debug_stop_cpu() const
+{
+    compat_lock_guard lock(m_debug_mutex);
+    return m_debug_cpu;
+}
+
+int Emulator::debug_stop_reason() const
+{
+    compat_lock_guard lock(m_debug_mutex);
+    return m_debug_reason;
+}
+
+void Emulator::set_debug_listener(const std::function<void()> &fn)
+{
+    compat_lock_guard lock(m_debug_mutex);
+    m_debug_listener = fn;
+}
+
+void Emulator::debug_attach(bool on)
+{
+    //A breakpoint met before the debugger came is old news
+    if (on && dm != nullptr)
+        for (CPU * c : dm->get_cpus()) c->break_hit = BREAK_NONE;
+    m_debug_attached = on;
+}
+
+void Emulator::debug_detach()
+{
+    m_debug_attached = false;
+    if (dm == nullptr) return;
+    //A machine the debugger paused goes on; the breakpoints stay in the
+    //processors' lists, but nothing stops at them any more
+    if (m_debug_paused) {
+        debug_run(false);
+    } else {
+        m_step_cpu = nullptr;
+        m_stepping = false;
+        for (CPU * c : dm->get_cpus()) {
+            c->clear_temp_break();
+            c->break_hit = BREAK_NONE;
+            if (c->m_debug == DEBUG_BRAKES) c->m_debug = DEBUG_OFF;
+        }
+    }
+}
+
+bool Emulator::debug_paused() const
+{
+    if (m_debug_paused) return true;
+    if (!loaded || dm == nullptr) return false;
+    const std::vector<CPU*> &cpus = dm->get_cpus();
+    if (cpus.empty()) return false;
+    for (CPU * c : cpus)
+        if (c->m_debug != DEBUG_STOPPED) return false;
+    return true;
+}
+
+void Emulator::debug_pause()
+{
+    m_step_cpu = nullptr;
+    m_stepping = false;
+    if (dm != nullptr)
+        for (CPU * c : dm->get_cpus()) c->clear_temp_break();
+    m_debug_paused = true;
+    debug_notify(nullptr, DSTOP_PAUSE);
+}
+
+void Emulator::debug_run(bool breakpoints)
+{
+    if (dm == nullptr) return;
+    m_step_cpu = nullptr;
+    m_stepping = false;
+    for (CPU * c : dm->get_cpus()) {
+        c->break_hit = BREAK_NONE;
+        if (!breakpoints) c->clear_temp_break();
+        c->m_debug = (breakpoints && (!c->get_breakpoints().empty() || c->has_temp_break()))
+                     ? DEBUG_BRAKES : DEBUG_OFF;
+    }
+    m_debug_paused = false;
+    debug_notify(nullptr, DSTOP_NONE);
+}
+
+void Emulator::debug_step(CPU * c, unsigned int count)
+{
+    if (c == nullptr || count == 0 || dm == nullptr) return;
+    for (CPU * o : dm->get_cpus()) {
+        o->break_hit = BREAK_NONE;
+        o->clear_temp_break();
+    }
+    m_debug_paused = true;
+    m_step_cpu = c;
+    m_step_count = count;
+    m_step_done = false;
+    m_step_spent = 0;
+    m_step_hit = nullptr;
+    m_stepping = true;
+}
+
+void Emulator::debug_step_over(CPU * c)
+{
+    if (c == nullptr) return;
+    const unsigned int pc = c->get_pc();
+    DisasmLine l;
+    if (c->decode_at(pc, l)) {
+        unsigned int sp;
+        //A repeated string instruction of the 8086 and a block instruction of
+        //the Z80 stay at their address until the count runs out
+        static const char * const REPEATED[] = {"rep", "LDIR", "LDDR", "CPIR", "CPDR", "INIR", "INDR", "OTIR", "OTDR"};
+        bool repeated = false;
+        for (const char * r : REPEATED)
+            if (l.text.compare(0, strlen(r), r) == 0) repeated = true;
+        if (l.flow == FLOW_CALL || repeated) {
+            if (!repeated && c->get_sp(sp)) c->set_temp_break(TEMP_RETURN, pc + l.length, sp);
+            else c->set_temp_break(TEMP_PC, pc + l.length, 0);
+            debug_run(true);
+            return;
+        }
+    }
+    debug_step(c);
+}
+
+void Emulator::debug_step_out(CPU * c)
+{
+    if (c == nullptr) return;
+    unsigned int sp;
+    if (!c->get_sp(sp)) {
+        debug_step(c);
+        return;
+    }
+    c->set_temp_break(TEMP_OUT, 0, sp);
+    debug_run(true);
+}
+
+void Emulator::debug_run_to(CPU * c, unsigned int address)
+{
+    if (c == nullptr) return;
+    c->set_temp_break(TEMP_PC, address, 0);
+    debug_run(true);
+}
+
+//A processor stopped on a breakpoint or the debugger's stop, and the others
+//have caught up with it: the machine pauses there, the processors keep the
+//mode they ran in
+void Emulator::debug_break(CPU * c)
+{
+    const int reason = (c->break_hit == BREAK_TEMP) ? DSTOP_TEMP : DSTOP_BREAKPOINT;
+    for (CPU * o : dm->get_cpus()) {
+        if (o->m_debug == DEBUG_STOPPED && o->break_hit != BREAK_NONE) o->m_debug = DEBUG_BRAKES;
+        o->break_hit = BREAK_NONE;
+        o->clear_temp_break();
+    }
+    m_step_cpu = nullptr;
+    m_stepping = false;
+    m_debug_paused = true;
+    debug_notify(c, reason);
+}
+
+//Every domain to the end of the slice at once, none of them clocked: the
+//machine's time stands still and the domains keep their distances. Domains a
+//long step took far ahead come back too, or the machine would stand still
+//after the pause until the wall clock caught up with them
+void Emulator::debug_hold_domains(uint64_t target)
+{
+    if (domains.empty()) return;
+    uint64_t low = domains[0].norm;
+    for (size_t i = 1; i < domains.size(); i++)
+        if (domains[i].norm < low) low = domains[i].norm;
+    if (low < target) {
+        for (size_t i = 0; i < domains.size(); i++) domains[i].norm += target - low;
+    } else if (low > target) {
+        for (size_t i = 0; i < domains.size(); i++) domains[i].norm -= low - target;
+    }
+}
+
+//The time step, made inside a slice: the domains run in the order of
+//timer_proc(), the one furthest behind first, until the processor has
+//executed an instruction and is the one furthest behind again - the others
+//then stand where a free run would have them. A step that takes long (WAIT
+//until the interrupt) goes on in the next slice, so that the window is
+//answered meanwhile
+void Emulator::debug_step_slice()
+{
+    size_t t = domains.size();
+    for (size_t i = 0; i < domains.size(); i++)
+        if (domains[i].cpu == m_step_cpu) t = i;
+    if (t == domains.size()) {
+        m_step_cpu = nullptr;
+        m_stepping = false;
+        return;
+    }
+
+    //20 ms of the machine a slice, and a second for the whole step: a
+    //processor that executes nothing for that long (held in reset, waiting
+    //with the interrupts off) is not going to
+    const uint64_t budget = (uint64_t)clock_freq / 50 * domains[0].scale + 1;
+    const uint64_t limit = (uint64_t)clock_freq * domains[0].scale;
+    uint64_t spent = 0;
+
+    while (true) {
+        size_t k = 0;
+        for (size_t i = 1; i < domains.size(); i++)
+            if (domains[i].norm < domains[k].norm) k = i;
+
+        //Another processor stopped on its breakpoint during the step, and
+        //the others have caught up with it, as they do in a free run
+        if (m_step_hit != nullptr && domains[k].cpu == m_step_hit) {
+            debug_break(m_step_hit);
+            return;
+        }
+        if (m_step_done && k == t) {
+            if (m_step_hit != nullptr) {
+                debug_break(m_step_hit);
+                return;
+            }
+            if (--m_step_count > 0) {
+                m_step_done = false;
+                m_step_spent = 0;
+                continue;
+            }
+            CPU * c = m_step_cpu;
+            m_step_cpu = nullptr;
+            m_stepping = false;
+            debug_notify(c, DSTOP_STEP);
+            return;
+        }
+        if (spent >= budget) return;
+        if (m_step_spent >= limit) {
+            CPU * c = m_step_cpu;
+            m_step_cpu = nullptr;
+            m_stepping = false;
+            debug_notify(c, DSTOP_NO_PROGRESS);
+            return;
+        }
+
+        ClockDomain &d = domains[k];
+        CPU * c = d.cpu;
+        const unsigned int saved = c->m_debug;
+        const bool mine = (k == t);
+        //A processor stopped on its own moves with the machine all the same:
+        //the step is the machine's
+        if (mine || saved == DEBUG_STOPPED) c->m_debug = DEBUG_STEP;
+        const unsigned int counter = c->execute();
+
+        if (mine) {
+            if (c->m_debug == DEBUG_STOPPED && !c->waiting()) m_step_done = true;
+            c->m_debug = saved;
+        } else if (saved == DEBUG_STOPPED) {
+            c->m_debug = DEBUG_STOPPED;
+        } else if (c->m_debug == DEBUG_STOPPED && c->break_hit != BREAK_NONE && m_step_hit == nullptr) {
+            m_step_hit = c;
+        }
+
+        const uint64_t moved = (counter > 0) ? (uint64_t)counter * d.scale : 10ull * d.scale;
+        d.norm += moved;
+        spent += moved;
+        if (mine) m_step_spent += moved;
+        if (counter > 0) {
+            if (k == 0) clock_counter += counter;
+            dm->clock((unsigned int)k, counter);
+            if (script) script->tick(clock_counter);
+        }
+        //The script has paused or resumed the machine meanwhile
+        if (m_step_cpu == nullptr) return;
+        //Reported by timer_proc(), which pauses the machine
+        if (dm->error_pending) {
+            m_step_cpu = nullptr;
+            m_stepping = false;
+            return;
+        }
+    }
+}
+
+void Emulator::timer_proc(uint64_t time_ticks)
+{
+    //TODO: Other timer stuff?
+
+    // SDL_Event ev;
+
+    if (!busy && !domains.empty())
+    {
+        busy = true;
+
+        //Before the slice: every domain has finished a whole one and its
+        //position has already been rebased by the "-= target" at the end of
+        //the previous pass, so the machine is as consistent as it ever gets
+        store_state();
+
+        // while (SDL_PollEvent(&ev))
+        // {
+        //     qDebug() << ev.type;
+        // }
+
+        //The slice arrives in the master's cycles; every domain is carried in
+        //the common normalised time instead, so that processors of different
+        //frequencies interleave by an exact integer ratio and a run stays
+        //reproducible to the byte
+        const uint64_t target = time_ticks * domains[0].scale;
+        const uint64_t clock_before = clock_counter;
+
+        //The debugger's pause: nothing runs but a step
+        if (m_step_cpu != nullptr) debug_step_slice();
+        if (m_debug_paused) {
+            debug_hold_domains(target);
+            if (script) script->tick(clock_counter);
+        }
+
+        while (true) {
+            //Whichever processor is furthest behind goes next. With one domain
+            //this is simply "has the slice been used up yet"
+            size_t k = 0;
+            for (size_t i = 1; i < domains.size(); i++)
+                if (domains[i].norm < domains[k].norm) k = i;
+            if (domains[k].norm >= target) break;
+
+            ClockDomain &d = domains[k];
+            unsigned int counter = d.cpu->execute();
+            if (counter > 0) {
+                d.norm += (uint64_t)counter * d.scale;
+
+                //Emulated time of the machine is the master's time: a script
+                //that waits 20 ms means 20 ms of the machine, whatever the
+                //other processors are doing
+                if (k == 0) clock_counter += counter;
+                dm->clock((unsigned int)k, counter);
+
+                //Scripts are advanced here, on the emulation thread, so they see
+                //the devices in the same state the CPU does. Ticking inside the
+                //loop rather than once per time slice makes a script resume at
+                //the very same instruction on every run: the size of a slice
+                //depends on the host clock, the cycle counter does not.
+                //A script that pauses the machine (cpu.pause) pauses it here,
+                //at this instruction, not at the end of the slice
+                if (script) {
+                    script->tick(clock_counter);
+                    if (m_debug_paused.load(std::memory_order_relaxed)) debug_hold_domains(target);
+                }
+            } else {
+                //A processor stopped on a breakpoint while the debugger is
+                //attached, and every other one has caught up with it: the
+                //whole machine pauses at this moment
+                if (m_debug_attached && d.cpu->break_hit != BREAK_NONE) {
+                    debug_break(d.cpu);
+                    debug_hold_domains(target);
+                    if (script) script->tick(clock_counter);
+                    continue;
+                }
+
+                //A stopped CPU produces no cycles, but its domain still has to
+                //move or the loop would never end. The script engine still runs:
+                //the commands that need no emulated time are how a debugging
+                //session steps, inspects and starts the CPU again. The delays
+                //stay frozen, which is the honest behaviour - they are counted
+                //in emulated time and that is what has stopped
+                //
+                //When every processor is stopped, all the domains move by the
+                //same amount, to the end of the slice: stepping them in turns
+                //shifted them against each other by an amount that depended on
+                //how long the host took meanwhile, and two processors resumed
+                //from a script (stop, SCREEN, run) interleaved differently from
+                //run to run - TSSPD's numbers on the УК-НЦ moved by a count
+                //"Stopped" is what execute() does, not the debugger's flag: a
+                //К1801ВМ1 held by ~dclo spends cycles while stopped, and moving
+                //it with the others would make time crawl instead of stand
+                bool all_stopped = true;
+                for (const ClockDomain &o : domains)
+                    if (!o.cpu->frozen()) { all_stopped = false; break; }
+                if (all_stopped) {
+                    const uint64_t step = target - d.norm;
+                    for (ClockDomain &o : domains) o.norm += step;
+                } else {
+                    d.norm += 10ull * d.scale;
+                }
+
+                if (script) {
+                    script->tick(clock_counter);
+                    if (m_debug_paused.load(std::memory_order_relaxed)) debug_hold_domains(target);
+                }
+            }
+        }
+        //A device refused what the guest asked of it (an unsupported mode, a
+        //command the emulator does not model). Throwing from here used to end
+        //the process; the machine is stopped instead, and the message stays in
+        //the device manager. Starting the CPU again resumes until the next one
+        if (dm->error_pending) {
+            dm->error_pending = false;
+            set_machine_error((dm->error_device != nullptr ? dm->error_device->name + ": " : std::string())
+                              + dm->error_message, false);
+            for (size_t i = 0; i < domains.size(); i++)
+                domains[i].cpu->m_debug = DEBUG_STOPPED;
+            if (m_debug_attached) {
+                m_step_cpu = nullptr;
+                m_stepping = false;
+                m_debug_paused = true;
+                debug_notify(nullptr, DSTOP_ERROR);
+            }
+        }
+
+        //The master stood still for the whole slice: a WAITFOR or a SCREEN
+        //would wait for an emulated millisecond that is not coming
+        if (script && time_ticks > 0 && clock_counter == clock_before) script->tick_frozen(clock_counter);
+
+        //Pasted text needs no step finer than a slice: nothing measures it
+        if (m_paste_active) paste_step();
+
+        //A display with no raster in the model gets a frame every 20 ms of the
+        //machine's time: the render thread then shows it on that schedule,
+        //woken at once, instead of on the host's tick. Checked once a slice,
+        //not on every instruction: the Орион and the Ириша left the list of
+        //clocked devices for that cost
+        if (display != nullptr && !display->own_frames()) {
+            const uint64_t period = clock_freq / 50;
+            if (clock_counter < m_machine_frame_clock) m_machine_frame_clock = clock_counter;
+            if (period > 0 && clock_counter - m_machine_frame_clock >= period) {
+                m_machine_frame_clock += (clock_counter - m_machine_frame_clock) / period * period;
+                display->machine_frame();
+            }
+        }
+
+        //What a domain overshot the slice by is owed to the next one
+        for (size_t i = 0; i < domains.size(); i++) domains[i].norm -= target;
+
+        busy = false;
+    }
+}
+
+
+void Emulator::init_video(void *p)
+{
+    GenericDisplay * d = dynamic_cast<GenericDisplay*>(dm->get_device_by_name("display"));
+    if (!d) {
+        // qCritical() << "Error: Display device not found or wrong type in init_video";
+        return;
+    }
+
+    d->get_screen_constraints(&screen_sx, &screen_sy);
+    //The ini is the user's own file: a value left empty or mistyped keeps the
+    //default instead of throwing out of the window's slot at every start
+    auto video_setting = [this](const char * ident, double def) -> double {
+        try {
+            return std::stod(read_setup("Video", ident, ""));
+        } catch (const std::exception &) {
+            return def;
+        }
+    };
+    screen_scale = video_setting("scale", 2);
+    screen_ratio = static_cast<int>(video_setting("ratio", SCREEN_RATIO_43));
+    screen_filtering = static_cast<int>(video_setting("filtering", SCREEN_FILTERING_NONE));
+    screen_blending = video_setting("blend_frames", 0) != 0;
+    screen_persistence = static_cast<int>(video_setting("persistence", SCREEN_PERSISTENCE_OFF));
+
+    if (screen_ratio == SCREEN_RATIO_SQ)
+        pixel_scale = 1;
+    else
+    if (screen_ratio == SCREEN_RATIO_43)
+        pixel_scale = (4.0 / 3.0) / ((double)screen_sx / (double)screen_sy);
+    else
+        pixel_scale = ((double)screen_sy / (double)screen_sx);
+
+    //Under the surface lock, exactly like the resize in render_screen(): this
+    //runs on the interface thread, and with the MCP server the window is
+    //created when a machine is asked for - by then the render thread may
+    //already be drawing into the buffer this call is about to replace
+    d->lock_surface();
+    renderer->init_screen(p, screen_sx, screen_sy, screen_scale, pixel_scale);
+    d->set_renderer(*renderer);
+    d->unlock_surface();
+    //Straight to the renderer: set_filtering() also clears screen_sx, and the
+    //render thread's first pass then replaced the surface just made with a
+    //blank one - the frames drawn into it meanwhile were lost, and a SCREEN
+    //taken in that pass came out black on the УК-НЦ under -j 8
+    renderer->set_filtering(screen_filtering);
+    renderer->set_frame_blending(screen_blending);
+    renderer->set_persistence(screen_persistence);
+}
+
+void Emulator::stop_video()
+{
+    //The renderer frees the surface here, so nothing may be drawing into it
+    GenericDisplay * d = dynamic_cast<GenericDisplay*>(dm->get_device_by_name("display", false));
+    if (d) d->lock_surface();
+    renderer->stop();
+    if (d) d->unlock_surface();
+}
+
+void Emulator::render_screen()
+{
+    if (m_running && m_ready) {
+        //A screenshot asked for before this pass is drawn by it: validate()
+        //below paints from the machine as it stands. One asked for while the
+        //pass is under way waits for the next - the picture validate() made
+        //is older than the request: a render thread held up between the two
+        //(a loaded host) let a script at MAX run on for seconds, and the
+        //ДВК-3, whose КСМ screen is painted here from its video memory, came
+        //out without its last output while LOG display.text had it. At any
+        //speed but 1x the machine must also be standing for the picture
+        //(m_shot_hold), or the slice it is in moves on after validate()
+        const bool shot_due = is_screenshot_pending() && (m_shot_hold || m_speed_q == 4);
+
+        unsigned int current_sx, current_sy;
+        display->get_screen_constraints(&current_sx, &current_sy);
+        if ((current_sx != screen_sx) || (current_sy != screen_sy))
+        {
+            screen_sx = current_sx;
+            screen_sy = current_sy;
+            if (screen_ratio == SCREEN_RATIO_SQ)
+                pixel_scale = 1;
+            else
+            if (screen_ratio == SCREEN_RATIO_43)
+                pixel_scale = (4.0 / 3.0) / ((double)screen_sx / (double)screen_sy);
+            else
+                pixel_scale = ((double)screen_sy / (double)screen_sx);
+            display->lock_surface();
+            renderer->resize(screen_sx, screen_sy, screen_scale, pixel_scale);
+            display->set_renderer(*renderer);                                   // We need to update surface
+            display->unlock_surface();
+        }
+
+        display->validate();
+        renderer->set_scan_lines(static_cast<int>(display->get_scan_lines()));
+
+#ifdef WASM_BUILD
+        // Always render: the canvas takes every frame the render loop is woken for,
+        // was_updated or not. A display the window lags on looks right here.
+        renderer->render();
+        display->was_updated = false;
+#else
+        bool rendered = false;
+        //A blended picture that still shows the frame before is drawn once
+        //more, or a display that stopped changing would keep it half there
+        if (display->was_updated || renderer->blend_settling())
+        {
+            //Cleared before the frame goes out, not after: the emulation thread
+            //sets it whenever it changes the picture, and clearing afterwards
+            //would drop a change made while render() was running
+            display->was_updated = false;
+            renderer->render();
+            rendered = true;
+        }
+
+        if (m_video.recording()) {
+            //The picture only when it has changed: the recorder repeats the
+            //last one for as many frames as pass
+            if (!m_video_from_screen && !m_video_locked && (rendered || m_video.frames() == 0)) {
+                std::vector<uint8_t> image = renderer->get_screenshot();
+                if (image.size() >= (size_t)screen_sx * screen_sy * 4)
+                    m_video.set_frame(image.data(), screen_sx, screen_sy);
+            }
+            collect_video_audio(false);
+            m_video.advance(clock_counter);
+        }
+#endif
+
+        //A screenshot requested by a script is taken here, on the render thread,
+        //at the end of a pass of the render loop
+        if (shot_due) store_screenshot();
+    }
+}
+
+std::vector<GenericSound*> Emulator::sound_outputs()
+{
+    std::vector<GenericSound*> out;
+    if (dm == nullptr) return out;
+    std::vector<ComputerDevice*> list = dm->find_devices_by_class("sound");
+    for (size_t i = 0; i < list.size(); i++) {
+        GenericSound * s = dynamic_cast<GenericSound*>(list[i]);
+        if (s != nullptr) out.push_back(s);
+    }
+    return out;
+}
+
+//Takes what the audio outputs have produced and hands the recorder their sum,
+//as far as every one of them has got. flush: the capture has ended, the rest
+//goes as it is
+void Emulator::collect_video_audio(bool flush)
+{
+    compat_lock_guard lock(m_video_audio_mutex);
+    std::vector<GenericSound*> outputs = sound_outputs();
+    if (outputs.empty()) return;
+    if (m_video_audio.size() != outputs.size()) m_video_audio.assign(outputs.size(), std::vector<int16_t>());
+    size_t n = SIZE_MAX;
+    for (size_t i = 0; i < outputs.size(); i++) {
+        outputs[i]->take_video_samples(m_video_audio[i]);
+        n = std::min(n, m_video_audio[i].size());
+    }
+    if (flush) {
+        n = 0;
+        for (size_t i = 0; i < outputs.size(); i++) n = std::max(n, m_video_audio[i].size());
+    }
+    if (n == 0) return;
+    std::vector<int16_t> mix(n);
+    for (size_t k = 0; k < n; k++) {
+        int32_t v = 0;
+        for (size_t i = 0; i < outputs.size(); i++)
+            if (k < m_video_audio[i].size()) v += m_video_audio[i][k];
+        mix[k] = (int16_t)std::max<int32_t>(-32768, std::min<int32_t>(32767, v));
+    }
+    for (size_t i = 0; i < outputs.size(); i++) {
+        std::vector<int16_t> &b = m_video_audio[i];
+        b.erase(b.begin(), b.begin() + std::min(n, b.size()));
+    }
+    m_video.add_audio(mix.data(), n, outputs[0]->produced_rate());
+}
+
+bool Emulator::start_video_recording(VideoSettings s, bool from_screen, std::string &error)
+{
+    if (!loaded || cpu == nullptr || display == nullptr) {
+        error = "No machine is running";
+        return false;
+    }
+    uint64_t num = 0, den = 0;
+    const bool rate = s.native && display->native_frame_rate(num, den);
+    //"As on screen" at the rate of the machine with the frames blended: the
+    //machine's frames, blended here as the window blends them. The window's
+    //own picture cannot be had frame by frame: it is read back when the GUI
+    //thread paints, later than the frame and not for every one, so frames
+    //came out twice or not at all and the residual flicker of the mix jerked;
+    //the read-back held the GUI thread up, and the window lost frames too.
+    //What only the window adds (its size, the CRT shader) is not in the video
+    const bool blended = from_screen && rate && renderer->frame_processing();
+    if (blended) from_screen = false;
+    //The pixel aspect of the picture as the window would show it; a picture
+    //taken from the window has it already
+    s.sar = from_screen ? 1.0 : pixel_scale;
+    s.upscale = !from_screen;
+    //The rate of the machine: frame by frame from the display when the picture
+    //is the machine's own, only the exact rate when it is the window's
+    s.frame_locked = false;
+    if (rate) {
+        s.fps_num = num;
+        s.fps_den = den;
+        s.frame_locked = !from_screen;
+    } else if (s.native) {
+        s.fps_num = 50;
+        s.fps_den = 1;
+    }
+    m_video_from_screen = from_screen;
+    m_video_locked = s.frame_locked;
+    //Frames from the frame hook: ffmpeg is started here, on the GUI thread,
+    //with the size of the surface, not by the first frame on the emulation
+    //thread (see VideoRecorder::start())
+    if (s.frame_locked) {
+        display->lock_surface();
+        s.width = (unsigned int)std::max(0, renderer->width());
+        s.height = (unsigned int)std::max(0, renderer->height());
+        display->unlock_surface();
+    }
+    //"As on screen": the pixel aspect of the window goes into the pixels, each
+    //axis enlarged a whole number of times without smoothing, so a point of
+    //the machine is an even block in any player, which may ignore setsar or
+    //smooth it. The height at least the window's scale (auto: 480 lines,
+    //as a codec with 4:2:0 colour needs anyway); an aspect that is a fraction
+    //p/q with q up to 4 (4/3 of the БК, 2/3 of its 512 points) is exact, any
+    //other is the nearest whole width with the rest left to setsar
+    if (blended && s.height > 0) {
+        const bool yuv420 = s.codec == VIDEO_CODEC_H264 || s.codec == VIDEO_CODEC_H265;
+        const unsigned int k480 = (480 + s.height - 1) / s.height;
+        unsigned int ky = screen_scale >= 1 ? (unsigned int)std::lround(screen_scale) : k480;
+        if (yuv420) ky = std::max(ky, k480);
+        const double ps = pixel_scale > 0 ? pixel_scale : 1.0;
+        unsigned int kx = 0;
+        for (unsigned int q = 1; q <= 4 && kx == 0; q++) {
+            const long p = std::lround(ps * q);
+            if (p >= 1 && std::fabs((double)p / q - ps) <= ps * 0.001) {
+                const unsigned int m = (ky + q - 1) / q;
+                kx = (unsigned int)p * m;
+                ky = q * m;
+            }
+        }
+        if (kx == 0) kx = (unsigned int)std::max(1L, std::lround(ky * ps));
+        s.scale_x = kx;
+        s.scale_y = ky;
+        s.sar = ky * ps / kx;
+        s.upscale = false;
+    }
+    if (!m_video.start(s, clock_freq, error)) return false;
+
+    //Frame 0 and the first sample belong to one moment of the machine
+    {
+        compat_lock_guard lock(m_video_audio_mutex);
+        m_video_audio.clear();
+    }
+    try {
+        const bool locked = s.frame_locked;
+        const double frame_s = (rate && num > 0) ? (double)den / num : 0.02;
+        invoke([this, locked, blended, frame_s]() {
+            std::vector<GenericSound*> outputs = sound_outputs();
+            for (size_t i = 0; i < outputs.size(); i++) outputs[i]->begin_video_capture();
+            m_video.set_start(clock_counter);
+            m_video_blended = blended;
+            m_video_blender.reset();
+            m_video_phosphor.reset();
+            m_video_frame_s = frame_s;
+            if (locked)
+                display->set_frame_hook([this]() {
+                    //The surface lock keeps the render thread from resizing
+                    //it under the copy
+                    if (renderer == nullptr) return;
+                    display->lock_surface();
+                    std::vector<uint8_t> image = renderer->get_screenshot();
+                    const int w = renderer->width(), h = renderer->height();
+                    display->unlock_surface();
+                    if (w <= 0 || h <= 0 || image.size() < (size_t)w * h * 4) return;
+                    //Blending or persistence turned off in the window during
+                    //the recording is off in the video from that frame on
+                    if (m_video_blended && renderer->frame_blending())
+                        m_video_blender.blend(image.data(), image.data(), (size_t)w * h);
+                    else if (m_video_blender.started())
+                        m_video_blender.reset();
+                    const int persistence = renderer->persistence();
+                    if (m_video_blended && persistence != SCREEN_PERSISTENCE_OFF)
+                        m_video_phosphor.apply(image.data(), image.data(), (size_t)w * h,
+                                               persistence_tau(persistence), m_video_frame_s);
+                    else if (m_video_phosphor.started())
+                        m_video_phosphor.reset();
+                    m_video.push_frame(image.data(), (unsigned int)w, (unsigned int)h);
+                });
+        });
+        m_video_capturing = true;
+    } catch (const std::exception &ex) {
+        m_video.stop(0);
+        error = ex.what();
+        return false;
+    }
+    return true;
+}
+
+void Emulator::stop_video_recording()
+{
+    //Also after the recorder has failed on its own: the outputs would go on
+    //capturing into buffers nobody empties
+    if (!m_video_capturing) return;
+    m_video_capturing = false;
+    uint64_t end = 0;
+    try {
+        invoke([this, &end]() {
+            std::vector<GenericSound*> outputs = sound_outputs();
+            for (size_t i = 0; i < outputs.size(); i++) outputs[i]->end_video_capture();
+            if (display != nullptr) display->set_frame_hook(std::function<void()>());
+            end = clock_counter;
+        });
+    } catch (const std::exception &) {
+        if (display != nullptr) display->set_frame_hook(std::function<void()>());
+        std::vector<GenericSound*> outputs = sound_outputs();
+        for (size_t i = 0; i < outputs.size(); i++) outputs[i]->end_video_capture();
+        end = clock_counter;
+    }
+    collect_video_audio(true);
+    m_video.stop(end);
+}
+
+void Emulator::abort_video_recording()
+{
+    stop_video_recording();
+    m_video.abort();
+}
+
+void Emulator::video_frame(const uint8_t * rgba, unsigned int w, unsigned int h, bool bottom_up)
+{
+    if (m_video_from_screen) m_video.set_frame(rgba, w, h, bottom_up);
+}
+
+std::vector<uint8_t> Emulator::grab_screen(unsigned int * sx, unsigned int * sy)
+{
+    std::vector<uint8_t> image;
+    *sx = *sy = 0;
+    if (display == nullptr) return image;
+    display->lock_surface();
+    *sx = screen_sx;
+    *sy = screen_sy;
+    image = renderer->get_screenshot();
+    display->unlock_surface();
+    return image;
+}
+
+void Emulator::request_screenshot(const std::string &file_name)
+{
+    compat_lock_guard lock(m_screenshot_mutex);
+    m_screenshot_file = file_name;
+    m_screenshot_requested = true;
+}
+
+bool Emulator::is_screenshot_pending()
+{
+    compat_lock_guard lock(m_screenshot_mutex);
+    return m_screenshot_requested;
+}
+
+bool Emulator::take_screenshot_png(std::vector<unsigned char> &out, uint64_t * serial)
+{
+    compat_lock_guard lock(m_screenshot_mutex);
+    if (serial != nullptr) *serial = m_screenshot_serial;
+    if (m_screenshot_png.empty()) return false;
+    out = m_screenshot_png;
+    return true;
+}
+
+void Emulator::store_screenshot()
+{
+    std::string file_name;
+    {
+        compat_lock_guard lock(m_screenshot_mutex);
+        if (!m_screenshot_requested) return;
+        file_name = m_screenshot_file;
+    }
+
+    //screen_sx/screen_sy are the dimensions the renderer was last resized to,
+    //so they always match the buffer it returns. The display device may already
+    //report a new resolution that has not been applied to the renderer yet.
+    unsigned int sx = screen_sx;
+    unsigned int sy = screen_sy;
+    std::vector<uint8_t> image = renderer->get_screenshot();
+
+    if (sx == 0 || sy == 0 || image.size() < static_cast<size_t>(sx) * sy * 4)
+    {
+        std::cerr << "Screenshot buffer does not match the screen size, skipped" << std::endl;
+        compat_lock_guard lock(m_screenshot_mutex);
+        m_screenshot_file.clear();
+        m_screenshot_requested = false;
+        return;
+    }
+
+    std::vector<unsigned char> png;
+    unsigned int error = lodepng::encode(png, image, sx, sy);
+    if (error != 0)
+        std::cerr << "Unable to encode a screenshot: " << lodepng_error_text(error) << std::endl;
+    else
+    {
+        //The file is optional: an external driver asks for the bytes instead
+        if (!file_name.empty() && lodepng::save_file(png, file_name) != 0)
+            std::cerr << "Unable to write a screenshot to " << file_name << std::endl;
+
+        compat_lock_guard lock(m_screenshot_mutex);
+        m_screenshot_png.swap(png);
+        m_screenshot_serial++;
+    }
+
+    //Cleared last: the script waits for this to know the image is ready
+    compat_lock_guard lock(m_screenshot_mutex);
+    m_screenshot_file.clear();
+    m_screenshot_requested = false;
+}
+
+void Emulator::resize_screen()
+{
+    if (display) display->validate(true);
+}
+
+void Emulator::key_event(int key, int modifiers, bool press, bool host)
+{
+    //Reached from the GUI thread, which knows nothing about a machine that
+    //failed to load or has not started yet
+    if (!keyboard || !display) return;
+
+    //A key sent with Ctrl (TYPE switching РУС on the УК-НЦ): Ctrl goes down
+    //before it and up after it
+    if (key & (int)KEY_WITH_CTRL) {
+        const int k = key & ~(int)KEY_WITH_CTRL;
+        if (press) { key_event((int)EmuKey::Control, modifiers, true, host); key_event(k, modifiers, true, host); }
+        else       { key_event(k, modifiers, false, host); key_event((int)EmuKey::Control, modifiers, false, host); }
+        return;
+    }
+
+    //A keypad key is the plain one to everything but a keyboard that has a
+    //keypad of its own
+    const int plain = key & ~(int)EmuKey::Keypad;
+    keyboard->key_event(keyboard->keypad_keys() ? key : plain, plain, press, host);
+    for (size_t i = 0; i < joysticks.size(); i++) joysticks[i]->key_event((unsigned int)plain, press);
+    if (plain == EmuKey::F12) display->validate(true);
+    if (press && plain == EmuKey::Cancel) {
+        reset(modifiers & EmuKey::AltModifier);
+    }
+}
+
+int Emulator::host_key(int key, unsigned int scan, int modifiers, bool press)
+{
+    {
+        compat_lock_guard lock(m_host_keys_mutex);
+        size_t i = 0;
+        for (; i < m_host_keys.size(); i++)
+            if ((scan != 0)?(m_host_keys[i].scan == scan):(m_host_keys[i].key == key)) break;
+
+        if (press) {
+            if (i == m_host_keys.size()) {
+                HostKey h;
+                h.scan = scan;
+                h.key = key;
+                m_host_keys.push_back(h);
+            }
+        } else if (i < m_host_keys.size()) {
+            key = m_host_keys[i].key;
+            m_host_keys.erase(m_host_keys.begin() + i);
+        }
+    }
+
+    key_event(key, modifiers, press, true);
+    return key;
+}
+
+void Emulator::set_key_remap(int mode)
+{
+    m_key_remap = mode;
+    if (keyboard) keyboard->set_remap_mode(mode);
+}
+
+void Emulator::release_host_keys()
+{
+    std::vector<HostKey> held;
+    {
+        compat_lock_guard lock(m_host_keys_mutex);
+        held.swap(m_host_keys);
+    }
+    for (size_t i = 0; i < held.size(); i++) {
+        //As a host key: one a key group swallowed is let go there too
+        key_event(held[i].key, 0, false, true);
+        //A recording would otherwise keep the key down for the rest of it
+        record_key(static_cast<unsigned int>(held[i].key), held[i].scan, false);
+    }
+}
+
+void Emulator::paste_text(const std::string &text, unsigned int delay_ms, unsigned int hold_ms)
+{
+    invoke([this, text, delay_ms, hold_ms]{
+        if (!keyboard) return;
+        paste_clear();
+        text_to_keys(text, keyboard, false, m_paste_keys, m_paste_shift);
+        if (m_paste_keys.empty()) return;
+        m_paste_delay = (uint64_t)delay_ms * ticks_per_ms();
+        m_paste_hold = (uint64_t)hold_ms * ticks_per_ms();
+        m_paste_at = clock_counter + m_paste_delay;
+        m_paste_active = true;
+    });
+}
+
+//Lets go of the key being typed and forgets the rest. Emulation thread
+void Emulator::paste_clear()
+{
+    if (m_paste_pressed && m_paste_index < m_paste_keys.size()) {
+        key_event(static_cast<int>(m_paste_keys[m_paste_index]), 0, false);
+        if (m_paste_shift[m_paste_index]) key_event(static_cast<int>(EmuKey::Shift), 0, false);
+    }
+    m_paste_keys.clear();
+    m_paste_shift.clear();
+    m_paste_index = 0;
+    m_paste_pressed = false;
+    m_paste_active = false;
+}
+
+//ScriptEngine::key_step(): Shift goes down and up around the character that
+//needs it, since the keyboards watch the Shift key, not a modifier flag
+void Emulator::paste_step()
+{
+    if (clock_counter < m_paste_at) return;
+
+    if (!m_paste_pressed) {
+        if (m_paste_shift[m_paste_index]) key_event(static_cast<int>(EmuKey::Shift), 0, true);
+        key_event(static_cast<int>(m_paste_keys[m_paste_index]), 0, true);
+        m_paste_pressed = true;
+        m_paste_at = clock_counter + m_paste_hold;
+        return;
+    }
+
+    key_event(static_cast<int>(m_paste_keys[m_paste_index]), 0, false);
+    if (m_paste_shift[m_paste_index]) key_event(static_cast<int>(EmuKey::Shift), 0, false);
+    m_paste_pressed = false;
+    if (++m_paste_index >= m_paste_keys.size()) {
+        paste_clear();
+        return;
+    }
+    m_paste_at = clock_counter + m_paste_delay;
+}
+
+// A key of the machine's own keyboard, pressed on the drawing of it. It carries
+// an id instead of a host code, so nothing here goes through rus_translate():
+// the picture already shows the machine's layout.
+void Emulator::key_event_id(const std::string &id, bool press)
+{
+    if (!keyboard || !display) return;
+    keyboard->key_event_id(id, press);
+}
+
+void Emulator::mouse_event(int dx, int dy, int buttons)
+{
+    if (!keyboard || !display) return;
+    for (size_t i = 0; i < mice.size(); i++) mice[i]->move(dx, dy, buttons);
+}
+
+bool Emulator::has_mouse() const
+{
+    for (size_t i = 0; i < mice.size(); i++)
+        if (mice[i]->mouse_plugged() && mice[i]->mouse_used()) return true;
+    return false;
+}
+
+void Emulator::set_volume(int value)
+{
+    //Every audio output of the machine, by class: the name "sound" used to be
+    //reserved for it without being written down anywhere, and a device named
+    //otherwise ignored the volume control
+    if (loaded)
+        for (ComputerDevice * d : dm->find_devices_by_class("sound")) {
+            GenericSound * sound = dynamic_cast<GenericSound*>(d);
+            if (sound != nullptr) sound->set_volume(value);
+        }
+}
+
+void Emulator::set_speed(int quarters)
+{
+    if (quarters < 0) quarters = 4;
+    if (quarters > SPEED_MAX_Q) quarters = SPEED_MAX_Q;
+    m_speed_q = quarters;
+    GenericSound::set_speed(quarters);
+}
+
+int Emulator::parse_speed(const std::string &text)
+{
+    std::string s;
+    for (char c : text)
+        if (c != ' ' && c != '\t') s += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (!s.empty() && s[0] == '_') s.erase(0, 1);
+    if (s == "max") return 0;
+    if (!s.empty() && s.back() == 'x') s.pop_back();
+    if (s.empty()) return -1;
+    //Fixed point by hand: a double would take "0.1" as well
+    uint64_t whole = 0, frac = 0, frac_div = 1;
+    bool point = false;
+    for (char c : s) {
+        if (c == '.' || c == ',') {
+            if (point) return -1;
+            point = true;
+        } else if (c >= '0' && c <= '9') {
+            if (whole > 100000 || frac_div > 100000) return -1;
+            if (point) { frac = frac * 10 + (c - '0'); frac_div *= 10; }
+            else whole = whole * 10 + (c - '0');
+        } else return -1;
+    }
+    if ((frac * 4) % frac_div != 0) return -1;
+    const uint64_t q = whole * 4 + frac * 4 / frac_div;
+    if (q < 1 || q > (uint64_t)SPEED_MAX_Q) return -1;
+    return static_cast<int>(q);
+}
+
+uint64_t Emulator::slice_ticks(uint64_t elapsed_us)
+{
+    const int q = m_speed_q;
+    //As fast as possible: the wall clock does not matter, the slice is
+    //20 ms of emulated time, short enough for invoke() to stay prompt
+    if (q == 0) {
+        m_speed_rem = 0;
+        return clock_freq / 50;
+    }
+    //1x exactly as it always was
+    if (q == 4) {
+        m_speed_rem = 0;
+        return elapsed_us * clock_freq / 1000000;
+    }
+    //The remainder is carried: at 0.25x a 1 ms slice is a quarter of
+    //a millisecond, and truncating it every time would lose a share of it
+    if (elapsed_us > 1000000) elapsed_us = 1000000;     //capped below anyway; no overflow
+    const uint64_t num = elapsed_us * clock_freq * (uint64_t)q + m_speed_rem;
+    uint64_t ticks = num / 4000000;
+    m_speed_rem = num % 4000000;
+    //Not 1x: a host that cannot keep up gives a slice longer each time, and
+    //invoke() (the menus, the debugger, a disk change) waits for the slice to
+    //end. 50 ms of emulated time at most, the rest is dropped: such a machine
+    //runs as fast as the host allows. 1x keeps the catch-up uncapped, see run()
+    const uint64_t cap = clock_freq / 20;
+    if (ticks > cap) {
+        ticks = cap;
+        m_speed_rem = 0;
+    }
+    return ticks;
+}
+
+void Emulator::set_muted(bool muted)
+{
+    if (loaded)
+        for (ComputerDevice * d : dm->find_devices_by_class("sound")) {
+            GenericSound * sound = dynamic_cast<GenericSound*>(d);
+            if (sound != nullptr) sound->set_muted(muted);
+        }
+}
+
+void Emulator::set_sound_latency(unsigned int ms)
+{
+    if (loaded)
+        for (ComputerDevice * d : dm->find_devices_by_class("sound")) {
+            GenericSound * sound = dynamic_cast<GenericSound*>(d);
+            if (sound != nullptr) sound->set_latency(ms);
+        }
+}
+
+Emulator::~Emulator()
+{
+    stop_video_recording();
+    //The devices first, as in drop_machine(): their interfaces are registered
+    //in the manager
+    delete dm;
+    delete im;
+}
+
+void Emulator::get_screen_constraints(unsigned int * sx, unsigned int * sy)
+{
+    if (!display) {
+        *sx = *sy = 0;
+        return;
+    }
+    display->get_screen_constraints(sx, sy);
+}
+
+SystemData * Emulator::get_system_data()
+{
+    return &sd;
+}
+
+void Emulator::set_scale(int scale)
+{
+    screen_scale = scale;
+    screen_sx = 0;
+
+    write_setup("Video", "scale", std::to_string(screen_scale));
+}
+
+void Emulator::set_ratio(int ratio)
+{
+    screen_ratio = ratio;
+    if (ratio == SCREEN_RATIO_SQ)
+        pixel_scale = 1;
+    else
+    if (ratio == SCREEN_RATIO_43)
+        pixel_scale = (4.0 / 3.0) / ((double)screen_sx / (double)screen_sy);
+    else
+        pixel_scale = ((double)screen_sy / (double)screen_sx);
+
+    screen_sx = 0;
+
+    write_setup("Video", "ratio", std::to_string(screen_ratio));
+}
+
+void Emulator::set_filtering(int filtering)
+{
+    screen_filtering = filtering;
+    renderer->set_filtering(filtering);
+    write_setup("Video", "filtering", std::to_string(filtering));
+    screen_sx = 0;
+// #ifdef RENDERER_SDL2
+//     screen_filtering = filtering;
+//     std::string s = std::to_string(filtering);
+//     char const *pchar = s.c_str();
+//     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, pchar);
+
+//     screen_sx = 0;
+
+//     write_setup("Video", "filtering", std::to_string(filtering));
+// #endif
+}
+
+void Emulator::set_frame_blending(bool on)
+{
+    screen_blending = on;
+    renderer->set_frame_blending(on);
+    write_setup("Video", "blend_frames", on ? "1" : "0");
+}
+
+void Emulator::set_persistence(int value)
+{
+    if (value < SCREEN_PERSISTENCE_OFF || value > SCREEN_PERSISTENCE_LONG) value = SCREEN_PERSISTENCE_OFF;
+    screen_persistence = value;
+    renderer->set_persistence(value);
+    write_setup("Video", "persistence", std::to_string(value));
+}
+
+int Emulator::get_scale()
+{
+    return round(screen_scale);
+}
+
+int Emulator::get_ratio()
+{
+    return screen_ratio;
+}
+
+int Emulator::get_filtering()
+{
+    return screen_filtering;
+}
+
+void Emulator::setThreadPriority(bool timeCritical) {
+#if defined(ECAT_SINGLE_THREAD)
+    (void)timeCritical;
+#elif defined(_WIN32)
+    HANDLE thread = GetCurrentThread();
+    if (timeCritical) {
+        SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL);
+    } else {
+        SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+    }
+#else
+    pthread_t thread = pthread_self();
+    struct sched_param param;
+    int policy;
+
+    pthread_getschedparam(thread, &policy, &param);
+
+    if (timeCritical) {
+        param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+        pthread_setschedparam(thread, SCHED_FIFO, &param);
+    } else {
+        param.sched_priority = sched_get_priority_max(SCHED_OTHER) - 1;
+        pthread_setschedparam(thread, SCHED_OTHER, &param);
+    }
+#endif
+}
+
+
+void Emulator::register_devices()
+{
+    register_all_devices(dm);
+}
+
+void register_all_devices(DeviceManager * dm)
+{
+    dm->register_device("ram", create_ram);
+    dm->register_device("bus-timing", create_bus_timing);
+    dm->register_device("rom", create_rom);
+    dm->register_device("memory-mapper", create_memory_mapper);
+    dm->register_device("port", create_port);
+    dm->register_device("port-address", create_port_address);
+    dm->register_device("speaker", create_speaker);
+    dm->register_device("ay8910", create_ay8910);
+    dm->register_device("covox", create_covox);
+    dm->register_device("taperecorder", create_tape_recorder);
+    dm->register_device("scan-keyboard", create_scankeyboard);
+    dm->register_device("i8080", create_i8080);
+    dm->register_device("i8255", create_i8255);
+    dm->register_device("wd1793", create_WD1793);
+    dm->register_device("gmd70", create_GMD70);
+    dm->register_device("fdd", create_FDD);
+    dm->register_device("orion-128-display", create_o128display);
+    dm->register_device("i8257", create_i8257);
+    dm->register_device("i8275", create_i8275);
+    dm->register_device("i8275-display", create_i8275display);
+    dm->register_device("i8251", create_i8251);
+    dm->register_device("dl11", create_dl11);
+    dm->register_device("1801vp1-033", create_k1801vp1_033);
+    dm->register_device("printer", create_printer);
+    dm->register_device("i8253", create_i8253);
+    dm->register_device("i8259", create_i8259);
+    dm->register_device("am9519", create_am9519);
+    dm->register_device("scn2661", create_scn2661);
+    dm->register_device("mc146818", create_mc146818);
+    dm->register_device("e85-sys", create_e85_sys);
+    dm->register_device("e85-comm", create_e85_comm);
+    dm->register_device("e85-video", create_e85_video);
+    dm->register_device("e85-display", create_e85_display);
+    dm->register_device("e85-kngmd", create_e85_kngmd);
+    dm->register_device("e85-knmd", create_e85_knmd);
+    dm->register_device("e85-mc1702", create_e85_mc1702);
+    dm->register_device("i8051", create_i8051);
+    dm->register_device("register", create_register);
+    dm->register_device("mux", create_mux);
+    dm->register_device("z80", create_z80);
+    dm->register_device("page-mapper", create_page_mapper);
+    dm->register_device("plane-pair", create_plane_pair);
+    dm->register_device("indirect-memory", create_indirect_memory);
+    dm->register_device("wait-map", create_wait_map);
+    dm->register_device("generator", create_generator);
+    dm->register_device("6502", create_mos6502);
+    dm->register_device("65c02", create_wdc65c02);
+    dm->register_device("1801vm1", create_k1801vm1);
+    dm->register_device("1801vm2", create_k1801vm2);
+    dm->register_device("1801vm3", create_k1801vm3);
+    dm->register_device("km1811vm1", create_km1811vm1);
+    dm->register_device("i8086", create_i8086);
+    dm->register_device("i8088", create_i8088);
+    dm->register_device("agat-fdc140", create_agat_fdc140);
+    dm->register_device("agat-fdc840", create_agat_fdc840);
+    dm->register_device("agat-7-display", create_agat_7_display);
+    dm->register_device("agat-9-display", create_agat_9_display);
+    dm->register_device("map-keyboard", create_mapkeyboard);
+    dm->register_device("joystick", create_joystick);
+    dm->register_device("mouse", create_mouse);
+    dm->register_device("connector", create_connector);
+    dm->register_device("ram-address", create_ram_address);
+    dm->register_device("irisha-display", create_irisha_display);
+    dm->register_device("bk-display", create_bk_display);
+    dm->register_device("poisk-display", create_poisk_display);
+    dm->register_device("poisk-trap", create_poisk_trap);
+    dm->register_device("poisk-vram", create_poisk_vram);
+    dm->register_device("poisk-fdc-control", create_poisk_fdc_control);
+    dm->register_device("bk-timer", create_bk_timer);
+    dm->register_device("bk-fdc", create_bk_fdc);
+    dm->register_device("agat-9-mapper", create_agat_9_mapper);
+    dm->register_device("apple2-mmu", create_apple2_mmu);
+    dm->register_device("apple2-iou", create_apple2_iou);
+    dm->register_device("apple2-video", create_apple2_video);
+    dm->register_device("pravetz-keyboard", create_pravetz_keyboard);
+    dm->register_device("liberty-fdc", create_liberty_fdc);
+    dm->register_device("apple2-parallel", create_apple2_parallel);
+    dm->register_device("comport-server", create_comport_server);
+    dm->register_device("apple2-disk2", create_apple2_disk2);
+    dm->register_device("pravetz-ulan", create_pravetz_ulan);
+
+    dm->register_device("ins8250", create_ins8250);
+    dm->register_device("agat-yazs", create_agat_yazs);
+    dm->register_device("uknc-channels", create_uknc_channels);
+    dm->register_device("uknc-display", create_uknc_display);
+    dm->register_device("uknc-graphics", create_uknc_graphics);
+    dm->register_device("uknc-ram-timing", create_uknc_ram_timing);
+    dm->register_device("uknc-hdd", create_uknc_hdd);
+    dm->register_device("smk512", create_smk512);
+    dm->register_device("a16m", create_a16m);
+    dm->register_device("uknc-timer", create_uknc_timer);
+    dm->register_device("uknc-keyboard", create_uknc_keyboard);
+    dm->register_device("uknc-mouse", create_uknc_mouse);
+    dm->register_device("ms7004", create_ms7004);
+    dm->register_device("ksm-display", create_ksm_display);
+    dm->register_device("ie15-cpu", create_ie15_cpu);
+    dm->register_device("ie15-io", create_ie15_io);
+    dm->register_device("ie15-display", create_ie15_display);
+    dm->register_device("ie15-keyboard", create_ie15_keyboard);
+    dm->register_device("dvk-mx", create_dvk_mx);
+    dm->register_device("dvk-kgd", create_dvk_kgd);
+    dm->register_device("dvk-dx", create_dvk_dx);
+    dm->register_device("dvk-lks", create_dvk_lks);
+    dm->register_device("dvk-panel", create_dvk_panel);
+    dm->register_device("kcgd", create_kcgd);
+    dm->register_device("kcgd-display", create_kcgd_display);
+    dm->register_device("kcgd-mouse", create_kcgd_mouse);
+    dm->register_device("dvk-kmd", create_dvk_kmd);
+    dm->register_device("dvk-dw", create_dvk_dw);
+    dm->register_device("uknc-sound", create_uknc_sound);
+    dm->register_device("argo-keyboard", create_argo_keyboard);
+    dm->register_device("argo-memory", create_argo_memory);
+    dm->register_device("zx-keyboard", create_zx_keyboard);
+    dm->register_device("via6522", create_via6522);
+    dm->register_device("oric-ula", create_oric_ula);
+    dm->register_device("unior-memory", create_unior_memory);
+    //unior-tape - тот же самый магнитофон. Имя типа оставлено навсегда:
+    //снимок состояния несет в себе разрешенную конфигурацию, и в
+    //tests/files/state-unior.ecats.zip записано именно оно
+    dm->register_device("unior-tape", create_tape_recorder);
+}

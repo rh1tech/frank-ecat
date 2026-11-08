@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: Abstract class for different filesystems
+
+#pragma once
+
+#include "disk_image.h"
+#include <array>
+#include <map>
+
+namespace dsk_tools {
+
+    enum class ParamType {
+        String,
+        Byte,
+        Word,
+        DWord,
+        Enum,
+        Checkbox
+    };
+
+    struct ParameterDescription {
+        std::string id;
+        std::string name;
+        ParamType type;
+        std::string initialValue;
+
+        std::vector<std::pair<std::string, std::string>> enumOptions; // Только для Enum
+    };
+
+    struct OSStats {
+        std::map<std::string, unsigned> int_values;
+    };
+
+    enum class SectorType { Empty, Ok, Bad, System, Catalog, File, DeletedFile };
+
+    // Key is {head, track, sector}. std::array (not C-style unsigned[3]) is used so
+    // the type satisfies std::map's key requirements (Copy/MoveConstructible, default
+    // operator<) and allows brace-list initialization at call sites.
+    typedef std::map<std::array<unsigned, 3>, SectorType> SectorTypeMap;
+
+    class fileSystem {
+    protected:
+        diskImage * image;
+        bool is_open = false;
+        int volume_id = -1;
+        bool is_changed = false;
+        OSStats m_stats = {};
+        bool stats_valid = false;
+
+        virtual bool sector_is_free(int head, int track, int sector) { return false;};
+        virtual Result sector_free(int head, int track, int sector) {return Result::error(ErrorCode::NotImplementedYet);}
+        virtual Result sector_occupy(int head, int track, int sector) {return Result::error(ErrorCode::NotImplementedYet);}
+        virtual int free_sectors() {return 0;};
+
+    public:
+        explicit fileSystem(diskImage * image);
+        virtual ~fileSystem() = default;
+
+        // Service functions
+        virtual Result open() = 0;
+        virtual FSCaps get_caps() = 0;
+        virtual FS get_fs() const = 0;
+        virtual std::string get_delimiter();
+        // The character set the disks of this filesystem are written in, when that is a
+        // property of the platform rather than of the file. Empty means "ask the user".
+        virtual std::string get_charmap() const {return "";}
+        virtual std::vector<std::string> get_save_file_formats() = 0;
+        virtual std::vector<std::string> get_add_file_formats() {return {};} ;
+        virtual void update_stats() {stats_valid = true;};
+        virtual OSStats get_stats() {if (!stats_valid) update_stats(); return m_stats;};
+
+        // Disk functions
+        virtual std::string information() {return "Not implemented";};
+        virtual int get_volume_id() {return volume_id;};
+        virtual int translate_sector(int sector) const {return sector;};
+        virtual bool get_changed() {return is_changed;};
+        virtual void reset_changed() { is_changed = false; };
+
+        // Directories
+        virtual Result dir(std::vector<UniversalFile> & files, bool show_deleted) = 0;
+        virtual void cd(const UniversalFile & dir, bool & updir) {};
+        void cd(const UniversalFile & dir) {bool updir; cd(dir, updir);};
+        virtual void cd(const std::string & path, bool & updir) {};
+        void cd(const std::string & path) {bool updir; cd(path, updir);};
+        virtual void cd_up() {};
+        virtual Result mkdir(const std::string & dir_name, UniversalFile & new_dir) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result mkdir(const UniversalFile & uf, UniversalFile & new_dir) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual bool is_root() {return true;};
+
+        // Files
+        virtual Result find_file(const std::string & file_name, UniversalFile & fd) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result get_file(const UniversalFile & uf, const std::string & format, BYTES & data) const = 0;
+        virtual Result put_file(const UniversalFile & uf, const std::string & format, const BYTES & data, bool force_replace) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result rename_file(const UniversalFile & fd, const std::string & new_name) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result delete_file(const UniversalFile & uf) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result restore_file(const UniversalFile & uf) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual std::string file_info(const UniversalFile & fd) {return "";};
+        virtual std::vector<ParameterDescription> file_get_metadata(const UniversalFile & fd) {std::vector<ParameterDescription> params; return params;};
+        virtual Result file_set_metadata(const UniversalFile & fd, const std::map<std::string, std::string> & metadata) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual std::string exattr(const UniversalFile & fd) {return "";}
+        virtual std::pair<std::string, std::string> exattr_caption() {return {"", ""};};
+
+        virtual SectorTypeMap get_sector_type_map() {return {};}
+
+        // File I/O
+        virtual Result fopen(UniversalFile & uf, int & fd) {fd=-1; return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fopen(const std::string & file_name, int & fd) {fd=-1; return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fread(const int & fd, uint8_t * buffer, unsigned & len) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fwrite(const int & fd, uint8_t * buffer, unsigned & len) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fseek(const int & fd, const int pos_delta) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fpos(const int & fd, unsigned & pos) {return Result::error(ErrorCode::NotImplementedYet);};
+        virtual Result fclose(const int & fd) {return Result::error(ErrorCode::NotImplementedYet);};
+    };
+
+} // namespace

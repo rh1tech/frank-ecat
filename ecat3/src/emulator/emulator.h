@@ -1,0 +1,633 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Main emulator class, header
+
+#pragma once
+
+#include <memory>
+#include <map>
+#include <array>
+#include <string>
+#include <functional>
+#include <atomic>
+
+#include "libs/ini_wrapper.h"
+
+#include "thread_compat.h"
+
+#ifdef RENDERER_SDL2
+    #include <SDL.h>
+#endif
+
+#include "core.h"
+#include "config_ext.h"
+#include "emulator/devices/common/keyboard.h"
+#include "emulator/devices/common/joystick.h"
+#include "emulator/devices/common/mouse.h"
+#include "emulator/script/script_engine.h"
+#include "emulator/script/script_recorder.h"
+#include "renderer.h"
+#include "video_recorder.h"
+
+class GenericSound;
+
+//Every device type a configuration may name. Used by the emulator and by the
+//configuration editor, which constructs the devices of a machine it does not
+//run to ask them what can be changed (see config_fields.h)
+void register_all_devices(DeviceManager * dm);
+
+//What a drive holds: an image (empty: none) and its write protection
+struct DiskChoice {
+    std::string file;
+    bool protect = false;
+    bool operator==(const DiskChoice &o) const { return file == o.file && protect == o.protect; }
+    bool operator!=(const DiskChoice &o) const { return !(*this == o); }
+};
+
+class Emulator
+{
+private:
+    IniSettings settings;
+    bool busy;
+    InterfaceManager *im;
+    SystemData sd;
+    //The configuration of the machine that is loaded, already resolved. Lives
+    //as long as the machine does: ComputerDevice::cd points into it
+    EmulatorConfig m_config;
+    MachineSource m_source;
+    bool m_embedded_loaded = false;     //The script buffer holds m_source.script
+    VideoRenderer * renderer;
+
+    std::array<std::string, 256> charmap;
+
+    //One clock domain per processor. A machine with two of them (the УК-НЦ:
+    //8 MHz central and 6.25 MHz peripheral) runs them interleaved, each in its
+    //own address space and with its own devices. With one processor scale is 1
+    //and the whole thing collapses into the loop this used to be
+    struct ClockDomain {
+        CPU *    cpu;
+        uint64_t scale;     // LCM(all frequencies) / this frequency
+        uint64_t norm;      // position in that normalised time, carried between slices
+    };
+    std::vector<ClockDomain> domains;
+
+    CPU * cpu;              // The master, domains[0].cpu - and the machine's time base
+    MemoryMapper * mm;
+    GenericDisplay * display;
+    Keyboard * keyboard;
+    std::vector<Joystick*> joysticks;   // every device of the joystick class, fed with the same keys
+    std::vector<HostMouse*> mice;           // every device of the mouse class, moved together
+
+    // Host keys held down, see host_key()
+    struct HostKey {
+        unsigned int scan;              // native scan code, 0 if the event has none
+        int key;                        // the code the key went down as
+    };
+    std::vector<HostKey> m_host_keys;   // Guarded by m_host_keys_mutex
+    int m_key_remap = 0;                // KeyRemapMode, see set_key_remap()
+    //The window presses and releases on the GUI thread, a restored state
+    //empties the list on the emulation thread
+    compat_mutex m_host_keys_mutex;
+    //Keys a recording has seen go down, as record_key() got them: a release
+    //a key group held back (hold mode) is written with the code and scan of
+    //its press. The keyboard knows the key only as it got it - a keypad key
+    //without the Keypad bit on a machine without a keypad - and a release
+    //under another code would leave the press held in the recording.
+    //GUI thread only, like record_key()
+    std::vector<HostKey> m_recorded_down;
+
+    //Raised by the display at the end of each frame, waited for by the render thread
+    compat_event m_frame_event;
+    //clock_counter of the last frame reported for a display without frames
+    //of its own (GenericDisplay::own_frames())
+    uint64_t m_machine_frame_clock = 0;
+
+    unsigned int clock_freq;
+
+    //The speed of emulated time against the wall clock, in quarters (4 = 1x),
+    //see set_speed(); the part of a tick a slice left over at another speed
+    std::atomic<int> m_speed_q{4};
+    uint64_t m_speed_rem = 0;
+    //Not 1x, and a SCREEN waits for the render thread: emulated time stands
+    //still until the picture is taken, see run()
+    std::atomic<bool> m_shot_hold{false};
+    //Master ticks of a wall time slice, see run()
+    uint64_t slice_ticks(uint64_t elapsed_us);
+
+    unsigned int screen_sx;
+    unsigned int screen_sy;
+    double screen_scale = 1;
+    double pixel_scale;
+    int screen_ratio = SCREEN_RATIO_43;
+    int screen_filtering = 0;
+    bool screen_blending = false;
+    int screen_persistence = SCREEN_PERSISTENCE_OFF;
+
+    void register_devices();
+    //The two halves of load_config(): what is there goes, the new one is built
+    void drop_machine();
+    emulator::Result build_machine(const std::string &file_name);
+
+    std::atomic<bool> m_running;
+#if defined(ECAT_SINGLE_THREAD)
+    unsigned m_embedded_frames = 0;         //frames_done() at the last render_tick()
+    uint64_t m_embedded_last_render = 0;
+#elif USE_QT_THREADING
+    EmuThread* emulationThread = nullptr;
+    EmuThread* renderThread = nullptr;
+#else
+    std::thread emulationThread;
+    std::thread renderThread;
+#endif
+    void setThreadPriority(bool timeCritical);
+    bool prepare_machine();
+    std::atomic<bool> m_ready;
+
+    std::unique_ptr<ScriptEngine> script;
+    std::unique_ptr<ScriptRecorder> recorder;
+
+    //Text pasted from the host, typed the way TYPE types it (paste_text()).
+    //Emulation thread only, but for the flag the loop looks at
+    std::vector<unsigned int> m_paste_keys;
+    std::vector<bool> m_paste_shift;
+    size_t m_paste_index = 0;
+    bool m_paste_pressed = false;
+    uint64_t m_paste_delay = 0;                 //In CPU cycles
+    uint64_t m_paste_hold = 0;
+    uint64_t m_paste_at = 0;                    //clock_counter of the next step
+    std::atomic<bool> m_paste_active;
+    void paste_step();
+    void paste_clear();
+    //An empty file name no longer means "nothing was asked for": an external
+    //driver wants the bytes without a file, so the request is a flag of its own
+    std::string m_screenshot_file;              //Guarded by m_screenshot_mutex
+    bool m_screenshot_requested = false;        //Guarded by m_screenshot_mutex
+    std::vector<unsigned char> m_screenshot_png;//Guarded; the last image encoded
+    uint64_t m_screenshot_serial = 0;           //Guarded; incremented for every image
+    compat_mutex m_screenshot_mutex;
+    //A snapshot asked for from another thread, taken at a slice boundary the
+    //way a screenshot is. A script does not go through this: its tick() runs
+    //on the emulation thread already, between two instructions
+    std::string m_state_file;                   //Guarded by m_state_mutex
+    bool m_state_requested = false;             //Guarded
+    std::string m_state_error;                  //Guarded
+    uint64_t m_state_serial = 0;                //Guarded; incremented for every request
+    compat_mutex m_state_mutex;
+    void store_state();
+
+    //Calls handed over by invoke(), waiting for the emulation thread to reach
+    //the gap between two time slices. Each entry lives on the stack of the
+    //thread that waits for it
+    struct PendingCall {
+        const std::function<void()> * fn;
+        std::atomic<bool> done;
+        bool failed;
+        std::string error;
+        explicit PendingCall(const std::function<void()> * f) : fn(f), done(false), failed(false) {}
+    };
+    std::vector<PendingCall*> m_calls;          //Guarded by m_calls_mutex
+    bool m_calls_open = false;                  //Guarded; an emulation thread is there to take them
+    compat_thread_id m_calls_thread = compat_thread_id();   //Guarded; that thread
+    std::atomic<bool> m_calls_pending;          //The queue is not empty: all the loop looks at
+    compat_mutex m_calls_mutex;
+    void run_pending_calls();
+    void close_calls();
+    //Closes the queue when the emulation thread leaves, however it leaves
+    struct CallsGuard {
+        Emulator * e;
+        explicit CallsGuard(Emulator * emulator) : e(emulator) {}
+        ~CallsGuard() { e->close_calls(); }
+    };
+
+    //Why the machine stopped on its own, see machine_error()
+    std::string m_machine_error;                //Guarded by m_error_mutex
+    bool m_machine_fatal = false;               //Guarded
+    mutable compat_mutex m_error_mutex;
+    void set_machine_error(const std::string &message, bool fatal);
+
+    bool m_settings_readonly = false;
+
+    //The debugger's pause and steps, see debug_pause(). The fields belong to
+    //the emulation thread but for the atomics, which the window reads
+    std::atomic<bool> m_debug_paused{false};
+    std::atomic<bool> m_debug_attached{false};
+    std::atomic<bool> m_stepping{false};
+    CPU * m_step_cpu = nullptr;         //The processor a time step is made for
+    unsigned int m_step_count = 0;      //Steps still to make
+    bool m_step_done = false;           //It has executed its instruction
+    CPU * m_step_hit = nullptr;         //Another one stopped on its breakpoint meanwhile
+    uint64_t m_step_spent = 0;          //Its normalised time since the step began
+    std::atomic<unsigned int> m_debug_serial{0};
+    CPU * m_debug_cpu = nullptr;        //Guarded by m_debug_mutex
+    int m_debug_reason = 0;             //Guarded
+    std::function<void()> m_debug_listener; //Guarded
+    mutable compat_mutex m_debug_mutex;
+    void debug_notify(CPU * c, int reason);
+    void debug_break(CPU * c);
+    void debug_step_slice();
+    void debug_hold_domains(uint64_t target);
+
+    //Remembered disks, see DiskChoice
+    bool m_restore_disks = false;
+    std::map<std::string, DiskChoice> m_disk_defaults;
+    std::vector<ComputerDevice*> disk_devices();
+    std::string machine_disk_key(const std::string &device) const;
+    std::string root_path() const;
+    std::string disk_path(const std::string &file);
+    void apply_disk_choice(ComputerDevice * dev, const DiskChoice &c);
+    void record_disk_choice(ComputerDevice * dev, const DiskChoice &from, const DiskChoice &to);
+    void restore_disks();
+    void store_screenshot();
+
+    //The video being recorded. The render thread feeds it the machine's
+    //picture (unless the frontend sends the picture of the window) and the
+    //sound of every audio output, see VideoRecorder
+    VideoRecorder m_video;
+    std::atomic<bool> m_video_from_screen;
+    std::atomic<bool> m_video_locked;   //Frames come from the display's frame hook
+    //Those frames blended and faded as the window does it ("as on screen"
+    //at the rate of the machine); both are the emulation thread's, and the
+    //phosphor fades by the machine's frame period, not by the host's time
+    bool m_video_blended = false;
+    FrameBlender m_video_blender;
+    PhosphorDecay m_video_phosphor;
+    double m_video_frame_s = 0.02;
+    //A script to be started by run(), before the first slice (arm_script()):
+    //SCRIPT_NONE, SCRIPT_ARMED, SCRIPT_RUN (run() took it, the frontend's
+    //start_script() then has nothing to do). One state, changed by
+    //compare-exchange, so exactly one of the two threads starts the script
+    enum { SCRIPT_NONE = 0, SCRIPT_ARMED = 1, SCRIPT_RUN = 2 };
+    std::atomic<int> m_script_state;
+    //Samples of each audio output not yet mixed: the outputs may be clocked
+    //by different processors and hand out their samples unevenly
+    std::vector<std::vector<int16_t> > m_video_audio;
+    compat_mutex m_video_audio_mutex;
+    bool m_video_capturing = false;     //The sound outputs capture for it; GUI thread
+    void collect_video_audio(bool flush);
+    std::vector<GenericSound*> sound_outputs();
+
+    //Applies the @state section of a .ecats. Called by run() on the emulation
+    //thread, after reset(true) and before the loop starts, so that no device
+    //is clocked between the reset and the restore
+    emulator::Result apply_state();
+    //Its first pass, the device options. Also run by load_config(), before
+    //any frontend builds its option controls from the devices: those are
+    //built once, and apply_state() comes only when the machine starts
+    void apply_state_options(EmulatorConfig &state, std::string &problems);
+    //What the state file said that this build could not use: unknown devices,
+    //unknown keys, sections with no device. Never printed - any output on
+    //stderr fails every regression test - but kept for whoever asks
+    std::string m_state_report;
+
+public:
+    DeviceManager *dm;
+    std::string work_path;
+    std::string data_path;
+    std::string software_path;
+    //Where inline data of a configuration and unpacked .ext.zip archives are
+    //written. Set by the frontend before the first load_config()
+    std::string cache_path;
+    //Configurations of the user (.ext), listed by the machine chooser next to
+    //those of computers/
+    std::string user_ext_path;
+
+    bool loaded;
+
+    //Cycles of the master CPU since the machine was started (a restored
+    //state puts back its own count). Written on the emulation
+    //thread for every instruction; the interface thread reads it to time
+    //stamp recorded events, a stale or torn value there costs at most one
+    //delay that is a few milliseconds off
+    uint64_t clock_counter;
+
+    Emulator(std::string work_path, std::string data_path, std::string software_path, std::string ini_file, VideoRenderer * renderer);
+    ~Emulator();
+
+    emulator::Result load_config(std::string file_name);
+    void apply_saved_device_options();
+
+    //------------------------ Remembered disks -----------------------------//
+    //The third step after .cfg and .ext: what the user put into a drive (an
+    //image, nothing, write protection) is kept in [Disks] of the ini, keyed by
+    //the file that was opened - not by the base of its chain - and the drive
+    //name. Only the windowed frontend and the web page turn the restore on,
+    //and only when no script, replay or MCP client drives the machine
+    //Applies to the next load_config()
+    void set_restore_disks(bool on) { m_restore_disks = on; }
+    //What the drive holds now, and what the machine's configuration put in it
+    DiskChoice disk_state(ComputerDevice * dev);
+    DiskChoice disk_default(const std::string &device) const;
+    //Writes the drive's state into the ini, or removes the entry when the
+    //state is the configuration's own
+    void remember_disk(ComputerDevice * dev);
+    bool has_remembered_disk(const std::string &device);
+    //The key of the drive's entry in [Disks], for a frontend that keeps the
+    //entries elsewhere (the web page: in the browser's storage)
+    std::string disk_key(const std::string &device) const { return machine_disk_key(device); }
+    //Puts the configuration's image back (on the emulation thread) and drops
+    //the entry. Also records the commands while recording
+    void restore_default_disk(ComputerDevice * dev);
+    void forget_all_disks();
+    //Commands that turn the configuration's drives into what they hold now.
+    //A recording starts with them, since a replay restores nothing
+    void record_disk_changes();
+
+    //--------------------------- Saved state ------------------------------//
+    //Writes everything the machine is into file_name: a .ecats.zip archive,
+    //or a .ecats text file with a <stem>.files/ directory beside it. Runs on
+    //the emulation thread - from a script verb, which is already there, or
+    //through request_state() from any other
+    emulator::Result save_state(const std::string &file_name);
+    //Asks for a snapshot at the next safe point. Thread safe
+    void request_state(const std::string &file_name);
+    //True while a requested snapshot has not been taken yet. False means it is
+    //finished, and take_state_error() then says whether it worked
+    bool state_pending();
+    //Empty until a requested snapshot has failed, and cleared by reading it
+    std::string take_state_error();
+    //What the state that was loaded did not fit into this build
+    const std::string & state_report() const { return m_state_report; }
+
+    std::string read_setup(std::string section, std::string ident, std::string def_val);
+    void write_setup(std::string section, std::string ident, std::string new_val);
+
+    //The directory the file dialogs open in. The distributed ini carries the
+    //entry with an empty value, which is not a directory any more than a
+    //missing entry is: both mean the software directory rather than whatever
+    //the current one happens to be
+    std::string get_last_path();
+    void set_last_path(const std::string &path);
+
+    //An external driver runs many short sessions in the working tree, and
+    //every one of them would otherwise rewrite the ini file
+    void set_settings_readonly(bool on) { m_settings_readonly = on; }
+
+    //Silences the machine outright, audio device included. Has to be called
+    //before load_config(): a sound device opens its driver while it loads
+    void set_audio_enabled(bool on) { sd.audio_enabled = on; }
+    void load_charmap();
+    const std::string & translate_char(unsigned int system_code);
+    //The other way: the code the machine shows a character (UTF-8) with, -1
+    //when it has none
+    int char_code(const std::string &utf8) const;
+
+    void init_video(void *p);
+    void stop_video();
+
+    void run();
+#ifdef ECAT_SINGLE_THREAD
+    //frank-ecat: run() sets the machine up without threads; the firmware then
+    //calls slice() with the wall time since the last one (the emulation loop of
+    //run()) and render_tick() (its render thread): true when a frame was shown
+    void slice(uint64_t elapsed_us);
+    bool render_tick();
+#endif
+
+    // SURFACE * get_surface();
+    void get_screen_constraints(unsigned int * sx, unsigned int * sy);
+
+    SystemData * get_system_data();
+    //The name the ini keeps per-machine choices under (device options, high
+    //precision): the machine file's name up to its first dot, so that X.ext.zip
+    //and X.ecats.zip are X like X.cfg. The window and the core must agree on it
+    std::string settings_key();
+
+    void set_scale(int scale);
+    void set_ratio(int ratio);
+    void set_filtering(int filtering);
+    //The window shows the mean of each frame and the one before it
+    //(VideoRenderer::blend_frame()); screenshots and video keep the frames
+    void set_frame_blending(bool on);
+    //Phosphor persistence in the window, SCREEN_PERSISTENCE_*
+    //(VideoRenderer::blend_frame()); screenshots and video keep the frames
+    void set_persistence(int value);
+
+    int get_scale();
+    int get_ratio();
+    int get_filtering();
+    bool get_frame_blending() const { return screen_blending; }
+    int get_persistence() const { return screen_persistence; }
+
+    //Resolution of the machine's screen, 0 until the first frame. Written by
+    //the render thread; a stale value only makes one mouse movement off
+    void get_screen_size(unsigned int * sx, unsigned int * sy) const { *sx = screen_sx; *sy = screen_sy; }
+
+    void timer_proc(uint64_t time_ticks);
+    void render_screen();
+
+    // host: typed on the host keyboard, so the remap of Settings > Keyboard
+    // applies (see set_key_remap); scripts and MCP leave it false
+    void key_event(int key, int modifiers, bool press, bool host = false);
+    void key_event_id(const std::string &id, bool press);
+
+    // Emulation > Paste text: types a text (UTF-8, literal, line breaks are
+    // Return) on the machine's keyboard as TYPE does, the keys pressed for
+    // hold and spaced by delay ms of emulated time. Characters the machine has
+    // no key for are skipped. A new text replaces one not yet typed. Any thread
+    void paste_text(const std::string &text, unsigned int delay_ms, unsigned int hold_ms);
+    bool paste_active() const { return m_paste_active; }
+
+    // Settings > Keyboard, a KeyRemapMode: which remap table of the machine's
+    // keyboard host keys go through. Kept across machine loads; the console
+    // build never sets it, so the tests run without a remap
+    void set_key_remap(int mode);
+    int key_remap() const { return m_key_remap; }
+
+    // A key of the host keyboard as a window of the frontend gets it, with the
+    // physical key's scan code (0 if there is none). The windows share the list
+    // of held keys: the main window and the on-screen keyboard both take the
+    // focus, and a key pressed in one of them is released by whichever hears
+    // the release. The release goes out as the code the key went down as - Qt
+    // names a key after the layout and the modifiers of the moment, so Shift
+    // let go before 2 turns the release of @ into one of 2. Returns that code,
+    // the one to record. GUI thread only.
+    int host_key(int key, unsigned int scan, int modifiers, bool press);
+    // Releases, and records, every host key still held: a window that loses
+    // the focus (Alt-Tab) never hears the releases, they go elsewhere
+    void release_host_keys();
+
+    // Movement of the host mouse in steps of the machine's mouse (right and
+    // down are positive) and its buttons as a mask, a negative mask keeping
+    // them as they are. Reaches only a mouse that is plugged in.
+    void mouse_event(int dx, int dy, int buttons);
+    bool has_mouse() const;             // A mouse is plugged in and a program has read it
+
+    // The keyboard of the running machine, or nullptr between machines. Never
+    // cache it: load_config() deletes the whole device manager.
+    Keyboard * get_keyboard() const { return keyboard; }
+
+    //Runs fn on the emulation thread, between two time slices, and returns
+    //when it has run. This is how any other thread changes the machine: a
+    //device is not locked, it belongs to the emulation thread, and a disk
+    //swapped or a reset done from the window would otherwise land in the
+    //middle of an instruction. With no emulation thread running - nothing
+    //loaded, the machine stopped - and on that thread itself, fn runs at once.
+    //An exception fn throws comes out of invoke() as std::runtime_error.
+    //fn must not wait for the calling thread: that one is waiting here
+    void invoke(const std::function<void()> &fn);
+
+    void set_volume(int value);
+    void set_muted(bool muted);
+    void set_sound_latency(unsigned int ms);
+
+    // Emulation > Speed: how fast emulated time runs against the wall clock,
+    // in quarters (1 = 0.25x, 4 = 1x, 40 = 10x, up to SPEED_MAX_Q), 0 - as
+    // fast as the host can, with no wall clock at all. The whole machine speeds
+    // up, processors and devices alike, since nothing inside it changes -
+    // raising a processor's clock instead leaves the devices behind (the БК
+    // floppy stops working). The sound to the device changes pitch, see
+    // GenericSound, and is silent at 0. Kept across machine loads; set by the
+    // menu, the page, --speed and the script verb SPEED
+    static const int SPEED_MAX_Q = 4000;
+    void set_speed(int quarters);
+    int speed() const { return m_speed_q; }
+    // "2", "0.25", "0,5", "max" (also "_2", a decimal mark of a БК script)
+    // into quarters; -1 for anything else, including a speed that is not a
+    // multiple of 0.25
+    static int parse_speed(const std::string &text);
+    //From any thread, see invoke()
+    void reset(bool cold);
+
+    //---------------------------- Debugger ---------------------------------//
+    //The debugger pauses the whole machine, not a processor: every domain
+    //stands still, a К1801ВМ1 held by ~dclo included, and the modes of the
+    //processors (m_debug) stay what they were. A step is made in time: the
+    //machine runs, in the order a free run would, until the processor has
+    //executed one instruction and the others have caught up with it. While a
+    //debugger is attached a breakpoint of any processor pauses the machine
+    //when the others reach the same moment. A script that stops and starts
+    //the processors itself (cpu.stop, cpu.run) works as it always has.
+    //The calls that change something belong to the emulation thread: a
+    //window makes them through invoke(), a script is already there
+    enum DebugStop {
+        DSTOP_NONE = 0,         // running again
+        DSTOP_PAUSE,            // asked for
+        DSTOP_STEP,             // the step has been made
+        DSTOP_BREAKPOINT,       // a breakpoint of the processor's list
+        DSTOP_TEMP,             // step over, step out, run to an address
+        DSTOP_ERROR,            // a device refused what the guest asked
+        DSTOP_NO_PROGRESS       // a step found the processor executing nothing (held, waiting)
+    };
+    void debug_attach(bool on);
+    //The debugger goes: a paused machine runs on, the breakpoints are no
+    //longer looked at
+    void debug_detach();
+    bool debug_attached() const { return m_debug_attached; }
+    //Paused by the debugger, or every processor stopped. Any thread
+    bool debug_paused() const;
+    //A step is under way. Any thread
+    bool debug_stepping() const { return m_stepping; }
+    //Paused by the debugger and not stepping: what a script waits for after
+    //its own step. Any thread
+    bool debug_held() const { return m_debug_paused && !m_stepping; }
+    void debug_pause();
+    //Resumes: stopping at the breakpoints and the debugger's own stop, or
+    //with all of that left aside
+    void debug_run(bool breakpoints);
+    void debug_step(CPU * c, unsigned int count = 1);
+    //A call is stepped over, anything else is stepped
+    void debug_step_over(CPU * c);
+    void debug_step_out(CPU * c);
+    void debug_run_to(CPU * c, unsigned int address);
+    //What stopped the machine last: a serial that changes with every stop and
+    //every start, the processor (null for a pause) and a DebugStop. Any thread
+    unsigned int debug_serial() const { return m_debug_serial; }
+    CPU * debug_stop_cpu() const;
+    int debug_stop_reason() const;
+    //Called on the emulation thread whenever the serial changes; it must not
+    //wait for anything (a window posts itself an event). Any thread
+    void set_debug_listener(const std::function<void()> &fn);
+
+    //Why the machine stopped by itself: a device refused what the guest asked
+    //of it, the saved state could not be applied, or - fatal - the emulation
+    //thread ended on an exception and nothing runs any more. Empty when none
+    //of that happened. The core never prints it (stderr fails every test):
+    //the frontend decides whom to tell. Thread safe
+    std::string machine_error(bool * fatal = nullptr) const;
+    void clear_machine_error();
+    void resize_screen();
+    void stop_emulation();
+
+    //--------------------------- Scripting --------------------------------//
+    //A script is parsed before the machine is loaded, because its MACHINE
+    //command may select the configuration to start with
+    emulator::Result load_script(const std::string &file_name);
+
+    //The @script part of the loaded configuration extension. The frontend
+    //loads and starts it when nothing else drives the machine: an explicit
+    //script, a replayed recording and an MCP client all take precedence
+    bool has_embedded_script() const;
+    emulator::Result load_embedded_script();
+    const MachineSource & machine_source() const { return m_source; }
+    std::string script_machine() const;
+    //The loaded script is to start with the machine: run() starts it on the
+    //emulation thread after the reset (and the restore of a saved state),
+    //before the first instruction. Called before the machine is loaded; a
+    //script started by start_script() after run() would begin wherever the
+    //machine had got to meanwhile, which depends on the host - every WAIT,
+    //KEY and TYPE moved with it, and a test on two processors (TSSPD on the
+    //УК-НЦ) counted differently under load. false disarms it again
+    void arm_script(bool on);
+    //Starts the loaded script now, at the current emulated time; for a script
+    //that run() has already started it only reports that it did
+    void start_script();
+    void stop_script();
+    bool script_active() const;
+    bool script_finished() const;
+    bool script_exit_requested() const;
+    int  script_exit_code() const;
+
+    //The engine and the recorder are created on first use and live as long
+    //as the emulator: the GUI record / replay controls work on them directly
+    ScriptEngine * script_engine();
+    ScriptRecorder * script_recorder();
+    void set_script_file(const std::string &file_name);     //Names a recorded buffer after a saved file
+
+    uint64_t clock_now() const { return clock_counter; }
+    //The machine is reset (a saved state applied) and being clocked: before
+    //that the clock stands still without anything being wrong
+    bool started() const { return m_ready; }
+    uint64_t ticks_per_ms() const;                          //CPU cycles per emulated millisecond
+
+    //Recording hooks for the GUI, no-ops unless a recording is in progress
+    void record_key(unsigned int code, unsigned int native, bool press);
+    void record_command(const std::string &device, const std::string &member, const std::string &params);
+    void record_verb(unsigned int verb, const std::vector<std::string> &args);
+    void record_verb_at(unsigned int verb, const std::vector<std::string> &args, uint64_t clock);
+
+    //Asks the render thread to store the current screen as a PNG. An empty
+    //file name keeps the image in memory only, see take_screenshot_png()
+    void request_screenshot(const std::string &file_name);
+    bool is_screenshot_pending();
+
+    //Copies the last image the render thread produced. The serial tells the
+    //caller whether it is looking at its own image or at an older one
+    bool take_screenshot_png(std::vector<unsigned char> &out, uint64_t * serial = nullptr);
+
+    //------------------------- Video recording ----------------------------//
+    //Starts a video of the running machine. from_screen: the frontend sends
+    //the picture as the window shows it with video_frame() (if
+    //video_from_window() says so after the start), otherwise the render
+    //thread takes the machine's own pixels. GUI thread
+    bool start_video_recording(VideoSettings s, bool from_screen, std::string &error);
+    //The recording wants the window's picture from the frontend
+    bool video_from_window() const { return m_video_from_screen; }
+    //Ends it; the file is finished in the background, see video_state()
+    void stop_video_recording();
+    //Gives up finishing the file: ffmpeg is killed (VideoRecorder::abort())
+    void abort_video_recording();
+    //RGBA, any thread
+    void video_frame(const uint8_t * rgba, unsigned int w, unsigned int h, bool bottom_up = false);
+    //The machine's picture, RGBA, taken under the surface lock: the render
+    //thread replaces the surface when the video mode changes
+    std::vector<uint8_t> grab_screen(unsigned int * sx, unsigned int * sy);
+    bool video_recording() const { return m_video.recording(); }
+    VideoRecorder::State video_state() const { return m_video.state(); }
+    std::string video_message() { return m_video.message(); }
+
+private:
+public:
+
+
+};

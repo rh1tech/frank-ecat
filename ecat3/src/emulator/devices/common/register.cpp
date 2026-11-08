@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the eCat3 project: https://github.com/Ptr314/ecat3
+// Description: Register IC device
+
+#include "register.h"
+#include "emulator/utils.h"
+
+#define REGISTER_FLIPFLOP_POS  0
+#define REGISTER_FLIPFLOP_NEG  1
+#define REGISTER_LATCH_POS     2
+#define REGISTER_LATCH_NEG     3
+#define REGISTER_BUFFER        4
+
+#define CHANGED_IN          1
+#define CHANGED_C           2
+#define CHANGED_R           3
+#define CHANGED_S           4
+
+Register::Register(InterfaceManager *im, EmulatorConfigDevice *cd):
+      ComputerDevice(im, cd)
+    , store_type(REGISTER_FLIPFLOP_POS)
+    , i_in(this, im, 16, "in", MODE_R, CHANGED_IN)
+    , i_out(this, im, 16, "out", MODE_W)
+    , i_c(this, im, 1, "c", MODE_R, CHANGED_C)
+    , i_r(this, im, 1, "r", MODE_R, CHANGED_R)
+    , i_s(this, im, 1, "s", MODE_R, CHANGED_S)
+{
+    try {
+        //What the register holds is a machine value: an interrupt vector, a
+        //jumper setting, a constant the machine reads off the bus
+        default_value = parse_numeric_value(this->cd->get_parameter("default").value);
+    } catch (std::exception &e) {
+        default_value = 0;
+    }
+
+    register_value = default_value;
+
+    i_out.change(register_value);
+}
+
+void Register::reset(bool cold)
+{
+    register_value = default_value;
+    i_out.change(register_value);
+}
+
+emulator::Result Register::load_config(SystemData *sd)
+{
+    emulator::Result res = ComputerDevice::load_config(sd);
+    if (!res) return res;
+
+    //TODO: Register - add other types
+    std::string type_string = str_tolower(cd->get_parameter("type", false).value);
+
+    if (type_string.empty() || type_string == "flip-flop-pos")
+        store_type = REGISTER_FLIPFLOP_POS;
+    else if (type_string == "flip-flop-neg")
+        store_type = REGISTER_FLIPFLOP_NEG;
+    else if (type_string == "latch-pos")
+        store_type = REGISTER_LATCH_POS;
+    else if (type_string == "latch-neg")
+        store_type = REGISTER_LATCH_NEG;
+    else if (type_string == "buffer")
+        store_type = REGISTER_BUFFER;
+    else
+        return emulator::Result::error(emulator::ErrorCode::ConfigError, "{Register|" + std::string(QT_TRANSLATE_NOOP("Register", "Unknown register type")) + "} " + type_string);
+
+    if (i_in.linked_bits)
+        mask = i_in.linked_bits;
+    else
+        mask = _FFFF;
+
+    return emulator::Result::ok();
+}
+
+void Register::interface_callback(unsigned callback_id, unsigned new_value, unsigned old_value)
+{
+    if (callback_id == CHANGED_C)
+    {
+        switch (store_type) {
+        case REGISTER_FLIPFLOP_POS:
+        case REGISTER_LATCH_POS:
+            if (i_c.pos_edge()){
+                register_value = i_in.value & mask;
+                i_out.change(register_value);
+            }
+            break;
+        case REGISTER_FLIPFLOP_NEG:
+        case REGISTER_LATCH_NEG:
+            if (i_c.neg_edge()){
+                register_value = i_in.value & mask;
+                i_out.change(register_value);
+            }
+            break;
+        }
+    } else
+    if (callback_id == CHANGED_IN) {
+        if (
+            (store_type == REGISTER_BUFFER)
+            || (store_type == REGISTER_LATCH_POS && i_c.value == 0 )
+            || (store_type == REGISTER_LATCH_NEG && i_c.value == 1 )
+            )
+        {
+            register_value = i_in.value & mask;
+            i_out.change(register_value);
+        }
+    } else
+    if (callback_id == CHANGED_R) {
+        if (i_r.neg_edge()){
+            register_value = 0;
+            i_out.change(register_value);
+        }
+    } else
+    if (callback_id == CHANGED_S) {
+        if (i_s.neg_edge()){
+            register_value = _FFFF & mask;
+            i_out.change(register_value);
+        }
+    }
+}
+
+void Register::save_state(StateWriter &w)
+{
+    ComputerDevice::save_state(w);
+    w.u("value", register_value);
+}
+
+emulator::Result Register::load_state(const StateReader &r)
+{
+    emulator::Result res = ComputerDevice::load_state(r);
+    if (!res) return res;
+    r.u("value", register_value);
+    return emulator::Result::ok();
+}
+
+unsigned Register::get_value()
+{
+    return register_value;
+}
+
+std::vector<DeviceFieldInfo> Register::get_device_fields()
+{
+    std::vector<DeviceFieldInfo> r = ComputerDevice::get_device_fields();
+    r.push_back({"value",   "Stored value",             false});
+    r.push_back({"default", "Value written on reset",   false});
+    r.push_back({"mask",    "Write mask",               false});
+    return r;
+}
+
+bool Register::get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out)
+{
+    //A Register is not addressable, so "value" is provided here rather than
+    //by AddressableDevice
+    out.numeric = true;
+    if (field == "value")   { out.values.push_back(get_value());     return true; }
+    if (field == "default") { out.values.push_back(default_value);   return true; }
+    if (field == "mask")    { out.values.push_back(mask);            return true; }
+
+    out.numeric = false;
+    return ComputerDevice::get_field(field, from, to, out);
+}
+
+ComputerDevice * create_register(InterfaceManager *im, EmulatorConfigDevice *cd)
+{
+    return new Register(im, cd);
+}

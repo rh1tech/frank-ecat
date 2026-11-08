@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: Top level abstract class for all loaders
+#pragma once
+
+
+#include <cstdint>
+#include <string>
+
+#include "definitions.h"
+
+namespace dsk_tools {
+
+    class Loader
+    {
+        protected:
+            std::string             file_name;
+            std::string             format_id;
+            std::string             type_id;
+            bool                    loaded;
+            BadSectorTable          m_bad_sectors;
+            // The file keeps a 140 Kb disk in ProDOS order, held in DOS 3.3 order
+            bool m_file_prodos_order = false;
+
+        public:
+            Loader(const std::string & file_name, const std::string & format_id, const std::string & type_id);
+            virtual ~Loader() = default;
+
+            std::string get_file_name() {return file_name;};
+            std::string get_type_id() {return type_id;};
+            const BadSectorTable & bad_sectors() const { return m_bad_sectors; };
+            bool file_prodos_order() const { return m_file_prodos_order; };
+
+            virtual Result load(BYTES & buffer, const DiskFormatParams &format = DiskFormatParams()) = 0;
+            virtual Result load_structured(StructDisk & result, const DiskFormatParams &format = DiskFormatParams()) {return Result::error(ErrorCode::LoadError, QT_TRANSLATE_NOOP("errors", "Not implemented"));};
+            virtual std::string file_info() = 0;
+    };
+
+}

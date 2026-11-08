@@ -1,0 +1,370 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
+// Part of the dsk_tools project: https://github.com/Ptr314/dsk_tools
+// Description: Service functions
+
+#include <cstdint>
+#include <iomanip>
+#include <ios>
+#include <string>
+#include <unordered_map>
+#include <fstream>
+
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
+#include "utils.h"
+#include "definitions.h"
+
+namespace dsk_tools
+{
+    // std::string ascii_to_agat(const std::string & in)
+    // {
+    //     std::string out;
+    //     for (int i=0; i < in.size(); i ++) {
+    //         out.push_back(static_cast<char>(in[i] | 0x80));
+    //     }
+    //     return out;
+
+    // }
+
+    std::vector<std::string> split_utf8_chars(const std::string& str) {
+        std::vector<std::string> result;
+        for (size_t i = 0; i < str.size();) {
+            unsigned char c = str[i];
+            size_t len = 1;
+            if ((c & 0x80) == 0x00) len = 1;        // 1-byte character
+            else if ((c & 0xE0) == 0xC0) len = 2;   // 2-byte character
+            else if ((c & 0xF0) == 0xE0) len = 3;   // 3-byte character
+            else if ((c & 0xF8) == 0xF0) len = 4;   // 4-byte character
+
+            result.push_back(str.substr(i, len));
+            i += len;
+        }
+        return result;
+    }
+
+    std::string trim(const std::string& str, const std::string& whitespace)
+    {
+        const auto strBegin = str.find_first_not_of(whitespace);
+        if (strBegin == std::string::npos)
+            return ""; // no content
+
+        const auto strEnd = str.find_last_not_of(whitespace);
+        const auto strRange = strEnd - strBegin + 1;
+
+        return str.substr(strBegin, strRange);
+    }
+
+    std::string get_file_ext(const std::string &file_name) {
+        size_t dot_pos = file_name.find_last_of('.');
+        if (dot_pos == std::string::npos || dot_pos == 0) {
+            return "";
+        }
+        std::string ext = file_name.substr(dot_pos);
+        for (size_t i = 0; i < ext.length(); ++i) {
+            ext[i] = ::tolower(ext[i]);
+        }
+        return ext;
+    }
+
+    std::string get_filename(const std::string& path) {
+        size_t pos = path.find_last_of("/\\");
+        if (pos == std::string::npos)
+            return path;
+        return path.substr(pos + 1);
+    }
+
+    std::string get_file_basename(const std::string& path) {
+        std::string name = get_filename(path);
+        size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos)
+            name = name.substr(0, dot);
+        return name;
+    }
+
+    std::string get_file_path(const std::string& path) {
+        size_t pos = path.find_last_of("/\\");
+        if (pos == std::string::npos)
+            return path;
+        return path.substr(0, pos+1);
+    }
+
+    std::string toBCD(uint8_t byte) {
+        return std::to_string(byte >> 4) + std::to_string(byte & 0xF);
+    }
+
+    unsigned fromBCD(const uint8_t b) {
+        return (b >> 4) * 10 + (b & 0xF);
+    }
+
+    constexpr char BASE64_CHARS[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    std::string base64_encode(const std::vector<uint8_t>& data, size_t line_length_limit) {
+        std::string encoded;
+        int val = 0;
+        int valb = -6;
+        size_t line_length = 0; // Счетчик символов в строке
+
+        for (uint8_t c : data) {
+            val = (val << 8) + c;
+            valb += 8;
+            while (valb >= 0) {
+                encoded.push_back(BASE64_CHARS[(val >> valb) & 0x3F]);
+                valb -= 6;
+                line_length++;
+
+                // Если установлен лимит строки и он достигнут, добавляем перевод строки
+                if (line_length_limit > 0 && line_length == line_length_limit) {
+                    encoded.push_back('\n');
+                    line_length = 0;
+                }
+            }
+        }
+
+        if (valb > -6) {
+            encoded.push_back(BASE64_CHARS[((val << (6 + valb)) & 0x3F)]);
+            line_length++;
+        }
+
+        while (encoded.size() % 4) {
+            encoded.push_back('=');
+            line_length++;
+
+            // Учитываем лимит строки при добавлении '='
+            if (line_length_limit > 0 && line_length == line_length_limit) {
+                encoded.push_back('\n');
+                line_length = 0;
+            }
+        }
+
+        return encoded;
+    }
+
+    std::vector<uint8_t> base64_decode(const std::string& encoded) {
+        // Таблица для обратного поиска Base64 символов
+        std::unordered_map<char, uint8_t> base64_map;
+        for (size_t i = 0; i < 64; ++i) {
+            base64_map[BASE64_CHARS[i]] = static_cast<uint8_t>(i);
+        }
+
+        std::vector<uint8_t> decoded;
+        int val = 0;
+        int valb = -8;
+
+        for (char c : encoded) {
+            if (c == '=' || c == '\n' || c == '\r') {
+                continue; // Игнорируем символы перевода строки и '=' (заполнитель)
+            }
+            if (base64_map.find(c) == base64_map.end()) {
+                throw std::invalid_argument("Incorrect base64 character");
+            }
+
+            val = (val << 6) + base64_map[c];
+            valb += 6;
+
+            if (valb >= 0) {
+                decoded.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+                valb -= 8;
+            }
+        }
+
+        return decoded;
+    }
+
+    std::string toHexList(const std::vector<uint8_t> & data, std::string prefix)
+    {
+        return toHexList(static_cast<const uint8_t*>(data.data()), data.size(), prefix);
+    }
+
+    std::string toHexList(const uint8_t *data, int len, std::string prefix)
+    {
+        std::string out = "";
+        for (int i=0; i < len; i++) {
+            uint8_t b = data[i];
+            if (out.size() > 0) out += " ";
+            out += prefix;
+            out += int_to_hex(b);
+        }
+        return out;
+    }
+
+    bool iterate_until(const std::vector<uint8_t> & in, int & p, const uint8_t v)
+    {
+        uint8_t d;
+        do {
+            if (p >= in.size()) return false;
+            d = in.at(p++);
+        } while (d != v);
+        return true;
+    }
+
+    int agat_attr_to_type(uint8_t a)
+    {
+        uint8_t v = a & 0x7F;
+        int n = 0;
+        do {
+            if (v == 0) return n;
+            v >>= 1;
+            n++;
+        } while (n < 8);
+        return 0;
+    }
+
+    PreferredType agat_preferred_file_type(const int t)
+    {
+        if (t == 0) return PreferredType::Text;
+        if (t == 2) return PreferredType::AgatBASIC;
+        return PreferredType::Binary;
+    }
+
+
+    std::string to_upper(std::string s) {
+        for (size_t i = 0; i < s.length(); ++i) {
+            s[i] = std::toupper(static_cast<unsigned char>(s[i]));
+        }
+        return s;
+    }
+
+    std::string to_lower(std::string s) {
+        for (size_t i = 0; i < s.length(); ++i) {
+            s[i] = std::tolower(static_cast<unsigned char>(s[i]));
+        }
+        return s;
+    }
+
+    std::string pad_number(const int num, const size_t width, const char padding) {
+        std::string s = std::to_string(num);
+        if (s.length() >= width) {
+            return s;
+        }
+        return std::string(width - s.length(), padding) + s;
+    }
+
+    std::string escapeHtml(const std::string& input, bool nbsp)
+    {
+        std::unordered_map<char, std::string> replacements = {
+            {'<', "&lt;"},
+            {'>', "&gt;"},
+            {'&', "&amp;"},
+            {'"', "&quot;"},
+            {'\'', "&apos;"}
+        };
+
+        if (nbsp) replacements[' '] = "&nbsp;";
+
+        std::string output;
+        output.reserve(input.size() * 2); // Резервируем память для ускорения
+
+        for (char c : input) {
+            auto it = replacements.find(c);
+            if (it != replacements.end()) {
+                output += it->second;
+            } else {
+                output += c;
+            }
+        }
+
+        return output;
+    }
+
+    std::vector<uint8_t> strToBytes(const std::string& s)
+    {
+        return std::vector<uint8_t>(s.begin(), s.end());
+    }
+
+    std::string bytesToString(const std::vector<uint8_t>& v)
+    {
+        return std::string(v.begin(), v.end());
+    }
+
+#ifdef _WIN32
+
+    std::wstring utf8_to_wide(const std::string& utf8_str)
+    {
+        if (utf8_str.empty()) return std::wstring();
+
+        // Get required buffer size
+        int size_needed = MultiByteToWideChar(CP_UTF8, 0, utf8_str.c_str(),
+                                              static_cast<int>(utf8_str.size()),
+                                              nullptr, 0);
+        if (size_needed <= 0) return std::wstring();
+
+        // Perform conversion
+        std::wstring result(size_needed, 0);
+        MultiByteToWideChar(CP_UTF8, 0, utf8_str.c_str(),
+                           static_cast<int>(utf8_str.size()),
+                           &result[0], size_needed);
+
+        return result;
+    }
+#endif
+
+    // Helper: Detect if path is at root directory
+    bool is_at_root(const std::string& path) {
+#ifdef _WIN32
+        // Windows roots: "C:\", "C:", UNC "\\server\share"
+        if (path.length() <= 3 && path.length() >= 2 && path[1] == ':') {
+            return path.length() == 2 ||
+                   (path.length() == 3 && (path[2] == '\\' || path[2] == '/'));
+        }
+        // UNC path root detection
+        if (path.length() >= 2 && path[0] == '\\' && path[1] == '\\') {
+            size_t third = path.find('\\', 2);
+            if (third == std::string::npos) return false;
+            size_t fourth = path.find('\\', third + 1);
+            return fourth == std::string::npos;
+        }
+        return false;
+#else
+        return path == "/";
+#endif
+    }
+
+    // Helper: Get parent directory path
+    std::string get_parent_path(const std::string& path) {
+        std::string result = path;
+
+        // Remove trailing separator if present
+        while (!result.empty() && (result.back() == '/' || result.back() == '\\')) {
+            result.pop_back();
+        }
+
+        // Find last separator
+        size_t pos = result.find_last_of("/\\");
+        if (pos == std::string::npos) {
+            return result;  // No separator found
+        }
+
+        result = result.substr(0, pos);
+
+        // On Windows, keep drive letter (e.g., "C:" for "C:\foo")
+#ifdef _WIN32
+        if (result.empty() || (result.length() == 2 && result[1] == ':')) {
+            return result.length() == 2 ? result + '/' : result;
+        }
+#endif
+
+        return result.empty() ? "/" : result;
+    }
+
+    // Join base path with a filename/directory name
+    std::string join_paths(const std::string& base, const std::string& name) {
+        if (base.empty()) {
+            return name;
+        }
+
+        std::string result = base;
+        char lastChar = base[base.length() - 1];
+        if (lastChar != '/' && lastChar != '\\') {
+            result += '/';  // Use forward slash (works on all platforms)
+        }
+        result += name;
+        return result;
+    }
+
+} // namespace
