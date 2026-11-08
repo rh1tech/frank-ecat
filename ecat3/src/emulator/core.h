@@ -175,6 +175,39 @@ extern unsigned int (*ecat_core_num)();
 extern bool ecat_parallel_on;
 void ecat_cross_push(unsigned int core, const LinkData * link, unsigned int value);
 void ecat_cross_drain(unsigned int core);
+
+//A device both cores call into (a register file two processors share): held
+//across each of its entry points, recursive on one core. Nothing while the
+//machine runs on one core
+struct EcatDeviceLock {
+    volatile int owner = -1;
+    int depth = 0;
+    void lock()
+    {
+        if (!ecat_parallel_on) return;
+        const int c = (int)ecat_core_num();
+        if (owner == c) { depth++; return; }
+        //__atomic, not __sync: the firmware builds atomics as calls to its own
+        //(platform/ecat_atomic.c, a hardware spinlock), while libgcc's __sync
+        //functions use LDREX/STREX, which never succeed on the PSRAM a device
+        //object may live in: the first contended lock spun for ever
+        for (;;) {
+            int expected = -1;
+            if (__atomic_compare_exchange_n(&owner, &expected, c, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
+        }
+        depth = 1;
+    }
+    void unlock()
+    {
+        if (!ecat_parallel_on || owner != (int)ecat_core_num()) return;
+        if (--depth == 0) { __sync_synchronize(); owner = -1; }
+    }
+};
+struct EcatDeviceGuard {
+    EcatDeviceLock &l;
+    explicit EcatDeviceGuard(EcatDeviceLock &lock) : l(lock) { l.lock(); }
+    ~EcatDeviceGuard() { l.unlock(); }
+};
 #endif
 
 struct DeviceDescription {

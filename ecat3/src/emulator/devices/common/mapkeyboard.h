@@ -116,6 +116,11 @@ protected:
     void set_alt_state(bool pressed) override { alt_pressed = pressed; }
 
 public:
+#ifdef ECAT_EMBEDDED
+    //Not clocked: what it answers changes with the host's keys and the scan
+    //lines the processor writes, never with time
+    bool timeless_access() const override { return true; }
+#endif
     unsigned int rus_switch_key() const override { return (code_ruslat == 0) ? _FFFF : code_ruslat; }
     MapKeyboard(InterfaceManager *im, EmulatorConfigDevice *cd);
 

@@ -23,6 +23,11 @@ private:
     bool m_single_frame = false;
 
 public:
+#ifdef ECAT_EMBEDDED
+    //A decoder over memory pages (Memory *, all of them): no flush of the
+    //batch for it, as for MemoryMapper
+    bool timeless_access() const override { return true; }
+#endif
     PageMapper(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
     unsigned int get_value(unsigned int address) override;

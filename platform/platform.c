@@ -421,7 +421,15 @@ void platform_cyccnt_enable(void) {
 static uint32_t core1_stack[CORE1_STACK_WORDS];
 
 void platform_launch_core1(void (*entry)(void)) {
+    for (unsigned i = 0; i < CORE1_STACK_WORDS; i++) core1_stack[i] = 0x57AC57ACu;   /* the high-water mark */
     multicore_launch_core1_with_stack(entry, core1_stack, sizeof(core1_stack));
+}
+
+/* bytes of core 1's stack ever used */
+unsigned platform_core1_stack_used(void) {
+    unsigned i = 0;
+    while (i < CORE1_STACK_WORDS && core1_stack[i] == 0x57AC57ACu) i++;
+    return (CORE1_STACK_WORDS - i) * 4;
 }
 
 /* ------------------------------------------------------------------ */

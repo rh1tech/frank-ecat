@@ -46,17 +46,15 @@ mos6502core::_*
 mos6502::execute
 mos6502Core::read_mem
 mos6502Core::write_mem
+mos6502::read_mem
+mos6502::write_mem
 
 # ДВК: the PDP-11 processors and the ИЕ15 terminal (its own processor, its display)
-pdp11core::execute
-pdp11core::decode_operand
-pdp11core::read_operand
-pdp11core::write_operand
-pdp11core::execute_double
-pdp11core::execute_single
-pdp11core::check_interrupts
+pdp11core::*
 K1801VM1Core::*
-k1801vm1::execute
+k1801vm1::*
+K1801VM2Core::*
+k1801vm2::*
 IE15CPU::execute
 IE15CPU::execute_one
 IE15CPU::skip
@@ -84,6 +82,14 @@ MS7004::clock
 pdp11core::execute_misc
 MemoryMapper::port_device
 DVKPanel::clock
+DVKPanel::clocks_to_batch_event
+DVKMX::clocks_to_batch_event
+DVKKGD::clock
+DWController::clock
+KCGD::clock
+KCGDDisplay::clock
+I8251::clock
+I8251::do_clock
 BKTimer::clock
 DL11::clock
 DL11::get_value_word
@@ -98,6 +104,10 @@ AddressableDevice::set_value_word
 
 # 8080
 i8080core::execute
+i8080::read_mem
+i8080::write_mem
+i8080::read_port
+i8080::write_port
 I8080Core::read_mem
 I8080Core::write_mem
 I8080Core::read_port

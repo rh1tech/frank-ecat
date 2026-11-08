@@ -74,6 +74,10 @@ emulator::Result DVKKMD::load_config(SystemData *sd)
 
 void DVKKMD::reset(bool cold)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     AddressableDevice::reset(cold);
     m_cr = m_go = m_dr = 0;
     m_pending = false;
@@ -83,6 +87,10 @@ void DVKKMD::reset(bool cold)
 
 void DVKKMD::clock(MAYBE_UNUSED unsigned int counter)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     if (m_pulse) {
         m_pulse = false;
         i_local_init.change(0);
@@ -91,6 +99,10 @@ void DVKKMD::clock(MAYBE_UNUSED unsigned int counter)
 
 void DVKKMD::interface_callback(unsigned int callback_id, unsigned int new_value, MAYBE_UNUSED unsigned int old_value)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     if (callback_id == CALLBACK_INIT) {
         // INIT магистрали машины: сбросить регистры и подать прошивке IRQ2
         if (new_value & 1) {
@@ -135,6 +147,10 @@ uint32_t DVKKMD::host_address(unsigned offset) const
 
 unsigned int DVKKMD::get_value_word(unsigned int address)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     if (address >= BASE_DMA) {
         m_dma_reads++;
         return m_host->read_word(host_address(address - BASE_DMA)) & 0xFFFF;
@@ -151,6 +167,10 @@ unsigned int DVKKMD::get_value_word(unsigned int address)
 
 unsigned DVKKMD::get_direct(unsigned address)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     // Окно в память машины смотрится без счёта обращений
     unsigned w;
     if (address >= BASE_DMA) w = m_host->get_direct(host_address(address - BASE_DMA))
@@ -161,6 +181,10 @@ unsigned DVKKMD::get_direct(unsigned address)
 
 unsigned int DVKKMD::get_value(unsigned int address)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     if (address >= BASE_DMA) {
         m_dma_reads++;
         return m_host->read(host_address(address - BASE_DMA) | (address & 1)) & 0xFF;
@@ -171,6 +195,10 @@ unsigned int DVKKMD::get_value(unsigned int address)
 
 void DVKKMD::set_value_word(unsigned int address, unsigned int value, MAYBE_UNUSED bool force)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     value &= 0xFFFF;
     if (address >= BASE_DMA) {
         m_dma_writes++;
@@ -211,6 +239,10 @@ void DVKKMD::set_value_word(unsigned int address, unsigned int value, MAYBE_UNUS
 
 void DVKKMD::set_value(unsigned int address, unsigned int value, bool force)
 {
+#ifdef ECAT_EMBEDDED
+    EcatDeviceGuard guard(m_lock);
+#endif
+
     if (address >= BASE_DMA) {
         m_dma_writes++;
         m_host->write(host_address(address - BASE_DMA) | (address & 1), value & 0xFF);

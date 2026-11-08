@@ -63,6 +63,10 @@ private:
     unsigned m_dma_reads = 0;
     unsigned m_dma_writes = 0;
 
+#ifdef ECAT_EMBEDDED
+    //The host's processor and the board's may run on different cores
+    EcatDeviceLock m_lock;
+#endif
     void update_irq();
     void set_done(bool done);
     uint32_t host_address(unsigned offset) const;

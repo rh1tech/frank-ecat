@@ -291,7 +291,12 @@ static unsigned int core_num(void) { return get_core_num(); }
 /* Moving the HDMI line IRQ to core 0 (hdmi_irq_to_core0()): core 1 lets go
  * of it first, so the two never take one line each */
 extern "C" int hdmi_video_irq(void);
+extern "C" void hdmi_restart(void);
+extern "C" void hdmi_report_state(void);
 static volatile int hdmi_irq_release;   /* 1: core 1 to disable it, 2: done */
+static volatile int hdmi_irq_core = 1;   /* the core that takes it */
+static volatile bool hdmi_restart_req;   /* core 1: restart the scan-out */
+static uint32_t hdmi_restarts;
 
 static void hdmi_irq_to_core0(void)
 {
@@ -299,6 +304,7 @@ static void hdmi_irq_to_core0(void)
     while (hdmi_irq_release != 2) tight_loop_contents();
     irq_set_priority(hdmi_video_irq(), 0);
     irq_set_enabled(hdmi_video_irq(), true);
+    hdmi_irq_core = 0;
     printf("hdmi: line IRQ on core 0\n");
 }
 
@@ -315,6 +321,10 @@ static void core1_main(void)
             irq_set_enabled(hdmi_video_irq(), false);
             hdmi_irq_release = 2;
         }
+        if (hdmi_restart_req) {
+            hdmi_restart();
+            hdmi_restart_req = false;
+        }
         Emulator * e = par_emu;
         if (e) e->parallel_core1_step();
     }
@@ -330,6 +340,7 @@ static Emulator *emu;
 
 extern "C" uint32_t frank_audio_tick_us, frank_audio_ticks;
 extern "C" volatile uint32_t hdmi_irq_max_dur_us, hdmi_irq_max_gap_us, hdmi_irq_dur_total_us;
+extern "C" volatile uint32_t irq_inx;
 
 static void status(void)
 {
@@ -342,8 +353,9 @@ static void status(void)
     printf("vsync %lu, audio ring %d, underruns %lu\n", (unsigned long)vsyncs, frank_audio_level(),
            (unsigned long)frank_audio_underruns);
     printf("hdmi audio tick: %lu us in %lu ticks\n", (unsigned long)frank_audio_tick_us, (unsigned long)frank_audio_ticks);
-    printf("hdmi line irq: longest %lu us, largest gap %lu us\n", (unsigned long)hdmi_irq_max_dur_us,
-           (unsigned long)hdmi_irq_max_gap_us);
+    printf("core 1 stack: %u bytes used of %u\n", platform_core1_stack_used(), 16u * 1024u);
+    printf("hdmi line irq: longest %lu us, largest gap %lu us, %lu irqs, core %d\n", (unsigned long)hdmi_irq_max_dur_us,
+           (unsigned long)hdmi_irq_max_gap_us, (unsigned long)irq_inx, hdmi_irq_core);
     hdmi_irq_max_dur_us = hdmi_irq_max_gap_us = 0;
     {
         static uint32_t last_total;
@@ -1039,7 +1051,10 @@ int main()
         ecat_time_us = time_us_64;
         if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu"})) {
             par_emu = emu;
-            /* The ИЕ15 terminal is the heavier half: its core gets nothing else
+            /* (The КМД's own ВМ1 stays on core 0: on core 1 the HDMI line IRQ
+             * there came late during its disk transfers, and the scan-out
+             * stopped for good - not understood yet.)
+             * The ИЕ15 terminal is the heavier half: its core gets nothing else
              * (the КСМ and КЦГД ones are lighter than the ДВК-3/4 main side) */
             if (emu->dm->get_device_by_name("ie15-cpu", false) != nullptr) hdmi_irq_to_core0();
         }
@@ -1068,6 +1083,21 @@ int main()
         emu->render_tick();
         platform_crumb(12, 0);
         audio_pump();
+        /* The scan-out stopped (no vsync for 100 ms): set up again, by the core
+         * whose IRQ it is */
+        {
+            static uint32_t seen_vs;
+            static uint64_t seen_at;
+            if (vsyncs != seen_vs) { seen_vs = vsyncs; seen_at = now; }
+            else if (now - seen_at > (hdmi_restarts ? 2000000u : 100000u)) {
+                hdmi_report_state();
+                hdmi_restarts++;
+                printf("hdmi: scan-out stopped, restarting (%lu)\n", (unsigned long)hdmi_restarts);
+                if (hdmi_irq_core == 0) hdmi_restart();
+                else hdmi_restart_req = true;
+                seen_at = now;
+            }
+        }
         busy_us += time_us_64() - now;
         platform_crumb(13, 0);
         platform_usb_poll();

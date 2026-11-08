@@ -141,7 +141,7 @@ bool ecat_parallel_on = false;
 //starts; a line toggled faster than the queue empties (it never is: a serial
 //line, a beeper) loses changes rather than stalling a core
 struct CrossMsg { const LinkData * link; unsigned int value; };
-static const unsigned int CROSS_SIZE = 4096;
+static const unsigned int CROSS_SIZE = 512;
 static CrossMsg g_cross[2][CROSS_SIZE];
 static volatile uint32_t g_cross_head[2], g_cross_tail[2];
 uint32_t ecat_cross_dropped;

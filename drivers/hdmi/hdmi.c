@@ -228,7 +228,7 @@ static bool conv_color_std_snapshot_valid = false;
 // map64colors removed — frame buffer now stores direct 8-bit palette indices
 
 //индекс, проверяющий зависание
-static uint32_t irq_inx = 0;
+volatile uint32_t irq_inx = 0;   // frank-ecat: line IRQs taken, read by the status line
 
 //функции и константы HDMI
 
@@ -2926,6 +2926,21 @@ void hdmi_set_profi_ds80_mode(bool active,
         conv_color_std_snapshot = (uint32_t *) 0;
         conv_color_std_snapshot_valid = false;
     }
+}
+
+// frank-ecat: the line DMA stopped (a line IRQ came so late that the control
+// channel ran off its descriptors): everything stopped and set up again, on
+// the core that is to take the line IRQ from now on
+void hdmi_restart(void) { hdmi_init(); }
+void hdmi_report_state(void)
+{
+    printf("hdmi state: %lu irqs, line %u, ctrl ch%d busy %d read %08lx count %lu, data ch%d busy %d read %08lx count %lu, irq enabled %d\n",
+           (unsigned long)irq_inx, (unsigned)hdmi_current_line,
+           dma_chan_ctrl, dma_channel_is_busy(dma_chan_ctrl) ? 1 : 0,
+           (unsigned long)dma_hw->ch[dma_chan_ctrl].read_addr, (unsigned long)dma_hw->ch[dma_chan_ctrl].transfer_count,
+           dma_chan, dma_channel_is_busy(dma_chan) ? 1 : 0,
+           (unsigned long)dma_hw->ch[dma_chan].read_addr, (unsigned long)dma_hw->ch[dma_chan].transfer_count,
+           irq_is_enabled(VIDEO_DMA_IRQ) ? 1 : 0);
 }
 
 void graphics_init_hdmi() {
