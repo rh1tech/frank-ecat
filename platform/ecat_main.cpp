@@ -30,6 +30,7 @@
 #include "emulator/emulator.h"
 #include "emulator/audio/audio_driver.h"
 #include "emulator/indexed_palette.h"
+#include "emulator/files.h"
 
 extern "C" {
 #include "pico/stdlib.h"
@@ -40,6 +41,7 @@ extern "C" {
 #include "frank_vfs.h"
 #include "graphics.h"
 #include "hdmi.h"
+#include "ff.h"
 }
 
 #ifndef ECAT_VIDEO_MODE
@@ -274,6 +276,41 @@ static void status(void)
            (unsigned long)frank_audio_underruns);
 }
 
+/* "~C put PATH SIZE~", then SIZE raw bytes: a file to the SD card, made
+ * with its directories (tools/upload.py) - software onto the card with nobody
+ * at the board */
+static void console_put(const char *path, unsigned size)
+{
+    char dir[200];
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = 0;
+    for (char *p = dir + 1; *p; p++)
+        if (*p == '/') { *p = 0; f_mkdir(dir); *p = '/'; }
+    FIL f;
+    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        printf("PUT FAIL open %s\n", path);
+        return;
+    }
+    printf("PUT READY %u\n", size);
+    static uint8_t buf[512];
+    unsigned got = 0, n = 0;
+    bool ok = true;
+    while (got < size) {
+        platform_watchdog_feed();
+        int c = getchar_timeout_us(3000000);
+        if (c < 0) { ok = false; break; }
+        buf[n++] = (uint8_t)c;
+        got++;
+        if (n == sizeof(buf) || got == size) {
+            UINT w;
+            if (f_write(&f, buf, n, &w) != FR_OK || w != n) { ok = false; break; }
+            n = 0;
+        }
+    }
+    f_close(&f);
+    printf(ok ? "PUT OK %u\n" : "PUT FAIL at %u\n", got);
+}
+
 /* Typed lines wait here, and go to the machine one at a time: a new
  * paste_text() replaces one still being typed */
 static std::deque<std::string> console_queue;
@@ -439,6 +476,14 @@ int main()
                         printf("\n");
                     }
                 }
+            } else if (strncmp(cmd, "put ", 4) == 0) {
+                char path[200];
+                unsigned size;
+                if (sscanf(cmd + 4, "%199s %u", path, &size) == 2) console_put(path, size);
+            } else if (strncmp(cmd, "load ", 5) == 0) {
+                const std::string path(cmd + 5);
+                emulator::Result r = HandleExternalFile(emu, path);
+                printf("load %s: %s\n", path.c_str(), r ? "ok" : r.message.c_str());
             } else if (strncmp(cmd, "prof", 4) == 0) {
                 unsigned us = 200;
                 sscanf(cmd + 4, "%u", &us);
