@@ -60,6 +60,7 @@ Agat9Display::convert_rgba
 Agat9Mapper::do_access
 Agat9Mapper::get_value
 Agat9Mapper::set_value
+Agat9Mapper::build_pages
 Memory::get_direct
 
 # sound

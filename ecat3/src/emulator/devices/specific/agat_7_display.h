@@ -71,6 +71,9 @@ protected:
     uint8_t convert_font(unsigned chr, unsigned line) const;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::m_batch_ok
+#endif
     Agat7Display(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     void set_renderer(VideoRenderer &vr) override;

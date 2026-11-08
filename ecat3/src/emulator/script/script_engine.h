@@ -133,6 +133,12 @@ public:
     void pause();                               //Keeps the position; releases the keys held by the script
     void stop();                                //Keeps the pointer; releases the keys held by the script
     void tick(uint64_t clock_counter);
+#ifdef ECAT_EMBEDDED
+    //The clock value at which tick() would next do anything: a batch of
+    //instructions (Emulator::timer_proc) ends there, so a script acts at the
+    //instruction it would act at if ticked after every one
+    uint64_t next_wake(uint64_t clock_counter) const;
+#endif
     //Called by the emulator after a time slice in which the master processor
     //ran no cycle at all (stopped, at a breakpoint). A polled state - WAITFOR,
     //SCREEN - is sampled once per emulated millisecond, and with the clock

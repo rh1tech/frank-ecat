@@ -8,9 +8,15 @@ One firmware (UF2) per family of machines, all from one code base: the upstream
 eCat3 core, compiled for the microcontroller, with each family's
 configurations and ROMs packed into flash.
 
-Work in progress. Running now: the Радио-86РК family (Радио-86РК, Спектр-001,
-Микроша, Апогей) at full speed (1.77 MHz, ~70% of a core), with sound over
-HDMI.
+Work in progress. Running now, at full speed with sound over HDMI:
+
+| Firmware | Machines | Load at full speed |
+|---|---|---|
+| `frank-ecat-rk86` | Радио-86РК, Спектр-001, Микроша, Апогей БК-01Ц | ~85% of a core |
+| `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | ~55% (Агат-7), ~60% (Агат-9) |
+
+Disk and tape images go on the card under `/ecat/software/<machine type>/`
+(`agat`, `radio-86rk`, ...), where the file browser (F11) opens.
 
 ## Layout
 

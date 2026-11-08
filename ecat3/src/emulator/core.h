@@ -337,6 +337,23 @@ public:
     //asked, on every idle step of a WAIT
     virtual bool has_clock_events() const { return false; }
     //Whether clocking this device does anything at all - see m_clocked
+#ifdef ECAT_EMBEDDED
+    //Clocked, so its state moves with time: an access to it brings the devices
+    //up to date first, when Emulator::timer_proc() clocks them a batch of
+    //instructions at a time (MemoryMapper, DeviceManager::sync_pending())
+    bool m_sync_on_access = false;
+    //Reading or writing it depends on nothing that moves with time: memory,
+    //and the decoders that only pass an access on. Every other device the
+    //processor reaches (a port fed by the tape, the FDC) is brought up to date
+    //before an access
+    virtual bool timeless_access() const { return false; }
+    //Its clock() may be given a batch of instructions' cycles at once and end
+    //up where the same cycles one instruction at a time would have taken it,
+    //given that every access to it is preceded by a clock() of what is owed.
+    //Declared per class once checked; one device that does not, and the
+    //machine is clocked after every instruction as it always was
+    virtual bool batch_safe() const { return false; }
+#endif
     bool is_clocked() const { return m_clocked; }
     //True for a class with a system_clock() of its own. The others count in
     //the domain's cycles when their clock ratio is 1:1, and DeviceManager then
@@ -629,6 +646,9 @@ protected:
     unsigned int write_callback;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool timeless_access() const override { return true; }
+#endif
     Memory(InterfaceManager *im, EmulatorConfigDevice *cd);
     ~Memory() override;
     void set_size(unsigned int value);
@@ -781,6 +801,20 @@ public:
     //Clocks the devices of one clock domain. A machine with a single processor
     //has exactly one domain, number 0, and this is the old clock(counter)
     void clock(unsigned int domain, unsigned int counter);
+#ifdef ECAT_EMBEDDED
+    //Cycles of the single domain the devices have not been clocked for yet:
+    //timer_proc() runs a batch of instructions before clocking them once
+    unsigned int m_batch_pending = 0;
+    //Every clocked device is batch_safe(): set by load_devices_config()
+    bool m_batch_ok = false;
+    inline void sync_pending()
+    {
+        if (m_batch_pending == 0) return;
+        const unsigned int p = m_batch_pending;
+        m_batch_pending = 0;
+        clock(0, p);
+    }
+#endif
     //The nearest ComputerDevice::clocks_to_event() among the devices clocked by
     //this processor, UINT_MAX when none knows one
     unsigned int clocks_to_event(const CPU * cpu) const;
@@ -1102,6 +1136,9 @@ private:
 protected:
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool timeless_access() const override { return true; }
+#endif
     // Set by the last access when no device at all is mapped at that address.
     // Machines whose bus reports a timeout use it to raise an exception, so a
     // read-only range answering a write does not count as a missing device.

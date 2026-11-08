@@ -295,9 +295,15 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
     //these lists: Emulator drives them itself
     clocked_devices.assign(cpus.size(), std::vector<ClockedDevice>());
     event_devices.assign(cpus.size(), std::vector<ComputerDevice*>());
+#ifdef ECAT_EMBEDDED
+    m_batch_ok = cpus.size() == 1;
+#endif
     for (unsigned int i=0; i < device_count; i++)
     {
         ComputerDevice * d = devices[i].device.get();
+#ifdef ECAT_EMBEDDED
+        d->m_sync_on_access = !d->timeless_access();
+#endif
         if (d->belongs_to_class("cpu")) continue;
         if (!d->is_clocked()) continue;
 
@@ -305,6 +311,13 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
         for (size_t j=0; j < cpus.size(); j++)
             if (cpus[j] == d->get_clock_source()) { domain = j; break; }
 
+#ifdef ECAT_EMBEDDED
+        if (!d->batch_safe()) {
+            if (m_batch_ok) printf("batch: %s (%s) is clocked after every instruction\n",
+                                   d->name.c_str(), devices[i].device_type.c_str());
+            m_batch_ok = false;
+        }
+#endif
         ClockedDevice c;
         c.device = d;
         c.direct = !d->own_system_clock() && d->clock_ratio_one();
@@ -2783,6 +2796,12 @@ AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int *
 }
 
 
+#ifdef ECAT_EMBEDDED
+#define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) im->dm->sync_pending(); } while (0)
+#else
+#define ECAT_SYNC_FOR(dev) do { } while (0)
+#endif
+
 unsigned int MemoryMapper::read(unsigned int address)
 {
     if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
@@ -2796,6 +2815,7 @@ unsigned int MemoryMapper::read(unsigned int address)
         this->last_device = e->device_r;
         if (e->device_r != nullptr) {
             this->no_device = false;
+            ECAT_SYNC_FOR(e->device_r);
             return e->device_r->get_value(address + e->offset);
         }
         this->no_device = e->timeout_r;
@@ -2809,6 +2829,7 @@ unsigned int MemoryMapper::read(unsigned int address)
     this->last_device = d;
     if (d != nullptr)
     {
+        ECAT_SYNC_FOR(d);
         unsigned int v = d->get_value(address_on_device);
 
         //Several devices answering one address, their outputs wired together
@@ -2948,6 +2969,7 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
         this->last_device = e->device_w;
         if (e->device_w != nullptr) {
             this->no_device = false;
+            ECAT_SYNC_FOR(e->device_w);
             e->device_w->set_value(address + e->offset, value);
         } else
             this->no_device = e->timeout_w;
@@ -2963,6 +2985,7 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
         this->no_device = !this->responds(address, MODE_W);
         return;
     }
+    ECAT_SYNC_FOR(d);
     d->set_value(address_on_device, value);
     while (goes_through(range_index, route) && range_index < this->ranges_count) {
         d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
@@ -2973,6 +2996,9 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
 
 unsigned int MemoryMapper::read_word(unsigned int address)
 {
+#ifdef ECAT_EMBEDDED
+    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
+#endif
     if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
         this->first_range = 1;
         invalidate_pages();
@@ -3022,6 +3048,9 @@ unsigned int MemoryMapper::read_word(unsigned int address)
 // odd address as two bytes, and it calls read_word() with it
 unsigned int MemoryMapper::read_word_odd(unsigned int address)
 {
+#ifdef ECAT_EMBEDDED
+    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
+#endif
     if ((this->first_range == 0) && ((address & this->cancel_init_mask) != 0)) {
         this->first_range = 1;
         invalidate_pages();
@@ -3045,6 +3074,9 @@ unsigned int MemoryMapper::read_word_odd(unsigned int address)
 //As read_word_odd(); write() also passes the byte on through a "through" range
 void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 {
+#ifdef ECAT_EMBEDDED
+    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
+#endif
     AddressableDevice * d;
     MapperPage * e = find_page(address, page_tag());
     if (e != nullptr) {
@@ -3063,6 +3095,9 @@ void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 
 void MemoryMapper::write_word(unsigned int address, unsigned int value)
 {
+#ifdef ECAT_EMBEDDED
+    im->dm->sync_pending();     //a word: the devices up to date, whichever it reaches
+#endif
     MapperPage * e = find_page(address, page_tag());
     if (e != nullptr) {
         this->last_device = e->device_w;
@@ -3104,6 +3139,7 @@ unsigned int MemoryMapper::read_port(unsigned int address)
         AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_R, &address_on_device, &range_index);
         if (d != nullptr)
         {
+            ECAT_SYNC_FOR(d);
             return d->get_value(address_on_device);
 
         } else
@@ -3124,6 +3160,7 @@ void MemoryMapper::write_port(unsigned int address, unsigned int value)
         AddressableDevice * d = this->map(&(this->ports), 0, this->ports_count-1, this->i_config.value, a, MODE_W, &address_on_device, &range_index);
         if (d != nullptr)
         {
+            ECAT_SYNC_FOR(d);
             d->set_value(address_on_device, value);
         }
     }

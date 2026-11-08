@@ -104,6 +104,9 @@ void Agat9Mapper::reset(bool cold)
         _WR = _RD = _HD = _D8_4 = 0;
         _bl_RAM = _bl_ROM = 1;
     }
+#ifdef ECAT_EMBEDDED
+    m_pages_stale = true;
+#endif
 }
 
 emulator::Result Agat9Mapper::load_config(SystemData *sd)
@@ -117,13 +120,81 @@ emulator::Result Agat9Mapper::load_config(SystemData *sd)
     m_page_map = dynamic_cast<RAM*>(im->dm->get_device_by_name(cd->get_parameter("page_map").value));
 
     m_bios_mask = (m_bios->get_size()==2048)?0x7FF:0xFFF;
+#ifdef ECAT_EMBEDDED
+    m_page_map->set_memory_callback(this, 1, MODE_W);     //a new map: the pages again
+    m_pages_stale = true;
+#endif
 
     return emulator::Result::ok();
 }
 
+#ifdef ECAT_EMBEDDED
+void Agat9Mapper::memory_callback(MAYBE_UNUSED unsigned int callback_id, MAYBE_UNUSED unsigned int address)
+{
+    m_pages_stale = true;
+}
+
+//do_access() below, a page at a time: the same table, the same decisions
+void Agat9Mapper::build_pages(unsigned key, unsigned PM)
+{
+    m_ram_buf = m_ram->is_plain() ? m_ram->get_buffer() : nullptr;
+    m_ram_size = m_ram->get_size();
+    for (unsigned rd_wr = 0; rd_wr < 2; rd_wr++)
+        for (unsigned page = 0; page < 16; page++) {
+            const unsigned address = page << 12;
+            const unsigned A12 = (address >> 12) & 1;
+            const unsigned A13 = (address >> 13) & 1;
+            const unsigned A14 = (address >> 14) & 1;
+            const unsigned A15 = (address >> 15) & 1;
+            const unsigned A14_15_ = 1 - (A14 & A15);
+            const unsigned D14_a = (A12 << 0) + (A13 << 1) + (A14_15_ << 2) + (_WR << 3) + (_RD << 4)
+                                 + (_HD << 5) + (rd_wr << 6) + (_bl_ROM << 7) + (_bl_RAM << 8) + (PM << 9);
+            const unsigned _D14_v = D14[D14_a];
+            Page &pg = m_pages[rd_wr][page];
+            pg.kind = PAGE_NONE;
+            pg.writable = false;
+            pg.ram_base = 0;
+            if (((_D14_v >> 7) & 1) == 0 && rd_wr == 1 && ((_D14_v >> 3) & 1) == 0) pg.kind = PAGE_ROM;
+            if (((_D14_v >> 2) & 1) == 0) {
+                const unsigned __A12f = (_D14_v >> 0) & 1;
+                const unsigned __RP   = (_D14_v >> 5) & 1;
+                const unsigned segment = (address >> 13) + (__RP << 3);
+                const unsigned bank = m_page_map->get_buffer()[segment];
+                pg.kind = PAGE_RAM;
+                pg.writable = ((_D14_v >> 1) & 1) == 0;
+                pg.ram_base = (bank << 13) + (__A12f << 12);
+            }
+        }
+    m_pages_key = key;
+    m_pages_stale = false;
+}
+#endif
+
 unsigned Agat9Mapper::do_access(unsigned rd_wr, unsigned address, unsigned data)
 {
     unsigned v = _FFFF;
+
+#ifdef ECAT_EMBEDDED
+    {
+        const unsigned PM = m_pm->get_direct(0) & 1;
+        const unsigned key = _WR | (_RD << 1) | (_HD << 2) | (_bl_ROM << 3) | (_bl_RAM << 4) | (PM << 5);
+        if (m_pages_stale || key != m_pages_key) build_pages(key, PM);
+        const Page &pg = m_pages[rd_wr][(address >> 12) & 0xF];
+        if (pg.kind == PAGE_RAM) {
+            const unsigned ram_address = pg.ram_base + (address & 0x0FFF);
+            if (m_ram_buf != nullptr && ram_address < m_ram_size) {
+                if (rd_wr == 1) return m_ram_buf[ram_address];
+                if (pg.writable) m_ram_buf[ram_address] = (uint8_t)data;
+                return v;
+            }
+            if (rd_wr == 1) return m_ram->get_value(ram_address);
+            if (pg.writable) m_ram->set_value(ram_address, data);
+            return v;
+        }
+        if (pg.kind == PAGE_ROM) return m_bios->get_value(address & m_bios_mask);
+        return v;
+    }
+#endif
 
     const unsigned A12 = (address >> 12) & 1;
     const unsigned A13 = (address >> 13) & 1;
@@ -252,6 +323,9 @@ emulator::Result Agat9Mapper::load_state(const StateReader &r)
     r.u("d8_4", _D8_4);
     r.u("bl_ram", _bl_RAM);
     r.u("bl_rom", _bl_ROM);
+#ifdef ECAT_EMBEDDED
+    m_pages_stale = true;
+#endif
     return emulator::Result::ok();
 }
 

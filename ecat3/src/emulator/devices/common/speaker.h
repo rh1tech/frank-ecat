@@ -31,6 +31,9 @@ private:
     virtual int16_t calc_sound_value() override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::m_batch_ok
+#endif
     Speaker(InterfaceManager *im, EmulatorConfigDevice *cd);
     void save_state(StateWriter &w) override;
     emulator::Result load_state(const StateReader &r) override;

@@ -501,6 +501,18 @@ void ScriptEngine::tick_frozen(uint64_t clock_counter)
     tick(clock_counter);
 }
 
+#ifdef ECAT_EMBEDDED
+uint64_t ScriptEngine::next_wake(uint64_t clock_counter) const
+{
+    const int s = m_state.load(std::memory_order_relaxed);
+    if (!active_state(s)) return UINT64_MAX;
+    if (m_play_from_pending.load(std::memory_order_relaxed)) return clock_counter;
+    if (s == StateDelay || s == StateKeys) return m_resume_at.load(std::memory_order_relaxed);
+    if (s == StateWaitFor || s == StateScreenshot) return m_poll_at.load(std::memory_order_relaxed);
+    return clock_counter;           //running, or stepping with the debugger: at once
+}
+#endif
+
 void ScriptEngine::tick(uint64_t clock_counter)
 {
     //Lock free part: this is where nearly every call ends

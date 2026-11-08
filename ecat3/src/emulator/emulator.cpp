@@ -1769,6 +1769,10 @@ void Emulator::debug_step_slice()
     }
 }
 
+#ifndef ECAT_BATCH_MAX
+#define ECAT_BATCH_MAX 32       //cycles: a sample of the sound at 32 kHz on a 1 MHz machine
+#endif
+
 void Emulator::timer_proc(uint64_t time_ticks)
 {
     //TODO: Other timer stuff?
@@ -1802,6 +1806,46 @@ void Emulator::timer_proc(uint64_t time_ticks)
             debug_hold_domains(target);
             if (script) script->tick(clock_counter);
         }
+
+#ifdef ECAT_EMBEDDED
+        //One processor: the devices are clocked once a batch of instructions,
+        //not after each. A batch ends where a device has an event next
+        //(clocks_to_event(): a line of the raster, its sync pulses, so the
+        //interrupts they raise come on time) and at ECAT_BATCH_MAX cycles at
+        //the latest; an access to a clocked device clocks them all first
+        //(MemoryMapper, sync_pending()), so the FDC, the timers and the sound
+        //see the time they would have seen. On the microcontroller clocking
+        //every device after every instruction was a third of the time
+        if (domains.size() == 1 && m_step_cpu == nullptr && !m_debug_paused && !m_debug_attached) {
+            ClockDomain &d = domains[0];
+            while (d.norm < target) {
+                unsigned int budget = dm->clocks_to_event(d.cpu);
+                const unsigned int batch_max = dm->m_batch_ok ? ECAT_BATCH_MAX : 1;
+                if (budget > batch_max) budget = batch_max;
+                if (script) {
+                    const uint64_t wake = script->next_wake(clock_counter);
+                    if (wake <= clock_counter) budget = 1;
+                    else if (wake - clock_counter < budget) budget = (unsigned int)(wake - clock_counter);
+                }
+                unsigned int run = 0;
+                while (true) {
+                    const unsigned int c = d.cpu->execute();
+                    if (c == 0) break;
+                    run += c;
+                    d.norm += (uint64_t)c * d.scale;
+                    clock_counter += c;
+                    dm->m_batch_pending += c;
+                    if (run >= budget || d.norm >= target) break;
+                }
+                dm->sync_pending();
+                if (script) {
+                    script->tick(clock_counter);
+                    if (m_debug_paused.load(std::memory_order_relaxed)) { debug_hold_domains(target); break; }
+                }
+                if (run == 0) break;        //stopped: the loop below knows what to do
+            }
+        }
+#endif
 
         while (true) {
             //Whichever processor is furthest behind goes next. With one domain
