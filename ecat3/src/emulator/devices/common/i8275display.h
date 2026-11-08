@@ -147,6 +147,24 @@ private:
     void set_attr(uint8_t v, unsigned int palette_base);
     void reset_attr();
     void clear_rows();
+#ifdef ECAT_EMBEDDED
+    //frank-ecat: on a microcontroller redrawing every row of every frame was a
+    //third of the time. A row whose snapshot and incoming field attributes are
+    //those it was last drawn with is already right on the surface: skipped.
+    //Only with a ROM font (a RAM one, the Арго's, changes under the snapshot)
+    struct DrawnRow {
+        bool valid;
+        RowSnapshot snap;
+        bool in_rev, in_under, in_blink, out_rev, out_under, out_blink;
+        unsigned int in_color, in_bg, out_color, out_bg;
+        uint8_t in_next, out_next;
+    };
+    std::vector<DrawnRow> m_drawn;
+    unsigned int m_drawn_cpl = 0, m_drawn_h = 0;
+    bool m_font_is_rom = false;
+    void forget_drawn();
+    bool same_row(unsigned int row) const;
+#endif
     bool follow_resolution();
     bool frame_size(unsigned int & w, unsigned int & h) const;
     void clear_surface();

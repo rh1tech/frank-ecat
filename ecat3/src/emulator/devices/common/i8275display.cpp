@@ -165,6 +165,9 @@ bool I8275Display::follow_resolution()
 //pointing at the copy the widget frees underneath us
 void I8275Display::clear_surface()
 {
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     if (render_pixels == nullptr || line_bytes <= 0) return;
     const uint32_t bg = rgba_colors[0];
     const unsigned int words = (unsigned int)line_bytes / sizeof(ecat_pixel_t);
@@ -179,6 +182,9 @@ void I8275Display::clear_surface()
 void I8275Display::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     vr.FillRGB(VG75_8Colors, rgba_colors, 8);
     vr.FillRGB(ZX_16Colors, zx_colors, 16);
     m_surface_sy = sy;
@@ -190,6 +196,9 @@ emulator::Result I8275Display::load_config(SystemData *sd)
     if (!res) return res;
     Memory = dynamic_cast<RAM*>(im->dm->get_device_by_name(cd->get_parameter("ram").value));
     Font = dynamic_cast<AddressableDevice*>(im->dm->get_device_by_name(cd->get_parameter("font").value));
+#ifdef ECAT_EMBEDDED
+    m_font_is_rom = dynamic_cast<ROM*>(Font) != nullptr;
+#endif
 
     m_font_invert = cd->get_parameter("font_invert", false).value != "0";
     m_font_high_wide = read_confg_value(cd, "font_high_wide", false, (unsigned int)0) != 0;
@@ -443,11 +452,59 @@ void I8275Display::render_all(bool force_render)
     //Кадр начинается с "атрибутов нет", а это нулевая ячейка палитры текущей
     //страницы, а не безусловно белое по черному
     if (Palette != nullptr) set_attr(0x80, m_rows[0].palette_base);
+#ifdef ECAT_EMBEDDED
+    if (m_drawn.size() != I8275D_MAX_ROWS) { m_drawn.assign(I8275D_MAX_ROWS, DrawnRow()); forget_drawn(); }
+    if (m_frame_cpl != m_drawn_cpl || m_frame_h != m_drawn_h || force_render) {
+        forget_drawn();
+        m_drawn_cpl = m_frame_cpl;
+        m_drawn_h = m_frame_h;
+    }
+#endif
     for (unsigned int row = 0; row < m_frame_lps; row++)
     {
+#ifdef ECAT_EMBEDDED
+        if (!m_frame_zx && m_font_is_rom && row < I8275D_MAX_ROWS) {
+            DrawnRow &d = m_drawn[row];
+            if (same_row(row)) {
+                //The surface has it: the attributes leave the row as drawing it did
+                FAReverse = d.out_rev; FAUnder = d.out_under; FABlink = d.out_blink;
+                FAColor = d.out_color; FAColorBg = d.out_bg; NextAttr = d.out_next;
+                continue;
+            }
+            d.in_rev = FAReverse; d.in_under = FAUnder; d.in_blink = FABlink;
+            d.in_color = FAColor; d.in_bg = FAColorBg; d.in_next = NextAttr;
+            draw_row(row);
+            d.snap = m_rows[row];
+            d.out_rev = FAReverse; d.out_under = FAUnder; d.out_blink = FABlink;
+            d.out_color = FAColor; d.out_bg = FAColorBg; d.out_next = NextAttr;
+            d.valid = true;
+            continue;
+        }
+#endif
         if (m_frame_zx) draw_row_zx(row); else draw_row(row);
     }
 }
+
+#ifdef ECAT_EMBEDDED
+void I8275Display::forget_drawn()
+{
+    for (DrawnRow &d : m_drawn) d.valid = false;
+}
+
+bool I8275Display::same_row(unsigned int row) const
+{
+    const DrawnRow &d = m_drawn[row];
+    if (!d.valid) return false;
+    const RowSnapshot &a = d.snap, &b = m_rows[row];
+    if (a.len != b.len || a.font_bank != b.font_bank || a.palette_base != b.palette_base
+        || a.cursor_col != b.cursor_col || a.cursor_row != b.cursor_row || a.cursor_mode != b.cursor_mode
+        || a.add_mode != b.add_mode || a.transparent != b.transparent || a.blink != b.blink
+        || a.blink_char != b.blink_char) return false;
+    if (d.in_rev != FAReverse || d.in_under != FAUnder || d.in_blink != FABlink
+        || d.in_color != FAColor || d.in_bg != FAColorBg || d.in_next != NextAttr) return false;
+    return memcmp(a.data, b.data, b.len) == 0;
+}
+#endif
 
 // Строка кадра в режиме ZX Spectrum.
 //

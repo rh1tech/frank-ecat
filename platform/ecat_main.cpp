@@ -300,6 +300,10 @@ int main()
     uint64_t busy_us = 0;
     std::string line;
     while (true) {
+        /* Slices of 1 ms at least, as the emulation loop of run() does:
+         * slice_ticks() rounds each slice down to whole cycles, and many tiny
+         * slices lost ~5% of the machine's time that way */
+        while (time_us_64() - last < 1000) tight_loop_contents();
         const uint64_t now = time_us_64();
         static unsigned iter;
         const bool trace = iter < 8;
