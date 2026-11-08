@@ -9,7 +9,8 @@ eCat3 core, compiled for the microcontroller, with each family's
 configurations and ROMs packed into flash.
 
 Work in progress. Running now: the Радио-86РК family (Радио-86РК, Спектр-001,
-Микроша, Апогей) at ~88% of the real speed.
+Микроша, Апогей) at full speed (1.77 MHz, ~70% of a core), with sound over
+HDMI.
 
 ## Layout
 
@@ -44,7 +45,9 @@ BOOTSEL by itself.
 
 Console (USB CDC): a typed line goes to the machine's keyboard; `~C m N~`
 switches to machine N of the family, `~C s~` status, `~C d~` display/CPU
-state, `~C prof~` a sampling profile, `~BOOT~`, `~RST~`.
+state, `~C c DEVICE COMMAND PARAMS~` a device command (as a script's
+`COMMAND device.command(params)`), `~C f DEVICE FIELD...~` device fields (as
+`LOG device.field`), `~C prof~` a sampling profile, `~BOOT~`, `~RST~`.
 
 ## Host check
 

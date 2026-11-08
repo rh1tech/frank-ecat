@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 
 #include "emulator/emulator.h"
@@ -153,11 +154,24 @@ private:
     }
 };
 
-/* ---- sound: the core's mixer pulled into the output ring ---- */
+/* ---- sound: the core's mixers pulled into the output ring ----
+ *
+ * Every sound device of the machine opens a driver of its own, as each opens
+ * its own stream on the desktop (and the core deletes the driver it closes):
+ * the pump mixes all of them, saturated, into the HDMI/I2S ring. */
+
+class FrankAudioDriver;
+static std::vector<FrankAudioDriver *> audio_drivers;
 
 class FrankAudioDriver : public AudioDriver
 {
 public:
+    FrankAudioDriver() { audio_drivers.push_back(this); }
+    ~FrankAudioDriver() override
+    {
+        for (size_t i = 0; i < audio_drivers.size(); i++)
+            if (audio_drivers[i] == this) { audio_drivers.erase(audio_drivers.begin() + i); break; }
+    }
     bool open(int sampleRate, int channels, int bufferSamples, AudioCallback callback, void *userdata) override
     {
         (void)sampleRate;
@@ -173,36 +187,58 @@ public:
     void stop() override { m_running = false; }
     void close() override { m_callback = nullptr; }
 
-    /* main loop: as many chunks as the ring has room for */
-    void pump()
+    enum { CHUNK = 256 };
+
+    /* adds CHUNK stereo frames of this device to mix[] */
+    void pull(int32_t *mix)
     {
         if (!m_running || !m_callback) return;
-        while (frank_audio_free() >= CHUNK) {
-            int16_t in[CHUNK * 2], out[CHUNK * 2];
-            m_callback(m_userdata, reinterpret_cast<uint8_t *>(in), CHUNK * m_channels * 2);
-            const int16_t *lr = in;
-            if (m_channels == 1) {
-                for (int i = 0; i < CHUNK; i++) out[2 * i] = out[2 * i + 1] = in[i];
-                lr = out;
-            }
-            frank_audio_push(lr, CHUNK);
-        }
+        int16_t in[CHUNK * 2];
+        m_callback(m_userdata, reinterpret_cast<uint8_t *>(in), CHUNK * m_channels * 2);
+        if (m_channels == 1)
+            for (int i = 0; i < CHUNK; i++) { mix[2 * i] += in[i]; mix[2 * i + 1] += in[i]; }
+        else
+            for (int i = 0; i < CHUNK * 2; i++) mix[i] += in[i];
     }
 
+    int channels() const { return m_channels; }
+    void *owner() const { return m_userdata; }
+    bool live() const { return m_running && m_callback; }
+
 private:
-    enum { CHUNK = 256 };
     int m_channels = 1;
     AudioCallback m_callback = nullptr;
     void *m_userdata = nullptr;
     bool m_running = false;
 };
 
-static FrankAudioDriver *audio_driver;
+static uint32_t audio_chunks;
+static int audio_peak;
+
+/* main loop: as many chunks as the ring has room for */
+static void audio_pump(void)
+{
+    if (audio_drivers.empty()) return;
+    while (frank_audio_free() >= FrankAudioDriver::CHUNK) {
+        int32_t mix[FrankAudioDriver::CHUNK * 2] = {0};
+        for (FrankAudioDriver *d : audio_drivers) d->pull(mix);
+        int16_t out[FrankAudioDriver::CHUNK * 2];
+        for (int i = 0; i < FrankAudioDriver::CHUNK * 2; i++) {
+            int32_t v = mix[i];
+            if (v > 32767) v = 32767;
+            else if (v < -32768) v = -32768;
+            out[i] = (int16_t)v;
+            const int a = v < 0 ? -v : v;
+            if (a > audio_peak) audio_peak = a;
+        }
+        frank_audio_push(out, FrankAudioDriver::CHUNK);
+        audio_chunks++;
+    }
+}
 
 AudioDriver *ecat_create_audio_driver()
 {
-    if (!audio_driver) audio_driver = new FrankAudioDriver();
-    return audio_driver;
+    return new FrankAudioDriver();
 }
 
 /* the desktop's cache of unpacked extension files (emulator/cache.cpp, not
@@ -229,14 +265,29 @@ static Emulator *emu;
 static void status(void)
 {
     ecat_heap_report();
+    unsigned live = 0;
+    for (FrankAudioDriver *d : audio_drivers) live += d->live();
+    printf("audio: %u drivers (%u live), %lu chunks, peak %d\n", (unsigned)audio_drivers.size(), live,
+           (unsigned long)audio_chunks, audio_peak);
+    audio_peak = 0;
     printf("vsync %lu, audio ring %d, underruns %lu\n", (unsigned long)vsyncs, frank_audio_level(),
            (unsigned long)frank_audio_underruns);
 }
 
+/* Typed lines wait here, and go to the machine one at a time: a new
+ * paste_text() replaces one still being typed */
+static std::deque<std::string> console_queue;
+
 static void console_line(const std::string &line)
 {
-    if (line.empty()) return;
-    emu->paste_text(line, 60, 60);
+    console_queue.push_back(line);
+}
+
+static void console_pump(void)
+{
+    if (console_queue.empty() || emu->paste_active()) return;
+    emu->paste_text(console_queue.front(), 60, 60);
+    console_queue.pop_front();
 }
 
 int main()
@@ -276,8 +327,6 @@ int main()
 
     platform_watchdog_feed();
     platform_crumb(4, machine);
-    extern volatile bool ecat_malloc_trace;
-    ecat_malloc_trace = true;
     emu = new Emulator("/ecat/computers/", "/ecat/data/", "/ecat/software/", "/ecat/ecat.ini", renderer);
     platform_crumb(5, machine);
     emulator::Result res = emu->load_config(ecat_machines[machine]);
@@ -292,7 +341,6 @@ int main()
         emu->run();
         printf("running %s\n", ecat_machines[machine]);
     }
-    ecat_malloc_trace = false;
     platform_watchdog_feed();
     ecat_heap_report();
 
@@ -305,28 +353,17 @@ int main()
          * slices lost ~5% of the machine's time that way */
         while (time_us_64() - last < 1000) tight_loop_contents();
         const uint64_t now = time_us_64();
-        static unsigned iter;
-        const bool trace = iter < 8;
         platform_watchdog_feed();
         platform_crumb_tick();
         platform_crumb(10, (uint32_t)(now - last));
-        const uint64_t c0 = emu->clock_now();
         /* At most 20 ms of machine time a slice: a machine slower than real time
          * runs in slow motion instead of asking for ever longer slices */
         emu->slice((now - last) > 20000 ? 20000 : (now - last));
-        const uint64_t t1 = time_us_64();
-        if (trace) printf("[%u] asked %llu us: %llu cycles in %llu us\n", iter, (unsigned long long)(now - last),
-                          (unsigned long long)(emu->clock_now() - c0), (unsigned long long)(t1 - now));
         last = now;
         platform_crumb(11, 0);
         emu->render_tick();
-        const uint64_t t2 = time_us_64();
         platform_crumb(12, 0);
-        if (audio_driver) audio_driver->pump();
-        const uint64_t t3 = time_us_64();
-        if (trace) printf("[%u] render %llu us, audio %llu us\n", iter, (unsigned long long)(t2 - t1),
-                          (unsigned long long)(t3 - t2));
-        iter++;
+        audio_pump();
         busy_us += time_us_64() - now;
         platform_crumb(13, 0);
         platform_usb_poll();
@@ -372,12 +409,43 @@ int main()
                     for (unsigned a = 0x7600; a < 0x7610; a++) printf(" %02x", c->mm->read(a) & 0xFF);
                     printf("\n");
                 }
+            } else if (cmd[0] == 'c' && cmd[1] == ' ') {
+                /* "c DEVICE COMMAND PARAMETERS": a device command, as the
+                 * scripts' COMMAND device.command(parameters) */
+                char dev[32] = "", com[32] = "";
+                int used = 0;
+                if (sscanf(cmd + 2, "%31s %31s %n", dev, com, &used) >= 2) {
+                    ComputerDevice *d = emu->dm->get_device_by_name(dev, false);
+                    if (!d) printf("no device %s\n", dev);
+                    else {
+                        emulator::Result r = d->send_command(com, std::string(cmd + 2 + used));
+                        printf("%s.%s: %s\n", dev, com, r ? "ok" : r.message.c_str());
+                    }
+                }
+            } else if (cmd[0] == 'f' && cmd[1] == ' ') {
+                /* "f DEVICE FIELD...": device fields, as the scripts' LOG */
+                char dev[32] = "";
+                int used = 0;
+                if (sscanf(cmd + 2, "%31s %n", dev, &used) >= 1) {
+                    ComputerDevice *d = emu->dm->get_device_by_name(dev, false);
+                    if (!d) printf("no device %s\n", dev);
+                    char *p = cmd + 2 + used, *tok;
+                    while (d && (tok = strtok_r(p, " ", &p)) != nullptr) {
+                        DeviceFieldValue v;
+                        if (!d->get_field(tok, 0, 0, v)) { printf("%s.%s: ?\n", dev, tok); continue; }
+                        printf("%s.%s:", dev, tok);
+                        if (v.numeric) for (unsigned x : v.values) printf(" %u", x);
+                        else printf(" %s", v.text.c_str());
+                        printf("\n");
+                    }
+                }
             } else if (strncmp(cmd, "prof", 4) == 0) {
                 unsigned us = 200;
                 sscanf(cmd + 4, "%u", &us);
                 platform_prof_start(us);
             }
         }
+        console_pump();
         platform_prof_dump_if_done();
         if (now - last_status >= 5000000) {
             static uint64_t last_clock;

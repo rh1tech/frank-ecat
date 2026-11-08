@@ -101,10 +101,7 @@ void *ecat_psram_malloc(size_t n) {
     return p;
 }
 
-volatile bool ecat_malloc_trace;
 static void *heap_malloc(size_t n) {
-    if (ecat_malloc_trace && n > 2048)
-        printf("malloc %u from %p\n", (unsigned)n, __builtin_return_address(0));
     void *p = NULL;
     if (!psram_ready || n <= ECAT_SRAM_SMALL) p = ecat_sram_malloc(n);
     if (!p) p = ecat_psram_malloc(n);
