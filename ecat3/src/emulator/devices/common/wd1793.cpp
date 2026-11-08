@@ -1,3 +1,4 @@
+#include <climits>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
@@ -672,6 +673,20 @@ void WD1793::track_byte(uint8_t value)
         break;
     }
 }
+
+#ifdef ECAT_EMBEDDED
+unsigned int WD1793::clocks_to_batch_event() const
+{
+    int64_t r = INT64_MAX;
+    if (m_index_period > 0 && m_index_irq) r = (int64_t)m_index_period - (int64_t)m_index_clock;
+    if (register_delay > 0 && register_delay < r) r = register_delay;
+    if (command != 0) { const int64_t d = (delay > 0) ? delay : 1; if (d < r) r = d; }
+    if (hld && command == 0 && hld_timer > 0 && hld_timer < r) r = hld_timer;
+    if (r == INT64_MAX) return UINT_MAX;
+    if (r < 1) r = 1;
+    return r > (int64_t)UINT_MAX ? UINT_MAX : (unsigned int)r;
+}
+#endif
 
 void WD1793::clock(unsigned int counter)
 {

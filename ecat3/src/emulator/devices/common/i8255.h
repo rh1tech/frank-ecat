@@ -27,6 +27,12 @@ private:
     bool m_has_control_default;
 
 public:
+#ifdef ECAT_EMBEDDED
+    //Not clocked: its lines change with the processor's writes, the keys,
+    //and the devices wired to it - the tape, which ends a batch at every
+    //instruction while it runs. A poll is not a reason to clock the others
+    bool timeless_access() const override { return true; }
+#endif
     I8255(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     emulator::Result load_config(SystemData *sd) override;

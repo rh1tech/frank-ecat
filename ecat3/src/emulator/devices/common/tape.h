@@ -228,7 +228,15 @@ protected:
 
 public:
 #ifdef ECAT_EMBEDDED
-    bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+//Playing or recording, a batch is one instruction, as it always was: a
+    //port it feeds (a ВВ55, timeless_access) is read between its edges, and
+    //a pulse written to it is timed by its own count. Stopped, it adds none
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override
+    {
+        return (m_transport != T_STOP || tape_mode != TAPE_STOPPED || is_recording || motor_on) ? 1u : UINT_MAX;
+    }
+        bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
 #endif
     std::string files;
 

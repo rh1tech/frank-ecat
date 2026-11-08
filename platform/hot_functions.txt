@@ -106,6 +106,21 @@ MemoryMapper::map
 AddressableDevice::get_value_word
 AddressableDevice::set_value_word
 
+# Z80 (Орион-128 Z80 Card II)
+z80core::*
+z80::execute
+z80::read_mem
+z80::write_mem
+z80::read_port
+z80::write_port
+z80Core::*
+WD1793::clock
+WD1793::clocks_to_batch_event
+Generator::system_clock
+Generator::clocks_to_batch_event
+PageMapper::get_value
+PageMapper::set_value
+
 # 8080
 i8080core::execute
 i8080::read_mem

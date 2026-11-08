@@ -1,3 +1,4 @@
+#include <climits>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2023-2025 Mikhail Revzin <p3.141592653589793238462643@gmail.com>
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
@@ -75,6 +76,20 @@ void Generator::interface_callback(unsigned int callback_id, unsigned int new_va
         i_out.change(positive?1:0);
     }
 }
+
+#ifdef ECAT_EMBEDDED
+unsigned int Generator::clocks_to_batch_event() const
+{
+    uint64_t r = UINT64_MAX;
+    if (in_pulse) r = (pulse_counts > pulse_stored) ? pulse_counts - pulse_stored : 1;
+    if (!triggered) {
+        const uint64_t t = (total_counts > clock_stored) ? total_counts - clock_stored : 1;
+        if (t < r) r = t;
+    }
+    if (r == UINT64_MAX) return UINT_MAX;
+    return r > UINT_MAX ? UINT_MAX : (unsigned int)r;
+}
+#endif
 
 void Generator::system_clock(unsigned int counter)
 {

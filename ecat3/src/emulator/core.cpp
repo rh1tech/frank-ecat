@@ -2454,6 +2454,12 @@ void MemoryMapper::invalidate_pages()
 //the device when the mode fits, and otherwise a timeout when the range is
 //strict - which is what responds() says
 #ifdef ECAT_EMBEDDED
+#define PAGE_OFFSET_W(e) ((e)->offset_w)
+#else
+#define PAGE_OFFSET_W(e) ((e)->offset)
+#endif
+
+#ifdef ECAT_EMBEDDED
 void MemoryMapper::fill_direct(MapperPage * e)
 {
     e->direct_r = e->direct_w = nullptr;
@@ -2486,6 +2492,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 
     e->tag = tag;
     e->uncached = false;
+#ifdef ECAT_EMBEDDED
+    e->uncached_r = e->uncached_w = false;
+#endif
     e->device_r = e->device_w = nullptr;
     e->offset = 0;
     e->timeout_r = e->timeout_w = true;
@@ -2494,6 +2503,10 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 #endif
 
     const MapperRange * found = nullptr;
+#ifdef ECAT_EMBEDDED
+    const MapperRange * more[7];
+    unsigned int n_more = 0;
+#endif
     for (unsigned int i = this->first_range; i <= this->ranges_count; i++)
     {
         const MapperRange * mr = &(this->ranges[i]);
@@ -2524,6 +2537,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
             if (r == ROUTE_PASS) continue;
             //It decides the page; what follows it is shadowed
             e->offset = mr->base - mr->range_begin;
+#ifdef ECAT_EMBEDDED
+            e->offset_w = e->offset;
+#endif
             if (r == ROUTE_ANSWER) { e->device_r = mr->device; e->timeout_r = false; }
             else e->timeout_r = true;
             if (w == ROUTE_ANSWER) { e->device_w = mr->device; e->timeout_w = false; }
@@ -2534,6 +2550,10 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
             return e;
         }
         if (found != nullptr) {
+#ifdef ECAT_EMBEDDED
+            //Several ranges: kept for resolve_directions() below
+            if (n_more < 7) { more[n_more++] = mr; continue; }
+#endif
             //More than one range of this configuration in the page: which one
             //answers depends on the address
             e->uncached = true;
@@ -2544,6 +2564,39 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 
     if (found == nullptr) return e;         //nothing is mapped here
 
+#ifdef ECAT_EMBEDDED
+    //Several ranges in the page, as a ROM read over a RAM written: each way
+    //the first range that answers it decides, as map() finds it, if that
+    //range covers the page plainly and there is one for each way
+    if (n_more > 0) {
+        const MapperRange * all[8];
+        unsigned int n = 0;
+        all[n++] = found;
+        for (unsigned int k = 0; k < n_more; k++) all[n++] = more[k];
+        const MapperRange * rr = nullptr, * ww = nullptr;
+        for (unsigned int k = 0; k < n; k++) {
+            if (all[k]->routed) { e->uncached = true; return nullptr; }
+            if (rr == nullptr && (all[k]->mode & MODE_R) != 0) rr = all[k];
+            if (ww == nullptr && (all[k]->mode & MODE_W) != 0) ww = all[k];
+        }
+        auto plain = [&](const MapperRange * m) {
+            return m != nullptr && m->address_mask == 0 && !m->or_read && !m->through
+                && m->range_begin <= p_begin && m->range_end >= p_end;
+        };
+        //A way whose range is not plain over the page (a port in half of
+        //it) takes the full scan; the other is still cached (the BIOS ROM
+        //read at FA00 of the Орион, where port-screen is written)
+        const bool pr = plain(rr), pw = plain(ww);
+        if (!pr && !pw) { e->uncached = true; return nullptr; }
+        e->uncached_r = !pr;
+        e->uncached_w = !pw;
+        if (pr) { e->offset = rr->base - rr->range_begin; e->device_r = rr->device; e->timeout_r = false; }
+        if (pw) { e->offset_w = ww->base - ww->range_begin; e->device_w = ww->device; e->timeout_w = false; }
+        fill_direct(e);
+        return e;
+    }
+#endif
+
     if (found->address_mask != 0 || found->or_read || found->through || found->routed
         || found->range_begin > p_begin || found->range_end < p_end) {
         e->uncached = true;
@@ -2551,6 +2604,9 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
     }
 
     e->offset = found->base - found->range_begin;
+#ifdef ECAT_EMBEDDED
+    e->offset_w = e->offset;
+#endif
     if ((found->mode & MODE_R) != 0) { e->device_r = found->device; e->timeout_r = false; }
     else e->timeout_r = found->strict;
     if ((found->mode & MODE_W) != 0) { e->device_w = found->device; e->timeout_w = false; }
@@ -2951,6 +3007,9 @@ unsigned int MemoryMapper::read(unsigned int address)
 
     //The page this address falls into, resolved once per configuration
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_r) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         this->last_device = e->device_r;
         if (e->device_r != nullptr) {
@@ -2996,6 +3055,9 @@ unsigned int MemoryMapper::read(unsigned int address)
 AddressableDevice * MemoryMapper::peek_read_device(unsigned int address)
 {
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_r) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) return e->device_r;
     unsigned int address_on_device, range_index;
     return this->map(&(this->ranges), this->first_range, this->ranges_count, this->i_config.value,
@@ -3111,18 +3173,21 @@ bool MemoryMapper::responds(unsigned int address, unsigned int mode)
 void MemoryMapper::write(unsigned int address, unsigned int value)
 {
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_w) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         this->last_device = e->device_w;
         if (e->device_w != nullptr) {
             this->no_device = false;
 #ifdef ECAT_EMBEDDED
             if (e->direct_w != nullptr) {
-                const unsigned int a = address + e->offset;
+                const unsigned int a = address + PAGE_OFFSET_W(e);
                 if (a < e->direct_w_size) { e->direct_w[a] = (uint8_t)value; return; }
             }
 #endif
             ECAT_SYNC_FOR(e->device_w);
-            e->device_w->set_value(address + e->offset, value);
+            e->device_w->set_value(address + PAGE_OFFSET_W(e), value);
         } else
             this->no_device = e->timeout_w;
         return;
@@ -3156,6 +3221,9 @@ unsigned int MemoryMapper::read_word(unsigned int address)
     //A word is resolved by its own address, as below: a device composes the
     //two bytes itself, so a word across a page boundary needs nothing special
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_r) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         this->last_device = e->device_r;
         if (e->device_r != nullptr) {
@@ -3215,6 +3283,9 @@ unsigned int MemoryMapper::read_word_odd(unsigned int address)
     //device gets the byte cycle read() makes, with the ranges OR-ed to it
     AddressableDevice * d;
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_r) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         d = e->device_r;
     } else {
@@ -3231,6 +3302,9 @@ void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 {
     AddressableDevice * d;
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_w) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         d = e->device_w;
     } else {
@@ -3248,13 +3322,16 @@ void MemoryMapper::write_word_odd(unsigned int address, unsigned int value)
 void MemoryMapper::write_word(unsigned int address, unsigned int value)
 {
     MapperPage * e = find_page(address, page_tag());
+#ifdef ECAT_EMBEDDED
+    if (e != nullptr && e->uncached_w) e = nullptr;   //this way is not cached
+#endif
     if (e != nullptr) {
         this->last_device = e->device_w;
         if (e->device_w != nullptr) {
             this->no_device = false;
 #ifdef ECAT_EMBEDDED
             if (e->direct_w != nullptr) {
-                const unsigned int a = address + e->offset;
+                const unsigned int a = address + PAGE_OFFSET_W(e);
                 if (a + 1 < e->direct_w_size) {
                     e->direct_w[a] = (uint8_t)value;
                     e->direct_w[a + 1] = (uint8_t)(value >> 8);
@@ -3263,7 +3340,7 @@ void MemoryMapper::write_word(unsigned int address, unsigned int value)
             }
 #endif
             ECAT_SYNC_FOR(e->device_w);
-            e->device_w->set_value_word(address + e->offset, value);
+            e->device_w->set_value_word(address + PAGE_OFFSET_W(e), value);
         } else
             this->no_device = e->timeout_w;
         return;

@@ -347,6 +347,10 @@ struct MapperPage {
     //the virtual call (fill_page(); MemoryMapper::read() and write())
     uint8_t *           direct_r;
     uint8_t *           direct_w;
+    bool                uncached_r; //this way takes the full scan, the other is cached
+    bool                uncached_w;
+    unsigned int        offset_w;   //address_on_device == address + offset_w for a write
+                                    //(a ROM read over a RAM written: two ranges)
     unsigned int        direct_r_size;
     unsigned int        direct_w_size;
 #endif
@@ -421,7 +425,9 @@ public:
     {
         const unsigned int e = clocks_to_batch_event();
         if (e == UINT_MAX) return UINT_MAX;
-        if (clock_miltiplier == clock_divider) return e ? e : 1;
+        //(a device with a system_clock() of its own counts the processor's
+        //cycles itself, as the Generator does)
+        if (clock_miltiplier == clock_divider || own_system_clock()) return e ? e : 1;
         const uint64_t need = (uint64_t)e * clock_divider;
         if (need <= clock_stored) return 1;
         const uint64_t c = (need - clock_stored + clock_miltiplier - 1) / clock_miltiplier;
@@ -1399,7 +1405,7 @@ public:
     {
         MapperPage * e = direct_page(address);
         if (e != nullptr && e->direct_w != nullptr) {
-            const unsigned int a = address + e->offset;
+            const unsigned int a = address + e->offset_w;
             if (a < e->direct_w_size) {
                 this->last_device = e->device_w;
                 this->no_device = false;
@@ -1426,7 +1432,7 @@ public:
     {
         MapperPage * e = direct_page(address);
         if (e != nullptr && e->direct_w != nullptr) {
-            const unsigned int a = address + e->offset;
+            const unsigned int a = address + e->offset_w;
             if (a + 1 < e->direct_w_size) {
                 this->last_device = e->device_w;
                 this->no_device = false;

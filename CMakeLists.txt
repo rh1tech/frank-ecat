@@ -271,3 +271,8 @@ ecat_add_firmware(dvk VIDEO_MODE 28 REFRESH 5001 SURFACE 800 286 MACHINES
     dvk/DVK-2.cfg
     dvk/DVK-3.cfg
     dvk/DVK-4.cfg)
+
+ecat_add_firmware(orion VIDEO_MODE 28 REFRESH 5001 SURFACE 384 256 MACHINES
+    orion-128/Orion-128-m1.cfg
+    orion-128/Orion-128-m3.ext
+    orion-128/Orion-128-Z80.cfg)

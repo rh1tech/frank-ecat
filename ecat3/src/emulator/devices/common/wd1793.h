@@ -151,6 +151,14 @@ private:
     void MasterReset();
 
 public:
+#ifdef ECAT_EMBEDDED
+    //Batches end at its own events (clocks_to_batch_event): where a command's
+    //next step is due, a delayed register write, the head unload, an index
+    //interrupt. Idle, clock() only counts
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     uint8_t registers[5];
     WD1793(InterfaceManager *im, EmulatorConfigDevice *cd);
     bool get_busy() override;

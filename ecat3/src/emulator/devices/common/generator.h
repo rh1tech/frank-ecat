@@ -29,6 +29,12 @@ private:
     bool enabled;
 
 public:
+#ifdef ECAT_EMBEDDED
+    //Its next edge ends a batch (clocks_to_batch_event)
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     Generator(InterfaceManager *im, EmulatorConfigDevice *cd);
     virtual emulator::Result load_config(SystemData *sd) override;
     virtual void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;

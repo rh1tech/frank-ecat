@@ -15,9 +15,10 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | `frank-ecat-rk86` | Радио-86РК, Спектр-001, Микроша, Апогей БК-01Ц | 60-75% of a core |
 | `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 24%: not yet |
 | `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | ~55% (Агат-7), ~60% (Агат-9) |
+| `frank-ecat-orion` | Орион-128 (М1, М3 with disks, Z80 Card II) | ~50% (М1, М3), 93% (Z80 Card II at 5 MHz) |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`
-(`agat`, `radio-86rk`, ...), where the file browser (F11) opens.
+(`agat`, `radio-86rk`, `orion-128`, ...), where the file browser (F11) opens.
 
 ## Layout
 
