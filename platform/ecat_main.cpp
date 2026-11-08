@@ -426,8 +426,37 @@ static void console_line(const std::string &line)
     console_queue.push_back(line);
 }
 
+/* "~C k NAME~": keys typing cannot give (the cursor keys, Esc, F1.., a
+ * character key with "shift+": Shift held around it), each change of a key
+ * 80 ms after the last */
+static std::deque<std::pair<int, bool>> console_keys;    /* key, pressed */
+static uint64_t console_key_at;
+
+static int console_key_code(const char *name)
+{
+    static const struct { const char *name; int key; } keys[] = {
+        { "up", EMUKEY_UP }, { "down", EMUKEY_DOWN }, { "left", 0x01000012 }, { "right", 0x01000014 },
+        { "esc", EMUKEY_ESCAPE }, { "ret", EMUKEY_RETURN }, { "tab", 0x01000001 }, { "bs", 0x01000003 },
+        { "home", 0x01000010 }, { "del", 0x01000007 }, { "space", ' ' },
+        { "f1", 0x01000030 }, { "f2", 0x01000031 }, { "f3", 0x01000032 }, { "f4", 0x01000033 },
+        { "f5", 0x01000034 },
+    };
+    for (const auto &k : keys)
+        if (strcmp(name, k.name) == 0) return k.key;
+    if (name[0] > ' ' && name[1] == 0) return toupper((unsigned char)name[0]);   /* a character key */
+    return 0;
+}
+
 static void console_pump(void)
 {
+    if (!console_keys.empty()) {
+        const uint64_t now = time_us_64();
+        if (now < console_key_at) return;
+        emu->key_event(console_keys.front().first, 0, console_keys.front().second, true);
+        console_keys.pop_front();
+        console_key_at = now + 80000;
+        return;
+    }
     if (console_queue.empty() || emu->paste_active()) return;
     emu->paste_text(console_queue.front(), 60, 60);
     console_queue.pop_front();
@@ -1182,6 +1211,17 @@ int main()
                 printf("machine %u: %s, rebooting\n", n, ecat_machines[n]);
                 sleep_ms(20);
                 platform_reboot_clean(false);
+            } else if (cmd[0] == 'k' && cmd[1] == ' ') {
+                char *p = cmd + 2, *tok;
+                while ((tok = strtok_r(p, " ", &p)) != nullptr) {
+                    const bool shift = strncmp(tok, "shift+", 6) == 0;
+                    const int k = console_key_code(tok + (shift ? 6 : 0));
+                    if (!k) { printf("no key %s\n", tok); continue; }
+                    if (shift) console_keys.push_back({EMUKEY_SHIFT, true});
+                    console_keys.push_back({k, true});
+                    console_keys.push_back({k, false});
+                    if (shift) console_keys.push_back({EMUKEY_SHIFT, false});
+                }
             } else if (strcmp(cmd, "syncs") == 0) {
                 /* which devices' accesses clock the batch out: the polled ones */
                 for (unsigned i = 0; i < emu->dm->device_count; i++) {

@@ -276,3 +276,9 @@ ecat_add_firmware(orion VIDEO_MODE 28 REFRESH 5001 SURFACE 384 256 MACHINES
     orion-128/Orion-128-m1.cfg
     orion-128/Orion-128-m3.ext
     orion-128/Orion-128-Z80.cfg)
+
+ecat_add_firmware(irisha VIDEO_MODE 28 REFRESH 5001 SURFACE 640 240 MACHINES
+    irisha/Irisha-gmd70.cfg
+    irisha/Irisha-kngmd.cfg
+    irisha/Dialog.cfg
+    irisha/Kaspiy.cfg)

@@ -16,9 +16,10 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 24%: not yet |
 | `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | ~55% (Агат-7), ~60% (Агат-9) |
 | `frank-ecat-orion` | Орион-128 (М1, М3 with disks, Z80 Card II) | ~50% (М1, М3), 93% (Z80 Card II at 5 MHz) |
+| `frank-ecat-irisha` | Ириша (ГМД-70, КНГМД), Диалог, Каспий | ~55-60% (Ириша, Каспий), ~70% (Диалог) |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`
-(`agat`, `radio-86rk`, `orion-128`, ...), where the file browser (F11) opens.
+(`agat`, `radio-86rk`, `orion-128`, `irisha`, ...), where the file browser (F11) opens.
 
 ## Layout
 
@@ -64,7 +65,7 @@ firmware are listed for 3 s, the last one used marked; a key stays.
 Console (USB CDC): a typed line goes to the machine's keyboard; `~C m~` opens
 the settings and `~C files~` the files (driven with ANSI cursor keys, Enter,
 Esc, Tab to close), `~C boot~` restarts to the model list, `~C m N~`
-switches to machine N of the family, `~C s~` status, `~C d~` display/CPU
+switches to machine N of the family, `~C k down ret~` keys (cursor, `esc`, `tab`, `bs`, `f1`..), `~C s~` status, `~C d~` display/CPU
 state, `~C c DEVICE COMMAND PARAMS~` a device command (as a script's
 `COMMAND device.command(params)`), `~C f DEVICE FIELD...~` device fields (as
 `LOG device.field`), `~C prof~` a sampling profile, `~BOOT~`, `~RST~`.
