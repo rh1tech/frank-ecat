@@ -260,6 +260,20 @@ AudioDriver *ecat_create_audio_driver()
     return new FrankAudioDriver();
 }
 
+/* Every C++ throw, while ecat_trace_throws is set: the type and where from
+ * (a hang in the unwinder says nothing about which exception it was) */
+#include <typeinfo>
+static volatile bool ecat_trace_throws;
+extern "C" void __real___cxa_throw(void *, std::type_info *, void (*)(void *));
+extern "C" void __wrap___cxa_throw(void *obj, std::type_info *t, void (*dest)(void *))
+{
+    if (ecat_trace_throws) {
+        printf("throw %s from %p\n", t ? t->name() : "?", __builtin_return_address(0));
+        stdio_flush();
+    }
+    __real___cxa_throw(obj, t, dest);
+}
+
 /* the desktop's cache of unpacked extension files (emulator/cache.cpp, not
  * built here: the firmware's extensions are flattened at build time) */
 void cache_touch(const std::string &) {}
@@ -282,6 +296,8 @@ static uint32_t __attribute__((section(".uninitialized_data"))) boot_machine[2];
 static FrankRenderer *renderer;
 static Emulator *emu;
 
+extern "C" uint32_t frank_audio_tick_us, frank_audio_ticks;
+
 static void status(void)
 {
     ecat_heap_report();
@@ -292,6 +308,8 @@ static void status(void)
     audio_peak = 0;
     printf("vsync %lu, audio ring %d, underruns %lu\n", (unsigned long)vsyncs, frank_audio_level(),
            (unsigned long)frank_audio_underruns);
+    printf("hdmi audio tick: %lu us in %lu ticks\n", (unsigned long)frank_audio_tick_us, (unsigned long)frank_audio_ticks);
+    frank_audio_tick_us = frank_audio_ticks = 0;
 }
 
 /* "~C put PATH SIZE~", then SIZE raw bytes: a file to the SD card, made
@@ -960,7 +978,9 @@ int main()
     platform_crumb(4, machine);
     emu = new Emulator("/ecat/computers/", "/ecat/data/", "/ecat/software/", "/ecat/ecat.ini", renderer);
     platform_crumb(5, machine);
+    ecat_trace_throws = true;
     emulator::Result res = emu->load_config(ecat_machines[machine]);
+    ecat_trace_throws = false;
     platform_watchdog_feed();
     if (!res) {
         printf("load_config %s: %s\n", ecat_machines[machine], res.message.c_str());

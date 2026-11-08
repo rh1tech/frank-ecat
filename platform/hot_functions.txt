@@ -26,6 +26,15 @@ ROM::get_value
 Interface::change
 Interface::changed
 
+# 6502 (Агат, Правец): the instruction functions, all of them by prefix
+mos6502core::execute
+mos6502core::get_address
+mos6502core::get_operand
+mos6502core::_*
+mos6502::execute
+mos6502Core::read_mem
+mos6502Core::write_mem
+
 # 8080
 i8080core::execute
 I8080Core::read_mem
@@ -33,6 +42,25 @@ I8080Core::write_mem
 I8080Core::read_port
 I8080Core::write_port
 i8080::execute
+
+# raster displays (Агат)
+RasterDisplay::clock
+Agat7Display::clock
+Agat7Display::HSYNC
+Agat7Display::VSYNC
+Agat7Display::render_line
+Agat7Display::convert_rgba
+Agat9Display::clock
+Agat9Display::HSYNC
+Agat9Display::VSYNC
+Agat9Display::render_line
+Agat9Display::render_line_unlocked
+Agat9Display::same_as_drawn
+Agat9Display::convert_rgba
+Agat9Mapper::do_access
+Agat9Mapper::get_value
+Agat9Mapper::set_value
+Memory::get_direct
 
 # sound
 GenericSound::clock

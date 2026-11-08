@@ -144,6 +144,14 @@ protected:
     //on the emulation thread, which alone switches the width and keeps the
     //address it used; otherwise render_all() on the render thread
     void render_line_unlocked(unsigned screen_line, bool beam);
+#ifdef ECAT_EMBEDDED
+    //What each line of the surface was drawn from (same_as_drawn)
+    struct DrawnLine { uint32_t key = 0; unsigned start = 0; uint8_t src[64]; };
+    std::vector<DrawnLine> m_drawn;
+    unsigned m_drawn_frames = 0;    //50: the next frame draws every line
+    void forget_drawn() { for (DrawnLine &d : m_drawn) d.key = 0; }
+    bool same_as_drawn(unsigned screen_line, unsigned line, unsigned PA, unsigned pallette, unsigned &base_address);
+#endif
     void render_all(bool force_render) override;
 
     void set_mode(unsigned int new_mode);

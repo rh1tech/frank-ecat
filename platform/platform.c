@@ -29,6 +29,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -43,6 +44,11 @@ static volatile uint32_t __attribute__((section(".uninitialized_data"))) crumbs[
 /* the program counter and link register of core 0 when the stall watcher saw
  * the main loop standing still (platform_stall_watch_start) */
 static volatile uint32_t __attribute__((section(".uninitialized_data"))) stall_pc[3];
+/* every 100 ms of a stall after the first second, PC and LR: where a hang
+ * goes round, not one point of it (printed by the safe mode) */
+#define STALL_RING 24
+static volatile uint32_t __attribute__((section(".uninitialized_data"))) stall_ring[STALL_RING][2];
+static volatile uint32_t __attribute__((section(".uninitialized_data"))) stall_ring_n;
 
 /* A reboot that was asked for (a command, a machine switch): not a hang */
 void __attribute__((noreturn)) platform_reboot_clean(bool bootsel) {
@@ -463,7 +469,12 @@ static uint32_t stall_div, stall_acc;
 
 void __attribute__((used)) stall_isr_c(uint32_t *frame) {
     timer1_hw->intr = 1u;                              /* acknowledge alarm 0 */
-    timer1_hw->alarm[0] = timer1_hw->timerawl + sample_us;
+    /* jittered while profiling: a period locked to the timers of the
+     * firmware (the 1 kHz audio tick) samples them and nothing else */
+    static uint32_t lfsr = 0xACE1u;
+    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+    timer1_hw->alarm[0] = timer1_hw->timerawl + sample_us
+                        + ((prof_buf && prof_n < PROF_SAMPLES) ? (lfsr & 63u) : 0u);
     if (prof_buf && prof_n < PROF_SAMPLES) prof_buf[prof_n++] = frame[6];
     if (stall_div > 1 && ++stall_acc < stall_div) return;   /* the stall check stays at 100 ms */
     stall_acc = 0;
@@ -472,7 +483,14 @@ void __attribute__((used)) stall_isr_c(uint32_t *frame) {
         stall_count = 0;
         return;
     }
-    if (++stall_count == 20) {                         /* 2 s without a loop */
+    ++stall_count;
+    if (stall_count == 10) stall_ring_n = 0;
+    if (stall_count >= 10 && stall_ring_n < STALL_RING) {
+        stall_ring[stall_ring_n][0] = frame[6];
+        stall_ring[stall_ring_n][1] = frame[5];
+        stall_ring_n++;
+    }
+    if (stall_count == 20) {                           /* 2 s without a loop */
         stall_pc[0] = 0x57A11000u;
         stall_pc[1] = frame[6];                        /* PC */
         stall_pc[2] = frame[5];                        /* LR */
@@ -490,7 +508,8 @@ static void __attribute__((naked)) stall_isr(void) {
 
 void platform_prof_start(uint32_t us) {
     if (!prof_buf) prof_buf = (uint32_t *)ecat_sram_malloc(PROF_SAMPLES * sizeof(uint32_t));
-    if (!prof_buf) return;
+    if (!prof_buf) prof_buf = (uint32_t *)malloc(PROF_SAMPLES * sizeof(uint32_t));   /* PSRAM */
+    if (!prof_buf) { printf("profiling: no memory\n"); return; }
     prof_n = 0;
     stall_div = STALL_US / us;
     sample_us = us;
@@ -537,7 +556,13 @@ void platform_safe_mode_if_hung(void) {
     const uint32_t pc = stall_pc[1], lr = stall_pc[2];
     crumbs[0] = 0;
     stall_pc[0] = 0;
+    const uint32_t ring_n = stall_ring_n <= STALL_RING ? stall_ring_n : 0;
+    stall_ring_n = 0;
     for (int i = 0; i < 16; i++) {
+        if (i == 4 && have_pc)
+            for (uint32_t k = 0; k < ring_n; k++)
+                printf("*** stall %2lu: PC=0x%08lx LR=0x%08lx ***\n", (unsigned long)k,
+                       (unsigned long)stall_ring[k][0], (unsigned long)stall_ring[k][1]);
         printf("*** SAFE MODE: the last run hung at stage %lu (arg 0x%08lx) after %lu main loops ***\n",
                (unsigned long)stage, (unsigned long)arg, (unsigned long)ticks);
         if (have_pc) printf("*** stalled at PC=0x%08lx LR=0x%08lx ***\n", (unsigned long)pc, (unsigned long)lr);

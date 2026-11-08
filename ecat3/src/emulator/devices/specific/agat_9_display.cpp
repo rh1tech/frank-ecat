@@ -3,6 +3,7 @@
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
 // Description: Agat-9 display controller device
 
+#include <cstring>
 #include <iostream>
 #include "agat_9_display.h"
 #include "emulator/utils.h"
@@ -108,6 +109,9 @@ emulator::Result Agat9Display::load_config(SystemData *sd)
 void Agat9Display::set_renderer(VideoRenderer &vr)
 {
     m_pal_dirty = true;
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     GenericDisplay::set_renderer(vr);
     vr.FillRGB(Agat_9_base_colors, Agat_RGBA16, 16);
     vr.FillRGB(Agat_9_gray_colors, Agat_RGBA16gray, 16);
@@ -152,7 +156,12 @@ void Agat9Display::memory_callback(unsigned int callback_id, unsigned int addres
         // std::cout << "2 page: " << m_a2_page << std::endl;
     }
     //Any write to the palette card memory drops the cached colours
-    if (callback_id == PALETTE_CALLBACK) m_pal_dirty = true;
+    if (callback_id == PALETTE_CALLBACK) {
+        m_pal_dirty = true;
+#ifdef ECAT_EMBEDDED
+        forget_drawn();
+#endif
+    }
 }
 
 DeviceOptions Agat9Display::get_device_options()
@@ -188,6 +197,9 @@ DeviceOptions Agat9Display::get_device_options()
 void Agat9Display::set_device_option(unsigned option_id, unsigned value_id)
 {
     if (option_id == A9_OPTION_COLORS) m_color_mode = value_id;
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     if (option_id == A9_OPTION_PALCARD) m_pal_card_out = value_id == A9_PALCARD_ON;
 }
 
@@ -254,6 +266,63 @@ uint8_t Agat9Display::convert_font(unsigned chr, unsigned line) const
 
 }
 
+#ifdef ECAT_EMBEDDED
+//Whether the line on the surface was drawn from what it would be drawn from
+//now: the same bytes, mode, bank, page, palette and blink phase. Mirrors the
+//addressing of render_line_unlocked() below, base_address included (a line
+//the beam skips still leaves it as drawing it would). The microcontroller
+//cannot afford all 256 lines 50 times a second for a screen that stands still
+bool Agat9Display::same_as_drawn(unsigned screen_line, unsigned line, unsigned PA, unsigned pallette,
+                                 unsigned &base_address)
+{
+    if (m_drawn.size() != (size_t)sy) m_drawn.assign(sy, DrawnLine());
+    DrawnLine &d = m_drawn[screen_line];
+    if ((PA == 1 && sx != 512) || (PA == 0 && sx != 280)) { d.key = 0; return false; }
+
+    unsigned start = 0, len = 0;
+    bool blinks = false;
+    if (PA == 1) {
+        switch (mode) {
+        case 0x00: case 0x80: base_address = ((_memory_bank & 0xE) | (line & 1)) << 13; start = base_address + (line/2)*64; len = 64; break;
+        case 0x01: case 0x81: base_address = _memory_bank << 13; start = base_address + (line/2)*64; len = 64; break;
+        case 0x02: start = base_address + (line/8)*64; len = 64; blinks = true; break;
+        case 0x82: start = base_address + (line/8)*64; len = 64; break;
+        case 0x03: base_address = _memory_bank << 13; start = base_address + line*32; len = 32; break;
+        case 0x83: base_address = ((_memory_bank & 0xE) | (line & 1)) << 13; start = base_address + (line/2)*64; len = 64; break;
+        default: d.key = 0; return false;
+        }
+    } else if (line >= 32 && line < 224) {
+        const unsigned apple_line = line - 32;
+        if (m_a2_text == 1 || (m_a2_mixed == 1 && apple_line >= (192-4*8))) {
+            base_address = (m_a2_page==0)?0x400:0x800;
+            const unsigned y = apple_line / 8;
+            start = base_address + ((y & 7) << 7) + ((y >> 3) * 40);
+            blinks = true;
+        } else {
+            base_address = (m_a2_page==0)?0x2000:0x4000;
+            start = base_address + (apple_line & 7)*1024 + ((apple_line >> 3) & 7)*128 + ((apple_line >> 6) & 3)*40;
+        }
+        len = 40;
+    }
+
+    const uint8_t *buf = m_memory->get_buffer();
+    if (len && (buf == nullptr || start + len > m_memory->get_size())) { d.key = 0; return false; }
+    if (m_pal_card && m_line_pal_font) { d.key = 0; return false; }  //the card's font is RAM
+
+    const uint32_t key = 1u | (PA << 1) | (mode << 2) | ((previous_mode & 0xFF) << 10) | (pallette << 18)
+                       | ((unsigned)m_color_mode << 20) | ((m_line_pal & 0x0F) << 23)
+                       | ((m_a2_text & 1) << 27) | ((m_a2_mixed & 1) << 28) | ((m_a2_page & 1) << 29)
+                       | ((blinks && blinker) ? (1u << 30) : 0);
+    const bool same = m_drawn_frames < 50 && d.key == key && d.start == start
+                      && (len == 0 || memcmp(d.src, buf + start, len) == 0);
+    if (same) return true;
+    d.key = key;
+    d.start = start;
+    if (len) memcpy(d.src, buf + start, len);
+    return false;
+}
+#endif
+
 void Agat9Display::render_line(unsigned int screen_line)
 {
     compat_lock_guard guard(m_surface_mutex);
@@ -286,6 +355,20 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
             default:           rgba_ = Agat_RGBA16_8;   break;
         }
 
+#ifdef ECAT_EMBEDDED
+        if (!beam) {
+            forget_drawn();
+        } else if (same_as_drawn(screen_line, line, PA, pallette, base_address)) {
+            this->base_address = base_address;
+            screen_valid = true;
+            return;
+        }
+#endif
+
+        //The 16 colours of the line, through the palette card when there is one
+        uint32_t lut[16];
+        for (unsigned i = 0; i < 16; i++) lut[i] = convert_rgba(i, rgba_);
+
         if (PA == 1) {
             // Agat mode
             if (sx != 512) {
@@ -309,7 +392,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned color = (v >> (3-j)*2) & 0x3;
                             unsigned p = i * 32 + j*8 ;
                             uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
-                            uint32_t c = convert_rgba(Agat_4_index[pallette][color], rgba_);
+                            uint32_t c = lut[Agat_4_index[pallette][color]];
                             *(ecat_pixel_t*)pixel_address = c;
                             *(ecat_pixel_t*)(pixel_address+PXB(4)) = c;
                         }
@@ -325,7 +408,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                         unsigned char_address = base_address + (line/2)*64 + i;
                         uint8_t v = m_memory->get_direct(char_address);
                         for (unsigned j=0; j<2; j++) {
-                            uint32_t color = convert_rgba((v >> (1-j)*4) & 0xF, rgba_);
+                            uint32_t color = lut[(v >> (1-j)*4) & 0xF];
                             unsigned p = i * 32 + j*16 ;
                             uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                             std::fill_n((ecat_pixel_t*)pixel_address, 4, color);
@@ -341,7 +424,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
 
                     // Blanking sides
                     const auto buf = static_cast<ecat_pixel_t *>(render_pixels);
-                    uint32_t black = convert_rgba(0, rgba_);
+                    uint32_t black = lut[0];
                     unsigned screen_offset = screen_line * (64+32*7*2);
                     for (unsigned int j=0; j<32; j++) {
                         buf[screen_offset + j] = black;
@@ -365,7 +448,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                                 ccl = cl * c;
                             else
                                 ccl = cl * (c ^ 0x01);
-                            uint32_t color = convert_rgba(ccl, rgba_);
+                            uint32_t color = lut[ccl];
                             unsigned pixel_index = buf_offset + (6-k)*2;
                             buf[pixel_index] = color;
                             buf[pixel_index + 1] = color;
@@ -380,7 +463,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                     // Each line is 64 bytes long
 
                     // Blanking sides
-                    uint32_t black = convert_rgba(0, rgba_);;
+                    uint32_t black = lut[0];;
                     uint8_t * pixel_address = ((uint8_t *)render_pixels) + line*line_bytes;
                     for (unsigned int j=0; j<32; j++) {
                         *(ecat_pixel_t *)(pixel_address + PXB(j*4)) = black;
@@ -397,7 +480,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned int c = (font_val >> k) & 1;
                             unsigned p = screen_offset + (6-k)*4;
                             pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
-                            *(ecat_pixel_t*)pixel_address = convert_rgba(Agat_2_index[pallette][c], rgba_);
+                            *(ecat_pixel_t*)pixel_address = lut[Agat_2_index[pallette][c]];
                         }
                     }
                     break;
@@ -416,7 +499,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned color = (v >> (7-j)) & 0x1;
                             unsigned p = i * 64 + j*8 ;
                             uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
-                            uint32_t c = convert_rgba(Agat_2_index[pallette][color], rgba_);
+                            uint32_t c = lut[Agat_2_index[pallette][color]];
                             *(ecat_pixel_t*)pixel_address = c;
                             *(ecat_pixel_t*)(pixel_address+PXB(4)) = c;
                         }
@@ -437,7 +520,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned color = (v >> (7-j)) & 0x1;
                             unsigned p = i * 32 + j*4 ;
                             uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
-                            uint32_t c = convert_rgba(Agat_2_index[pallette][color], rgba_);
+                            uint32_t c = lut[Agat_2_index[pallette][color]];
                             *(ecat_pixel_t*)pixel_address = c;
                         }
                     }
@@ -451,7 +534,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                 return;
             }
             if (line < 32 || line >=224) {
-                uint32_t black = convert_rgba(0, rgba_);;
+                uint32_t black = lut[0];;
                 uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes;
                 std::fill_n((ecat_pixel_t*)pixel_address, sx, black);
             } else {
@@ -496,14 +579,14 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned int c = ((font_val >> k) & 1) ^ inv;
                             unsigned p = screen_offset + (6-k)*4;
                             uint8_t * pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
-                            *(ecat_pixel_t*)pixel_address = convert_rgba(Agat_2_index[pallette][c], rgba_);
+                            *(ecat_pixel_t*)pixel_address = lut[Agat_2_index[pallette][c]];
                         }
                     }
                 } else {
                     // Graphic mode
                     uint32_t color;
-                    // uint32_t black = convert_rgba(0, rgba_);
-                    // uint32_t white = convert_rgba(15, rgba_);
+                    // uint32_t black = lut[0];
+                    // uint32_t white = lut[15];
                     uint32_t black = rgba_[0];
                     uint32_t white = rgba_[15];
 
@@ -523,7 +606,7 @@ void Agat9Display::render_line_unlocked(unsigned int screen_line, const bool bea
                             unsigned is_odd = x & 1;
                             if (is_on != 0) {
                                 if (!prev_on) {
-                                    color = convert_rgba(Agat_Apple_index[is_odd][hi], rgba_);
+                                    color = lut[Agat_Apple_index[is_odd][hi]];
                                 } else {
                                     color = white;
                                     *(ecat_pixel_t*)(pixel_address-PXB(4)) = white;
@@ -612,7 +695,15 @@ void Agat9Display::HSYNC(const unsigned line, const unsigned sync_val)
             // the machine shows them: the picture changes 50 times a second
             render_line((m_512_mode == M_512_ON) ? raw : raw / 2);
             // The last line of a field: a picture is whole, and the window is to show it
-            if (raw >= 510) { was_updated = true; frame_complete(); }
+            if (raw >= 510) {
+                was_updated = true;
+                frame_complete();
+#ifdef ECAT_EMBEDDED
+                //Once a second every line is drawn anyway: whatever reached
+                //the surface by another way does not stay
+                if (++m_drawn_frames > 50) m_drawn_frames = 0;
+#endif
+            }
         }
     }
 }

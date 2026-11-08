@@ -54,6 +54,14 @@ protected:
     bool m_line_pal_font = false;
     uint32_t Agat_RGBA16_palcard_std[8][16];
 
+#ifdef ECAT_EMBEDDED
+    //What each line of the surface was drawn from (render_line)
+    struct DrawnLine { uint32_t key = 0; uint8_t src[64]; };
+    std::vector<DrawnLine> m_drawn;
+    unsigned m_drawn_frames = 0;    //50: the next frame draws every line
+    void forget_drawn() { for (DrawnLine &d : m_drawn) d.key = 0; }
+#endif
+
     void render_line(unsigned screen_line);
     void render_all(bool force_render) override;
 

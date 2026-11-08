@@ -166,7 +166,7 @@ function(ecat_firmware_setup target)
     pico_set_linker_script(${target} ${CMAKE_CURRENT_SOURCE_DIR}/memmap_ecat.ld)
     set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/memmap_ecat.ld)
     target_link_options(${target} PRIVATE -L${CMAKE_CURRENT_BINARY_DIR}
-        -Wl,--wrap=panic -Wl,--print-memory-usage -Wl,--no-enum-size-warning)
+        -Wl,--wrap=panic -Wl,--wrap=__cxa_throw -Wl,--wrap=__cxa_allocate_exception -Wl,--print-memory-usage -Wl,--no-enum-size-warning)
     target_compile_definitions(${target} PRIVATE PICO_MALLOC_PANIC=0)
     if(DEBUG_CONSOLE STREQUAL "usb")
         pico_enable_stdio_usb(${target} 1)
@@ -255,3 +255,12 @@ ecat_add_firmware(rk86 VIDEO_MODE 28 REFRESH 5001 SURFACE 480 300 MACHINES
     radio-86rk/Spektr001.ext
     mikrosha/Mikrosha.cfg
     apogey/Apogey.cfg)
+
+ecat_add_firmware(agat VIDEO_MODE 28 REFRESH 5001 SURFACE 512 256 MACHINES
+    agat/Agat-7.cfg
+    agat/Agat-7-840.cfg
+    agat/Agat-7-840-pp.ext
+    agat/Agat-7-max.ext
+    agat/Agat-9.cfg
+    agat/Agat-9-pp.ext
+    agat/Agat-9-yazs.ext)

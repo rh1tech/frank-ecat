@@ -137,8 +137,9 @@ emulator::Result FDD::load_config(SystemData *sd)
             emulator::Result img_res = load_image(image_file);
             if (!img_res) return img_res;
         } else {
-#ifdef WASM_BUILD
-            // In WASM, missing disk images are non-fatal (drive starts empty, user can load via file picker)
+#if defined(WASM_BUILD) || defined(ECAT_EMBEDDED)
+            // In WASM, missing disk images are non-fatal (drive starts empty, user can load via file picker);
+            // on the microcontroller the same: the library is on a card that may not carry it
 #else
             return emulator::Result::error(emulator::ErrorCode::ConfigError, "{FDD|" + std::string(QT_TRANSLATE_NOOP("FDD", "Disk image file not found")) + "} " + cd->get_parameter("image").value);
 #endif

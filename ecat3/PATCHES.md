@@ -14,6 +14,7 @@ compiles to exactly what upstream does (the console build passes the whole suite
 | `src/emulator/renderer.h` | `ecat_pixel_t`: one dot of the surface, `uint32_t` RGBA upstream, `uint8_t` palette index with `ECAT_EMBEDDED`. |
 | `src/emulator/indexed_palette.h` | New: `IndexedPalette`, the colour → index table behind `MapRGB()` on an 8-bit surface (index 0 is black; 224 entries, the rest of the 256 are the firmware menu's and the border). |
 | `src/emulator/core.cpp` (`GenericDisplay::validate`) | Surface width check by `sizeof(ecat_pixel_t)`. |
+| `src/emulator/devices/common/fdd.cpp` (`FDD::load_config`) | A disk image named by the configuration but not found leaves the drive empty with `ECAT_EMBEDDED`, as in the WASM build (the library is on a card that may not carry it). |
 
 ## Displays (written in `ecat_pixel_t`, neutral upstream)
 

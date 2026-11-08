@@ -101,8 +101,12 @@ void *ecat_psram_malloc(size_t n) {
     return p;
 }
 
+/* Set while the C++ runtime allocates an exception: see below */
+static volatile int sram_only;
+
 static void *heap_malloc(size_t n) {
     void *p = NULL;
+    if (sram_only) return ecat_sram_malloc(n);
     if (!psram_ready || n <= ECAT_SRAM_SMALL) p = ecat_sram_malloc(n);
     if (!p) p = ecat_psram_malloc(n);
     if (!p) p = ecat_sram_malloc(n);
@@ -196,4 +200,18 @@ void *tryCalloc(size_t n) {
 /* ...and this (NULL on failure; the vertical line map, read by the IRQ) */
 void *tryMalloc(size_t n) {
     return ecat_sram_malloc(n);
+}
+
+/* A thrown C++ exception never lives in PSRAM. libsupc++ (built without
+ * -fno-inline-atomics) counts its references with LDREX/STREX, and a STREX
+ * to PSRAM never succeeds: the first exception allocated there once the SRAM
+ * heap was full spun in __cxa_begin_catch for ever (Агат-9, loading its
+ * configuration). With no SRAM left, malloc's NULL sends libsupc++ to its
+ * emergency pool, which it took from the SRAM at start-up. */
+extern void *__real___cxa_allocate_exception(size_t n);
+void *__wrap___cxa_allocate_exception(size_t n) {
+    sram_only++;
+    void *p = __real___cxa_allocate_exception(n);
+    sram_only--;
+    return p;
 }

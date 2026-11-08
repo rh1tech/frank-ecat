@@ -3,6 +3,7 @@
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
 // Description: Agat-7 display controller device
 
+#include <cstring>
 #include <iostream>
 #include "agat_7_display.h"
 #include "emulator/utils.h"
@@ -97,6 +98,9 @@ emulator::Result Agat7Display::load_config(SystemData *sd)
 void Agat7Display::set_renderer(VideoRenderer &vr)
 {
     m_pal_dirty = true;
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
     GenericDisplay::set_renderer(vr);
     vr.FillRGB(Agat_16Colors, Agat_RGBA16, 16);
     for (int i=0; i<8; i++) vr.FillRGB(Agat_Palcard_std_pal[i], Agat_RGBA16_palcard_std[i], 16);
@@ -185,12 +189,18 @@ DeviceOptions Agat7Display::get_device_options()
 void Agat7Display::set_device_option(unsigned option_id, unsigned value_id)
 {
     if (option_id == A7_OPTION_PALCARD) m_pal_card_out = value_id == A7_PALCARD_ON;
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
 }
 
 //Any write to the palette card memory drops the cached colours
 void Agat7Display::memory_callback(MAYBE_UNUSED unsigned int callback_id, MAYBE_UNUSED unsigned int address)
 {
     m_pal_dirty = true;
+#ifdef ECAT_EMBEDDED
+    forget_drawn();
+#endif
 }
 
 uint32_t Agat7Display::convert_rgba(const unsigned c, const uint32_t rgba[]) const
@@ -238,22 +248,56 @@ void Agat7Display::render_line(unsigned int screen_line)
         m_line_pal_font = (m_pal_mode->get_direct(0) & 0x02) != 0;
     }
     uint8_t * pixel_address;
-    unsigned int p, screen_offset, font_line, char_address, inv;
+    unsigned int p, screen_offset, font_line, inv;
     uint8_t v, v1, v2, font_val;
     uint8_t color[2];
 
     // As we psysically have 256 doubled lines, we use a half of screen_line in a 512-line mode
     unsigned line = (m_512_mode==M_512_ON) ? (screen_line / 2) : screen_line;
 
-    const uint32_t black = Agat_RGBA16[0];
+    //The bytes the line is drawn from, read once: 32 or 64 of them, whatever the mode
+    unsigned src_start = base_address, src_len = 32;
+    switch (mode) {
+    case 0x00: src_start += (line/4)*32; src_len = 32; break;
+    case 0x01: src_start += (line/2)*64; src_len = 64; break;
+    case 0x02:
+    case 0x82: src_start += (line/8)*64; src_len = 64; break;
+    case 0x03: src_start += line*32;     src_len = 32; break;
+    default: break;
+    }
+    uint8_t src[64];
+    for (unsigned int i = 0; i < src_len; i++) src[i] = m_memory->get_value(src_start + i);
+
+#ifdef ECAT_EMBEDDED
+    //A line drawn from the same bytes, in the same mode and colours, is on the
+    //surface already: the microcontroller cannot afford drawing all 256 lines
+    //50 times a second for a screen that mostly stands still. The font is ROM
+    //unless the palette card's own is selected, which is drawn every time
+    {
+        const uint32_t key = 1u | (mode << 1) | ((previous_mode & 0xFF) << 9) | ((m_line_pal & 0x0F) << 17)
+                           | ((mode == 0x02 && blinker) ? (1u << 21) : 0) | (line % 8) << 22;
+        if (m_drawn.size() != (size_t)sy) m_drawn.assign(sy, DrawnLine());
+        DrawnLine &d = m_drawn[screen_line];
+        if (!(m_pal_card && m_line_pal_font) && m_drawn_frames < 50
+            && d.key == key && memcmp(d.src, src, src_len) == 0)
+            return;
+        d.key = key;
+        memcpy(d.src, src, src_len);
+    }
+#endif
+
+    //The 16 colours of the line, through the palette card when there is one
+    uint32_t lut[16];
+    for (unsigned int i = 0; i < 16; i++) lut[i] = convert_rgba(i, Agat_RGBA16);
+
+    const uint32_t black = lut[0];
 
     switch (mode) {
     case 0x00:
         // ГНР (LoRes Graphics, 64x64, 16 colors)
         // 32 bytes per line
         for (unsigned int i=0; i<32; i++) {
-            char_address = base_address + (line/4)*32 + i;
-            v = m_memory->get_value(char_address);
+            v = src[i];
             color[0] = v >> 4;
             color[1] = v & 0x0F;
             screen_offset = i * 64;
@@ -264,7 +308,7 @@ void Agat7Display::render_line(unsigned int screen_line)
 
                     pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                     // *(ecat_pixel_t*)pixel_address = Agat_RGBA16[c];
-                    *(ecat_pixel_t*)pixel_address = convert_rgba(c, Agat_RGBA16);
+                    *(ecat_pixel_t*)pixel_address = lut[c];
                 }
             }
         }
@@ -274,8 +318,7 @@ void Agat7Display::render_line(unsigned int screen_line)
         // ГCР (MidRes Graphics, 128x128, 16 colors)
         // 64 bytes per line
         for (unsigned int i=0; i<64; i++) {
-            char_address = base_address + (line/2)*64 + i;
-            v = m_memory->get_value(char_address);
+            v = src[i];
             color[0] = v >> 4;
             color[1] = v & 0x0F;
             screen_offset = i * 32;
@@ -285,7 +328,7 @@ void Agat7Display::render_line(unsigned int screen_line)
                     unsigned int c = color[j];
                     pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                     // *(ecat_pixel_t*)pixel_address = Agat_RGBA16[c];
-                    *(ecat_pixel_t*)pixel_address = convert_rgba(c, Agat_RGBA16);
+                    *(ecat_pixel_t*)pixel_address = lut[c];
                 }
         }
         break;
@@ -305,9 +348,8 @@ void Agat7Display::render_line(unsigned int screen_line)
 
         font_line = line % 8;
         for (unsigned int i=0; i<32; i++) {
-            char_address = base_address + (line/8)*64 + i*2;
-            v1 = m_memory->get_value(char_address);       // Character
-            v2 = m_memory->get_value(char_address+1);     // Attribute
+            v1 = src[i*2];          // Character
+            v2 = src[i*2 + 1];      // Attribute
             unsigned int cl = (v2 & 0x07) | ((v2 & 0x10) >> 1);         // Color index (YBGR)
             // font_val = m_font->get_value(v1*8 + font_line);
             font_val = convert_font(v1, font_line);
@@ -322,7 +364,7 @@ void Agat7Display::render_line(unsigned int screen_line)
                 else
                     ccl = cl * (c ^ 0x01);
                 // uint32_t color = Agat_RGBA16[ccl];
-                uint32_t color = convert_rgba(ccl, Agat_RGBA16);
+                uint32_t color = lut[ccl];
                 p = screen_offset + (7-k)*8;
                 pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                 *(ecat_pixel_t*)pixel_address = color;
@@ -346,8 +388,7 @@ void Agat7Display::render_line(unsigned int screen_line)
         inv = ((~previous_mode & 0x04) >> 2);                       // inverted mode
         font_line = line % 8;
         for (unsigned int i=0; i<64; i++) {
-            char_address = base_address + (line/8)*64 + i;
-            v1 = m_memory->get_value(char_address);       // Character
+            v1 = src[i];            // Character
             // font_val = m_font->get_value(v1*8 + font_line);
             font_val = convert_font(v1, font_line);
             screen_offset = 32*4 + i * (7*4);
@@ -356,7 +397,7 @@ void Agat7Display::render_line(unsigned int screen_line)
                 p = screen_offset + (6-k)*4;
                 pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                 // *(ecat_pixel_t*)pixel_address = Agat_RGBA2[c];
-                *(ecat_pixel_t*)pixel_address = convert_rgba(c*15, Agat_RGBA16);
+                *(ecat_pixel_t*)pixel_address = lut[c*15];
             }
         }
         break;
@@ -366,14 +407,13 @@ void Agat7Display::render_line(unsigned int screen_line)
         // Filling two pixels per bit because of doubling
 
         for (unsigned int i=0; i<32; i++) {
-            char_address = base_address + line*32 + i;
-            v = m_memory->get_value(char_address);
+            v = src[i];
             screen_offset = i * 64;
 
             for (unsigned int k = 0; k < 8; k++) {
                 unsigned int c = (v >> k) & 0x01;
                 // uint32_t color = Agat_RGBA2[c];
-                uint32_t color = convert_rgba(c*15, Agat_RGBA16);
+                uint32_t color = lut[c*15];
                 p = screen_offset + (7-k)*8;
                 pixel_address = static_cast<uint8_t *>(render_pixels) + screen_line*line_bytes + PXB(p);
                 *(ecat_pixel_t*)pixel_address = color;
@@ -439,7 +479,15 @@ void Agat7Display::HSYNC(const unsigned line, const unsigned sync_val)
             // the machine shows them: the picture changes 50 times a second
             render_line((m_512_mode == M_512_ON) ? raw : raw / 2);
             // The last line of a field: a picture is whole, and the window is to show it
-            if (raw >= 510) { was_updated = true; frame_complete(); }
+            if (raw >= 510) {
+                was_updated = true;
+                frame_complete();
+#ifdef ECAT_EMBEDDED
+                //Once a second every line is drawn anyway: whatever reached
+                //the surface by another way does not stay
+                if (++m_drawn_frames > 50) m_drawn_frames = 0;
+#endif
+            }
         }
     }
 }

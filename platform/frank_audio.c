@@ -78,14 +78,19 @@ static inline uint32_t __not_in_flash_func(ring_pop)(void) {
 
 static volatile bool hdmi_plays;   /* else the I2S DAC has the ring, HDMI gets silence */
 
+uint32_t frank_audio_tick_us, frank_audio_ticks;
+
 static bool __not_in_flash_func(hdmi_tick)(repeating_timer_t *t) {
     (void)t;
+    const uint32_t t0 = timer_hw->timerawl;
     /* 32000 Hz / 1000 Hz: exactly 32 frames a tick. While I2S plays, HDMI is
      * kept fed with silence: a starved driver repeats what it had */
     for (int i = 0; i < FRANK_AUDIO_RATE / 1000; i++) {
         uint32_t v = hdmi_plays ? ring_pop() : 0;
         hdmi_audio_write_sample((int16_t)(v & 0xFFFF), (int16_t)(v >> 16));
     }
+    frank_audio_tick_us += timer_hw->timerawl - t0;
+    frank_audio_ticks++;
     return true;
 }
 
