@@ -1820,6 +1820,8 @@ void Emulator::timer_proc(uint64_t time_ticks)
             ClockDomain &d = domains[0];
             while (d.norm < target) {
                 unsigned int budget = dm->clocks_to_event(d.cpu);
+                const unsigned int be = dm->cycles_to_batch_event();
+                if (be < budget) budget = be;
                 const unsigned int batch_max = dm->m_batch_ok ? ECAT_BATCH_MAX : 1;
                 if (budget > batch_max) budget = batch_max;
                 if (script) {

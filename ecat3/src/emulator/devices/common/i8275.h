@@ -130,6 +130,14 @@ public:
     bool Blinker;                   //Cursor blink, 16 frames
     bool BlinkerChar;               //Character blink, 32 frames
 
+#ifdef ECAT_EMBEDDED
+    //The next DMA cycle (it holds the processor), the end of a raster line
+    //(HRTC, counted by a ВИ53 on some machines) or of the character row
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
+
     I8275(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     //Called by the display, which owns the "dma", "channel" and "ram" names

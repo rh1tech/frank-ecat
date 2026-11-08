@@ -398,6 +398,23 @@ void I8275::row_start()
     if (m_row + 1 < m_lps && m_frame_dma) start_row_fill();
 }
 
+#ifdef ECAT_EMBEDDED
+unsigned int I8275::clocks_to_batch_event() const
+{
+    if (m_cpl < 2 || m_lps < 2 || m_row_len < 2) return UINT_MAX;
+    unsigned int r = m_row_len - m_row_pos;
+    if (m_chars_per_line > 0) {
+        const unsigned int to_line = m_chars_per_line - (m_row_pos % m_chars_per_line);
+        if (to_line < r) r = to_line;
+    }
+    if (m_filling) {
+        const unsigned int to_dma = (m_dma_delay == 0) ? 1 : m_dma_delay;
+        if (to_dma < r) r = to_dma;
+    }
+    return r ? r : 1;
+}
+#endif
+
 void I8275::clock(unsigned int counter)
 {
     //Before the guest has programmed the raster there is nothing to count

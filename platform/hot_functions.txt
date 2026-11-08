@@ -62,6 +62,11 @@ Agat9Mapper::get_value
 Agat9Mapper::set_value
 Agat9Mapper::build_pages
 Memory::get_direct
+PageMapper::get_value
+PageMapper::set_value
+PortAddress::get_value
+PortAddress::set_value
+MemoryMapper::map_read
 
 # sound
 GenericSound::clock

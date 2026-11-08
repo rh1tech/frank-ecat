@@ -353,6 +353,25 @@ public:
     //Declared per class once checked; one device that does not, and the
     //machine is clocked after every instruction as it always was
     virtual bool batch_safe() const { return false; }
+    //A batch of instructions (Emulator::timer_proc) ends where this device does
+    //something the processor feels - a DMA cycle it steals, a line it raises -
+    //so that happens after the very instruction it happened after when clocked
+    //every instruction. In the device's own clocks, from where clock() left it;
+    //UINT_MAX when nothing is due. Only for the batches: WAIT stepping and
+    //upstream's clocks_to_event() stay as they were
+    virtual unsigned int clocks_to_batch_event() const { return UINT_MAX; }
+    virtual bool has_batch_events() const { return false; }
+    //The same in the cycles of the processor clocking it, through its divider
+    unsigned int cycles_to_batch_event() const
+    {
+        const unsigned int e = clocks_to_batch_event();
+        if (e == UINT_MAX) return UINT_MAX;
+        if (clock_miltiplier == clock_divider) return e ? e : 1;
+        const uint64_t need = (uint64_t)e * clock_divider;
+        if (need <= clock_stored) return 1;
+        const uint64_t c = (need - clock_stored + clock_miltiplier - 1) / clock_miltiplier;
+        return c > 0xFFFFFFFFull ? UINT_MAX : (c ? (unsigned int)c : 1u);
+    }
 #endif
     bool is_clocked() const { return m_clocked; }
     //True for a class with a system_clock() of its own. The others count in
@@ -807,6 +826,17 @@ public:
     unsigned int m_batch_pending = 0;
     //Every clocked device is batch_safe(): set by load_devices_config()
     bool m_batch_ok = false;
+    //The clocked devices with has_batch_events(), and the nearest of their events
+    std::vector<ComputerDevice*> m_batch_event_devices;
+    unsigned int cycles_to_batch_event() const
+    {
+        unsigned int r = UINT_MAX;
+        for (const ComputerDevice *d : m_batch_event_devices) {
+            const unsigned int e = d->cycles_to_batch_event();
+            if (e < r) r = e;
+        }
+        return r;
+    }
     inline void sync_pending()
     {
         if (m_batch_pending == 0) return;

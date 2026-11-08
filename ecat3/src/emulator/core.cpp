@@ -297,6 +297,7 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
     event_devices.assign(cpus.size(), std::vector<ComputerDevice*>());
 #ifdef ECAT_EMBEDDED
     m_batch_ok = cpus.size() == 1;
+    m_batch_event_devices.clear();
 #endif
     for (unsigned int i=0; i < device_count; i++)
     {
@@ -312,6 +313,7 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
             if (cpus[j] == d->get_clock_source()) { domain = j; break; }
 
 #ifdef ECAT_EMBEDDED
+        if (d->has_batch_events()) m_batch_event_devices.push_back(d);
         if (!d->batch_safe()) {
             if (m_batch_ok) printf("batch: %s (%s) is clocked after every instruction\n",
                                    d->name.c_str(), devices[i].device_type.c_str());

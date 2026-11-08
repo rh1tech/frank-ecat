@@ -47,6 +47,9 @@ private:
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
 public:
+#ifdef ECAT_EMBEDDED
+    bool batch_safe() const override { return true; }   //checked: see DeviceManager::m_batch_ok
+#endif
     I8253(InterfaceManager *im, EmulatorConfigDevice *cd);
 
     emulator::Result load_config(SystemData *sd) override;
