@@ -30,7 +30,7 @@ compiles to exactly what upstream does (the console build passes the whole suite
 | `devices/specific/irisha_display.cpp` | Ириша, Диалог, Каспий (the 20 blank lines: `20 * line_bytes / sizeof(ecat_pixel_t)` dots, was `5 * line_bytes` of `uint32_t`) |
 | `devices/specific/agat_7_display.cpp`, `agat_9_display.cpp` | Агат-7, Агат-9 (`PXB()` takes the RGBA byte offsets to the pixel size) |
 | `devices/specific/apple2_video.cpp` | Правец-82/8М/8А/8С |
-| `devices/specific/dvk_ie15.cpp`, `dvk_ksm_display.cpp`, `dvk_kcgd.*` | ДВК (ИЕ15, КСМ with КГД, КЦГД); ИЕ15 also skips a line drawn from the same cells with `ECAT_EMBEDDED` |
+| `devices/specific/dvk_ie15.cpp`, `dvk_ksm_display.cpp`, `dvk_kcgd.*` | ДВК (ИЕ15, КСМ with КГД, КЦГД); with `ECAT_EMBEDDED` the ИЕ15 skips a line and the КСМ a row of characters drawn from the same memory |
 | `devices/specific/oric_ula.cpp` | Правец-8Д |
 
 Not converted yet: the БК, УК-НЦ, Э-85 and Поиск-1 displays. With `ECAT_EMBEDDED` their tests fail.

@@ -3,6 +3,7 @@
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
 // Description: КСМ (ДВК character display controller) video output
 
+#include <cstring>
 #include "dvk_ksm_display.h"
 #include "emulator/utils.h"
 #include "dvk_kgd.h"
@@ -78,6 +79,9 @@ void KSMDisplay::reset(bool cold)
 
 void KSMDisplay::set_renderer(VideoRenderer &vr)
 {
+#ifdef ECAT_EMBEDDED
+    m_drawn_ok = false;
+#endif
     GenericDisplay::set_renderer(vr);
     vr.FillRGB(m_palette, m_colors, 2);
 }
@@ -104,6 +108,24 @@ void KSMDisplay::render_row(unsigned top, unsigned offset, bool blink)
 {
     const uint8_t * vram = m_vram->get_buffer();
     const unsigned size = (unsigned)m_vram->get_size();
+#ifdef ECAT_EMBEDDED
+    {
+        const unsigned idx = top / KSM_CELL_H;
+        if (m_drawn.size() < 32) m_drawn.assign(32, DrawnRow());
+        if (idx < m_drawn.size() && offset + KSM_COLUMNS <= size && offset >= KSM_CURSOR) {
+            DrawnRow &d = m_drawn[idx];
+            const uint8_t * text = vram + offset, * cursor = vram + offset - KSM_CURSOR;
+            if (m_drawn_ok && d.valid && d.offset == offset && d.blink == blink
+                && memcmp(d.text, text, KSM_COLUMNS) == 0 && memcmp(d.cursor, cursor, KSM_COLUMNS) == 0)
+                return;
+            d.valid = true;
+            d.offset = offset;
+            d.blink = blink;
+            memcpy(d.text, text, KSM_COLUMNS);
+            memcpy(d.cursor, cursor, KSM_COLUMNS);
+        }
+    }
+#endif
     for (unsigned y = 0; y < KSM_CELL_H; y++) {
         uint8_t * base = static_cast<uint8_t*>(render_pixels) + (top + y) * line_bytes;
         ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(base);
@@ -139,6 +161,12 @@ void KSMDisplay::render_all(MAYBE_UNUSED bool force_render)
 {
     if (m_vram != nullptr && render_pixels != nullptr) {
         const bool text = (m_kgd == nullptr) || !m_kgd->text_off();
+#ifdef ECAT_EMBEDDED
+        //The rows drawn last time are on the surface only if nothing else was
+        //drawn over them: no КГД picture, text all the time, once a second anew
+        const bool graphics = m_kgd != nullptr && m_kgd->graphics_on();
+        if (graphics || !text || (m_frame % 50) == 0) m_drawn_ok = false;
+#endif
         if (text) {
             const bool blink = (m_frame % 10) > 4;
             const unsigned line = i_line.value & 0xFF;
@@ -155,6 +183,9 @@ void KSMDisplay::render_all(MAYBE_UNUSED bool force_render)
             }
         }
         if (m_kgd != nullptr && m_kgd->graphics_on()) render_graphics();
+#ifdef ECAT_EMBEDDED
+        m_drawn_ok = text && !graphics;
+#endif
     }
     screen_valid = true;
     was_updated = true;

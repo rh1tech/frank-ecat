@@ -54,6 +54,13 @@ IE15IO::get_value
 IE15IO::set_value
 IE15IO::render_to
 IE15Display::draw_line
+KSMDisplay::render_row
+KSMDisplay::render_all
+DVKMX::clock
+BKFDC::clock
+MS7004::clock
+pdp11core::execute_misc
+MemoryMapper::port_device
 DVKPanel::clock
 BKTimer::clock
 DL11::clock

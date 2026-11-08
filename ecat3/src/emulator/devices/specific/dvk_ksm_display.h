@@ -48,6 +48,14 @@ private:
     unsigned int m_frame = 0;
 
     void render_row(unsigned top, unsigned offset, bool blink);
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: what each row of characters was drawn from - its text and
+    // its cursor plane, its place in memory, the blink phase - and whether
+    // the КГД picture went over it since; such a row is not drawn again
+    struct DrawnRow { bool valid = false; bool blink = false; unsigned offset = 0; uint8_t text[80]; uint8_t cursor[80]; };
+    std::vector<DrawnRow> m_drawn;
+    bool m_drawn_ok = false;        // the surface still has what the rows say
+#endif
     void render_graphics();
 
 protected:
