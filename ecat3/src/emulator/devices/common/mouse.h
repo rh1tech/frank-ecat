@@ -84,6 +84,10 @@ public:
     void reset(bool cold) override;
     void system_clock(unsigned int counter) override;
     bool own_system_clock() const override { return true; }
+#ifdef ECAT_EMBEDDED
+    //A step a period, however many clocks a batch brings
+    bool batch_safe() const override { return true; }
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     const char * plug_title() const override;

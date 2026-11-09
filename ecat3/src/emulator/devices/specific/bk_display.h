@@ -71,14 +71,14 @@ private:
     void render_line_unlocked(unsigned line);   // for callers already holding it
     // Bytes [from, to) of a line of video memory, from the line's start in
     // video and to out, the first dot of the line
-    void render_bytes(uint32_t * out, const uint8_t * video, unsigned from, unsigned to,
+    void render_bytes(ecat_pixel_t * out, const uint8_t * video, unsigned from, unsigned to,
                       unsigned mode, bool blank, unsigned palette) const;
 
     // The high precision mode: the line the beam is on is laid out into a
     // buffer byte by byte as the beam passes, and goes onto the surface whole
     // when the next one starts
     static const unsigned NO_LINE = ~0u;
-    std::vector<uint32_t> m_beam_buf;
+    std::vector<ecat_pixel_t> m_beam_buf;
     unsigned m_beam_line = NO_LINE;             // line in the buffer
     unsigned m_beam_byte = 0;                   // its bytes already laid out
     unsigned m_beam_mode = BK_MODE_RGB;         // its mode, as at its first byte
@@ -95,6 +95,14 @@ protected:
     void render_all(bool force_render) override;
     void HSYNC(unsigned line, unsigned sync_val) override;
     void BEAM(unsigned line, unsigned clocks) override;
+#ifdef ECAT_EMBEDDED
+    //Lines and the frame interrupt end batches through clocks_to_event();
+    //the high precision mode (BEAM after every instruction) takes them one
+    //instruction long
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { return (beam_active() || precise()) ? 1u : UINT_MAX; }
+#endif
 
 public:
     BKDisplay(InterfaceManager *im, EmulatorConfigDevice *cd);

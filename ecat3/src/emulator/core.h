@@ -1242,6 +1242,12 @@ private:
     std::vector<MapperPage> pages;
     MapperPage *    m_pages;        //pages.data(), read on every access
     unsigned int    m_page_count;
+#ifdef ECAT_EMBEDDED
+    //The page each one had under the configuration before: a machine that
+    //flips between two (the БК0011М's BASIC ROM banks, thousands of times a
+    //second) swaps it back instead of filling it again. 16-bit maps only
+    std::vector<MapperPage> pages_alt;
+#endif
     void            size_pages(unsigned int address_bits);
     //Bumped by everything that changes the map: loading it, a reset and the
     //cancelinit flip. Anything else that ever touches ranges[] or first_range

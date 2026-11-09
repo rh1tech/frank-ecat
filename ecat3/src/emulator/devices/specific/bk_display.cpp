@@ -395,8 +395,8 @@ void BKDisplay::beam_commit()
         // A line laid out in the mode left behind is not copied: the switch
         // has the whole screen drawn again anyway (screen_valid)
         const unsigned width = mode_width(m_mode);
-        if (m_beam_mode == m_mode && has_valid_renderer() && render_pixels != nullptr && (int)(width * 4) <= line_bytes) {
-            memcpy(static_cast<uint8_t*>(render_pixels) + m_beam_line * line_bytes, m_beam_buf.data(), width * 4);
+        if (m_beam_mode == m_mode && has_valid_renderer() && render_pixels != nullptr && (int)(width * sizeof(ecat_pixel_t)) <= line_bytes) {
+            memcpy(static_cast<uint8_t*>(render_pixels) + m_beam_line * line_bytes, m_beam_buf.data(), width * sizeof(ecat_pixel_t));
             // Drawn by the beam: see render_line()
             screen_valid = true;
         }
@@ -445,7 +445,7 @@ void BKDisplay::render_line(const unsigned line)
     // whole of it again from one palette: a render thread whose first pass
     // after a load came only with the screenshot of a script wiped the
     // stripes a program had changed the palette for (work-bk-0011m-raster)
-    if (has_valid_renderer() && render_pixels != nullptr && (int)(mode_width(m_mode) * 4) <= line_bytes)
+    if (has_valid_renderer() && render_pixels != nullptr && (int)(mode_width(m_mode) * sizeof(ecat_pixel_t)) <= line_bytes)
         screen_valid = true;
 }
 
@@ -457,7 +457,7 @@ void BKDisplay::render_line_unlocked(const unsigned line)
     // switch reaches the surface only on the next frame of the render thread
     const unsigned mode = m_mode;
     const unsigned width = mode_width(mode);
-    if ((int)(width * 4) > line_bytes) return;
+    if ((int)(width * sizeof(ecat_pixel_t)) > line_bytes) return;
 
     uint8_t * base = static_cast<uint8_t*>(render_pixels) + line * line_bytes;
 
@@ -474,7 +474,7 @@ void BKDisplay::render_line_unlocked(const unsigned line)
     // memory mode
     const uint8_t * video = blank ? nullptr
         : vmem->get_buffer() + ((line + m_offset) % m_video_lines) * m_line_bytes;
-    render_bytes(reinterpret_cast<uint32_t*>(base), video, 0, m_line_bytes, mode, blank, palette);
+    render_bytes(reinterpret_cast<ecat_pixel_t*>(base), video, 0, m_line_bytes, mode, blank, palette);
 
     if (line + 1 == m_video_lines) was_updated = true;
 }
@@ -482,7 +482,7 @@ void BKDisplay::render_line_unlocked(const unsigned line)
 // The video memory is read straight from its buffer: a virtual get_direct() on
 // every byte of every line, 50 times a second, costs more than the drawing.
 // A byte is 4 dots in colour (RGB and Mono) and 8 in the black and white mode
-void BKDisplay::render_bytes(uint32_t * out, const uint8_t * video, const unsigned from, const unsigned to,
+void BKDisplay::render_bytes(ecat_pixel_t * out, const uint8_t * video, const unsigned from, const unsigned to,
                              const unsigned mode, const bool blank, const unsigned palette) const
 {
     if (blank) {

@@ -2427,6 +2427,9 @@ void MemoryMapper::size_pages(unsigned int address_bits)
     memset(&empty, 0, sizeof(empty));
     pages.assign(m_page_count, empty);
     m_pages = pages.data();
+#ifdef ECAT_EMBEDDED
+    pages_alt.assign(address_bits <= 16 ? m_page_count : 0, empty);
+#endif
 }
 
 void MemoryMapper::invalidate_pages()
@@ -2436,6 +2439,7 @@ void MemoryMapper::invalidate_pages()
         this->page_generation = 1;
         memset(m_pages, 0, m_page_count * sizeof(MapperPage));
 #ifdef ECAT_EMBEDDED
+        if (!pages_alt.empty()) memset(pages_alt.data(), 0, pages_alt.size() * sizeof(MapperPage));
         memset(m_port_cache, 0, sizeof(m_port_cache));
         memset(m_read_cache, 0, sizeof(m_read_cache));
 #endif
@@ -2490,6 +2494,16 @@ AddressableDevice * MemoryMapper::port_device(unsigned int a, unsigned int mode,
 MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 {
     MapperPage * e = &this->m_pages[page];
+#ifdef ECAT_EMBEDDED
+    if (!pages_alt.empty()) {
+        MapperPage &alt = pages_alt[page];
+        if (alt.tag == tag) {
+            std::swap(*e, alt);
+            return e->uncached ? nullptr : e;
+        }
+        if (e->tag != 0) alt = *e;
+    }
+#endif
     const unsigned int p_begin = page << MM_PAGE_SHIFT;
     const unsigned int p_end = p_begin + (1u << MM_PAGE_SHIFT) - 1;
     const unsigned int config = this->i_config.value;

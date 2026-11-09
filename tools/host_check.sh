@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")/../ecat3"
 EXE=${1:-../build-host-emb}/eCat3-headless
-MACHINES="rk86 mikrosha apogey spektr orion irisha dialog kaspiy unior argo agat pravetz dvk"
+MACHINES="rk86 mikrosha apogey spektr orion irisha dialog kaspiy unior argo agat pravetz dvk bk uknc e85 poisk"
 fail=0
 # Known, explained differences of the embedded profile (ecat3/PATCHES.md):
 # work-dvk3-panel-halt logs the PC inside an INC/BR loop, whose phase moves by

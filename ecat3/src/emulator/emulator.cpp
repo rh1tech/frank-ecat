@@ -579,7 +579,13 @@ void Emulator::apply_saved_device_options()
     //the user turned it off
     GenericDisplay * d = dynamic_cast<GenericDisplay*>(dm->get_device_by_name("display", false));
     if (d != nullptr && d->precise_available())
+#ifdef ECAT_EMBEDDED
+        //Off unless asked for: the mode clocks the machine every instruction,
+        //which the microcontroller cannot keep at full speed
+        d->set_precise(read_setup("Display", "precise_" + config_key, "0") == "1");
+#else
         d->set_precise(read_setup("Display", "precise_" + config_key, "1") == "1");
+#endif
 }
 
 //----------------------------- Remembered disks -----------------------------//

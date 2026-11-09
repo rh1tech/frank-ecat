@@ -218,3 +218,15 @@ mos6502::*
 mos6502core::*
 mos6502Core::*
 RasterDisplay::clock
+
+# БК: the 1801ВМ1 bus timing, the display
+Vm1BusTiming::*
+BKDisplay::render_bytes
+BKDisplay::render_line
+BKDisplay::render_line_unlocked
+BKDisplay::HSYNC
+BKDisplay::control
+BKDisplay::quarter
+MemoryMapper::fill_page
+MemoryMapper::fill_direct
+MemoryMapper::peek_read_device

@@ -294,3 +294,15 @@ ecat_add_firmware(pravetz VIDEO_MODE 28 REFRESH 5001 SURFACE 560 224 MACHINES
     pravetz/Pravetz-8A-full.ext
     pravetz/Pravetz-8C.cfg
     pravetz/Pravetz-8D.cfg)
+
+ecat_add_firmware(bk VIDEO_MODE 28 REFRESH 5001 SURFACE 512 256 MACHINES
+    bk/BK-0010.cfg
+    bk/BK-0010-01.cfg
+    bk/BK-0010-01-fdd.ext
+    bk/BK-0010-01-a16m.ext
+    bk/BK-0010-01-smk512.ext
+    bk/BK-0011M.cfg
+    bk/BK-0011M-fdd.ext
+    bk/BK-0011M-a16m.ext
+    bk/BK-0011M-smk512.ext
+    bk/BK-0011M-mstd.ext)

@@ -136,6 +136,19 @@ public:
 
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the command in progress is done
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override
+    {
+        if (m_event == 0 || m_system_clock == 0) return UINT_MAX;     //EVT_NONE
+        const uint64_t need = (uint64_t)m_timeout * m_system_clock;
+        if (need <= m_acc) return 1;
+        const uint64_t c = (need - m_acc + 999999ull) / 1000000ull;
+        return c > 0x7FFFFFFFull ? 0x7FFFFFFFu : (c ? (unsigned)c : 1u);
+    }
+#endif
 
     unsigned int get_value(unsigned int address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;

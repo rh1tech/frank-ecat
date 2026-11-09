@@ -92,6 +92,10 @@ public:
     void set_value(unsigned int address, unsigned int value, bool force=false) override;
     bool debug_writable(unsigned int address) const override;
     void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
+#ifdef ECAT_EMBEDDED
+    //Memory and the mode register: nothing that moves with time
+    bool timeless_access() const override { return true; }
+#endif
 
     void save_state(StateWriter &w) override;
     emulator::Result load_state(const StateReader &r) override;
