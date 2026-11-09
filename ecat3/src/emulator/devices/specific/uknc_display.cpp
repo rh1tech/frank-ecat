@@ -105,6 +105,9 @@ emulator::Result UKNCDisplay::load_config(SystemData *sd)
 void UKNCDisplay::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    for (unsigned y = 0; y < UKNC_LINES; y++) m_line_hash[y] = 0;
+#endif
 
     for (unsigned i = 0; i < 128; i++) {
         uint32_t c = UKNC_RGB[i];
@@ -300,9 +303,12 @@ void UKNCDisplay::next_line(unsigned int raster_line)
 void UKNCDisplay::render_line_blank(unsigned int y)
 {
     if (!has_valid_renderer() || render_pixels == nullptr) return;
+#ifdef ECAT_EMBEDDED
+    if (y < UKNC_LINES) m_line_hash[y] = 0;
+#endif
     uint8_t * base = static_cast<uint8_t*>(render_pixels) + y * line_bytes;
     for (unsigned i = 0; i < UKNC_WIDTH; i++)
-        *reinterpret_cast<uint32_t*>(base + i * 4) = UKNC_RGBA[0];
+        reinterpret_cast<ecat_pixel_t*>(base)[i] = UKNC_RGBA[0];
 }
 
 void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
@@ -310,7 +316,7 @@ void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
     compat_lock_guard guard(m_surface_mutex);
 
     if (!has_valid_renderer() || render_pixels == nullptr) return;
-    if ((int)(UKNC_WIDTH * 4) > line_bytes) return;
+    if ((int)(UKNC_WIDTH * sizeof(ecat_pixel_t)) > line_bytes) return;
 
     // The beam has drawn on this surface, so render_all() must not blank it.
     // Its first pass came after the picture under a loaded host, and in the
@@ -320,6 +326,27 @@ void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
     // a new surface, and drawn within a frame
     screen_valid = true;
 
+#ifdef ECAT_EMBEDDED
+    if (y < UKNC_LINES) {
+        const uint8_t * q0 = m_plane[0]->get_buffer();
+        const uint8_t * q1 = m_plane[1]->get_buffer();
+        const uint8_t * q2 = m_plane[2]->get_buffer();
+        const unsigned n = UKNC_WIDTH / (8 * m_scale);
+        uint32_t h = 2166136261u ^ (bits_address & 0xFFFF) ^ (m_scale << 17) ^ ((unsigned)m_colors << 21);
+        for (unsigned c = 0; c < 8; c++) h = (h ^ m_line_colors[c]) * 16777619u;
+        if (m_cursor_on)
+            h = (h ^ (1u | (m_cursor_color << 1) | (m_cursor_graphic ? 0x100 : 0) | (m_cursor_pos << 9) | (m_cursor_bit << 20))) * 16777619u;
+        unsigned a = bits_address & 0xFFFF;
+        for (unsigned i = 0; i < n; i++, a = (a + 1) & 0xFFFF)
+            h = (h ^ (q0[a] | (q1[a] << 8) | (q2[a] << 16))) * 16777619u;
+        if (h == 0) h = 1;
+        if (m_line_hash[y] == h) {
+            m_line_scale[y] = (uint8_t)m_scale;
+            return;
+        }
+        m_line_hash[y] = h;
+    }
+#endif
     uint8_t * base = static_cast<uint8_t*>(render_pixels) + y * line_bytes;
 
     // Read straight from the buffers: three bytes per octet, 288 lines, 50
@@ -334,7 +361,7 @@ void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
     const unsigned octets = UKNC_WIDTH / (8 * scale);
     const uint32_t cursor_color = UKNC_RGBA[m_cursor_color & 127];
     unsigned addr = bits_address & 0xFFFF;
-    uint32_t * dst = reinterpret_cast<uint32_t*>(base);
+    ecat_pixel_t * dst = reinterpret_cast<ecat_pixel_t*>(base);
 
     if (y < UKNC_LINES) m_line_scale[y] = (uint8_t)scale;
 

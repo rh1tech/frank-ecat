@@ -83,6 +83,11 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //The level over the clocks a batch brings, from the timer's step log (32
+    //steps of 12 clocks, a batch is fewer)
+    bool batch_safe() const override { return true; }
+#endif
     void state_restored() override;
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 

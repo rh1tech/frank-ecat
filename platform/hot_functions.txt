@@ -230,3 +230,18 @@ BKDisplay::quarter
 MemoryMapper::fill_page
 MemoryMapper::fill_direct
 MemoryMapper::peek_read_device
+
+# УК-НЦ
+UKNCDisplay::*
+UKNCRamTiming::*
+UKNCTimer::*
+UKNCSound::*
+UKNCKeyboard::clock
+UKNCChannels::*
+UKNCGraphics::*
+PlanePair::*
+WaitMap::*
+IndirectMemory::*
+DL11::clocks_to_batch_event
+DL11::clock
+RasterDisplay::clocks_to_event

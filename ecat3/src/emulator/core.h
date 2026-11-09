@@ -405,6 +405,8 @@ public:
     //The core whose emulation owns this device: 1 for a processor run on the
     //second core and what belongs to it (Emulator::set_parallel())
     uint8_t m_core = 0;
+    //The clock domain (the processor) a clocked device belongs to
+    uint8_t m_domain = 0;
     uint32_t m_syncs = 0;           //accesses to it that clocked the devices first (a statistic)
     //Reading or writing it depends on nothing that moves with time: memory,
     //and the decoders that only pass an access on. Every other device the
@@ -940,6 +942,11 @@ public:
     {
         m_pending[domain] += c;
         m_any_pending[domain_core(domain)] = true;
+    }
+    //Clocks of the domain its devices have not been given yet
+    inline unsigned int pending_of(unsigned int domain) const
+    {
+        return domain < m_pending.size() ? m_pending[domain] : 0;
     }
     inline void sync_domain(unsigned int domain)
     {

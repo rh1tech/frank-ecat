@@ -92,6 +92,10 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Counts clocks; answer() adds those still owed (DeviceManager::pending_of())
+    bool batch_safe() const override { return true; }
+#endif
 
     unsigned int wait_states(unsigned int address, bool write, unsigned int offset) override;
     unsigned int wait_cycle(unsigned int address, unsigned int flags, unsigned int offset) override;

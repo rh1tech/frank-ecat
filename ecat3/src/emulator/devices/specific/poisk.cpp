@@ -220,7 +220,7 @@ void PoiskDisplay::render_line(unsigned line)
 void PoiskDisplay::render_line_unlocked(unsigned line)
 {
     if (!has_valid_renderer() || render_pixels == nullptr || m_ram == nullptr) return;
-    if ((int)(sx * 4) > line_bytes) return;
+    if ((int)(sx * sizeof(ecat_pixel_t)) > line_bytes) return;
 
     const unsigned mode = i_mode.value & 0xFF;
     const unsigned page = (mode & 0x40) ? 0x4000 : 0;
@@ -229,7 +229,7 @@ void PoiskDisplay::render_line_unlocked(unsigned line)
     if (src + LINE_BYTES > m_ram->get_size()) return;
     const uint8_t * video = m_ram->get_buffer() + src;
 
-    uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + line * line_bytes);
+    ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + line * line_bytes);
     const unsigned bg = background(mode);
 
     if (mode & 0x80) {

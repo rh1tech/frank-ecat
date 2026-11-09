@@ -123,6 +123,20 @@ private:
     unsigned int m_since_full = 0;
 
     std::vector<uint32_t> m_rgba;
+#ifdef ECAT_EMBEDDED
+    //The 4096 colours do not fit an 8-bit palette: each is mapped when a line
+    //first shows it (E85_NO_COLOR until then)
+    VideoRenderer * m_vr = nullptr;
+    uint32_t color(unsigned int c)
+    {
+        uint32_t &v = m_rgba[c];
+        if (v == 0xFFFFFFFFu && m_vr != nullptr)
+            v = m_vr->MapRGB((uint8_t)(((c >> 8) & 15) * 17), (uint8_t)(((c >> 4) & 15) * 17), (uint8_t)((c & 15) * 17));
+        return v;
+    }
+#else
+    uint32_t color(unsigned int c) const { return m_rgba[c]; }
+#endif
 
     unsigned int frame_lines() const;
     unsigned int frame_clocks() const { return frame_lines() * m_line_clocks; }

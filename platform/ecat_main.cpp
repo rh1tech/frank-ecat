@@ -1098,10 +1098,10 @@ int main()
         ecat_settings_apply();
         emu->init_video(nullptr);       /* the display gets the renderer, as in the console build */
         emu->run();
-        /* A terminal with a processor of its own (the ДВК): on the second core */
+        /* A terminal with a processor of its own (the ДВК), the УК-НЦ's PPU: on the second core */
         ecat_core_num = core_num;
         ecat_time_us = time_us_64;
-        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu", "kmd-cpu"})) {
+        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu", "kmd-cpu", "ppu"})) {
             par_emu = emu;
             core1_renders = emu->display_on_core1();
             /* (The КМД's own ВМ1 stays on core 0: on core 1 the HDMI line IRQ

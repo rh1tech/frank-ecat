@@ -97,7 +97,11 @@ void UKNCRamTiming::clock(unsigned int counter)
 unsigned int UKNCRamTiming::answer(unsigned int flags, unsigned int offset)
 {
     if (m_period == 0) return 0;
-    const uint64_t pos = (m_time_from != nullptr) ? m_time_from->m_pos : m_pos;
+    uint64_t pos = (m_time_from != nullptr) ? m_time_from->m_pos : m_pos;
+#ifdef ECAT_EMBEDDED
+    //The clocks of the instructions run since the devices were last clocked
+    pos += im->dm->pending_of(((m_time_from != nullptr) ? m_time_from : this)->m_domain);
+#endif
     const uint64_t strobe = (pos + offset) * m_period;
     // Строб берётся в точке сетки, которая не меньше чем на setup позже него
     const uint64_t asked = strobe + (uint64_t)m_setup * PS;

@@ -306,3 +306,8 @@ ecat_add_firmware(bk VIDEO_MODE 28 REFRESH 5001 SURFACE 512 256 MACHINES
     bk/BK-0011M-a16m.ext
     bk/BK-0011M-smk512.ext
     bk/BK-0011M-mstd.ext)
+
+ecat_add_firmware(uknc VIDEO_MODE 28 REFRESH 5001 SURFACE 640 288 MACHINES
+    uknc/UKNC.cfg
+    uknc/UKNC-031.ext
+    uknc/UKNC-basic.ext)

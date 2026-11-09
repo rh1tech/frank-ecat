@@ -129,6 +129,10 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Hands the next code over, a batch late at most
+    bool batch_safe() const override { return true; }
+#endif
 
     void key_down(unsigned int key) override;
     void key_up(unsigned int key) override;

@@ -363,6 +363,7 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
             if (cpus[j] == d->get_clock_source()) { domain = j; break; }
 
 #ifdef ECAT_EMBEDDED
+        d->m_domain = (uint8_t)domain;
         if (d->has_batch_events()) m_batch_event_devices[domain].push_back(d);
         if (!d->batch_safe()) {
             printf("batch: %s (%s) keeps domain %u clocked after every instruction\n",

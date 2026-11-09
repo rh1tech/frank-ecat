@@ -57,6 +57,12 @@ private:
 
     // Scale each line of the last completed frame was drawn with, for scripts
     uint8_t m_line_scale[288]{};
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: a hash of what each line was drawn from (the bytes of the
+    // three planes, the address, scale, colours and cursor); a line whose
+    // inputs hash the same is on the surface already. 0: not drawn
+    uint32_t m_line_hash[288]{};
+#endif
 
     // A palette change requested from the interface thread, applied by the
     // render one - the same dance BKDisplay does for its colour switch
@@ -77,6 +83,10 @@ protected:
     void render_all(bool force_render) override;
     void FRAME_SYNC() override;
     void HSYNC(unsigned line, unsigned sync_val) override;
+#ifdef ECAT_EMBEDDED
+    //Lines and the frame pulse end batches through clocks_to_event()
+    bool batch_safe() const override { return true; }
+#endif
 
 public:
     UKNCDisplay(InterfaceManager *im, EmulatorConfigDevice *cd);

@@ -130,6 +130,12 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the counter reaches zero (the interrupt)
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     unsigned int get_value(unsigned int address) override;

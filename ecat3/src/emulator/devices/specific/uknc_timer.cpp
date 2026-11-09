@@ -117,6 +117,19 @@ void UKNCTimer::base_tick()
     update_irq();
 }
 
+#ifdef ECAT_EMBEDDED
+unsigned int UKNCTimer::clocks_to_batch_event() const
+{
+    if ((m_flags & F_RUN) == 0 || m_base_cycles == 0) return UINT_MAX;
+    const uint64_t div = TIMER_DIVIDERS[(m_flags & F_DIV_MASK) >> 1];
+    //Counter steps up to and including the one that makes zero
+    const uint64_t n = (m_counter == 0 || m_event_load) ? (uint64_t)(((m_reload - 1) & COUNTER_MASK) + 1) : m_counter;
+    const uint64_t first = (m_acc < m_base_cycles) ? m_base_cycles - m_acc : 1;
+    const uint64_t c = first + ((div - 1 - (m_divider < div ? m_divider : div - 1)) + (n - 1) * div) * m_base_cycles;
+    return c > 0x7FFFFFFFull ? 0x7FFFFFFFu : (unsigned)c;
+}
+#endif
+
 double UKNCTimer::counter_step_cycles() const
 {
     return (double)m_base_cycles * TIMER_DIVIDERS[(m_flags & F_DIV_MASK) >> 1];

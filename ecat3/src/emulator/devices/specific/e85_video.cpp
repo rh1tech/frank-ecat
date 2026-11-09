@@ -518,6 +518,11 @@ void E85Display::state_restored()
 void E85Display::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    m_vr = &vr;
+    std::fill(m_rgba.begin(), m_rgba.end(), 0xFFFFFFFFu);
+    return;
+#endif
     std::vector<uint8_t> colors(4096 * 3);
     for (unsigned int i = 0; i < 4096; i++) {
         colors[i * 3 + 0] = (uint8_t)(((i >> 8) & 15) * 17);
@@ -638,11 +643,11 @@ static void plane_levels(const uint16_t * words, unsigned int resolution, uint8_
 void E85Display::render_line_unlocked(unsigned int line)
 {
     if (!has_valid_renderer() || render_pixels == nullptr || m_video == nullptr) return;
-    if ((int)(sx * 4) > line_bytes) return;
+    if ((int)(sx * sizeof(ecat_pixel_t)) > line_bytes) return;
 
-    uint32_t * p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(render_pixels) + line * line_bytes);
+    ecat_pixel_t * p = reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + line * line_bytes);
     if (line >= (m_video->pal() ? (unsigned int)VISIBLE_625 : (unsigned int)VISIBLE_525)) {
-        for (unsigned int i = 0; i < sx; i++) *p++ = m_rgba[0];
+        for (unsigned int i = 0; i < sx; i++) *p++ = color(0);
         return;
     }
 
@@ -653,7 +658,7 @@ void E85Display::render_line_unlocked(unsigned int line)
         // Монохромный выход НВ1
         uint8_t levels[1024];
         plane_levels(blue, (m_video->rud1() >> 3) & 3, levels);
-        for (unsigned int i = 0; i < 1024; i++) *p++ = m_rgba[levels[i] * 0x111];
+        for (unsigned int i = 0; i < 1024; i++) *p++ = color(levels[i] * 0x111);
         return;
     }
 
@@ -665,7 +670,7 @@ void E85Display::render_line_unlocked(unsigned int line)
         for (unsigned int i = 0; i < 8; i++) {
             const unsigned int v = m_video->ruc(i);
             const unsigned int r = (v >> 5) & 7, g = (v >> 2) & 7, b = v & 3;
-            map[i] = m_rgba[(((r << 1) | (r >> 2)) << 8) | (((g << 1) | (g >> 2)) << 4) | ((b << 2) | b)];
+            map[i] = color((((r << 1) | (r >> 2)) << 8) | (((g << 1) | (g >> 2)) << 4) | ((b << 2) | b));
         }
         for (unsigned int i = 0; i < E85Video::LINE_WORDS; i++) {
             const unsigned int r = red[i], g = green[i], b = blue[i];
@@ -679,7 +684,7 @@ void E85Display::render_line_unlocked(unsigned int line)
     plane_levels(red, (m_video->rud2() >> 11) & 3, lr);
     plane_levels(green, (m_video->rud2() >> 3) & 3, lg);
     plane_levels(blue, (m_video->rud1() >> 3) & 3, lb);
-    for (unsigned int i = 0; i < 1024; i++) *p++ = m_rgba[(lr[i] << 8) | (lg[i] << 4) | lb[i]];
+    for (unsigned int i = 0; i < 1024; i++) *p++ = color((lr[i] << 8) | (lg[i] << 4) | lb[i]);
 }
 
 std::vector<DeviceFieldInfo> E85Display::get_device_fields()
