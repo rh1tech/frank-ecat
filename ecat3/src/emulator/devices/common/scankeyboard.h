@@ -128,6 +128,10 @@ public:
 
     void reset(bool cool) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Passes on an NMI the host asked for, a batch late at most
+    bool batch_safe() const override { return true; }
+#endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;
     bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;

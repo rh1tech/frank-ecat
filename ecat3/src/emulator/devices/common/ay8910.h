@@ -104,6 +104,10 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Ticks as many as the clocks make; a register is written after a sync
+    bool batch_safe() const override { return true; }
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     unsigned int get_value(unsigned int address) override;

@@ -66,14 +66,16 @@ static volatile bool hdmi_lay_pending;
 static void hdmi_lay_compute(int act, int vact, uint16_t *map) {
     int hs = hdmi_lay_hs, vs = hdmi_lay_vs;
     int cols = hdmi_lay_w;
-    if (cols * hs > act) cols = (act / hs) & ~3;
+    // hs 5: x1.5 (four bytes, six pixels); widths in half pixels
+    const int hw = (hs == 5) ? 3 : hs * 2;
+    if (cols * hw > act * 2) cols = (act * 2 / hw) & ~3;
     int rows = hdmi_lay_h;
     if (rows * vs > vact) rows = vact / vs;
     const int top = (vact - rows * vs) / 2;
     for (int q = 0; q < vact; q++)
         map[q] = (q < top || q >= top + rows * vs) ? (uint16_t)0x7FFF : (uint16_t)((q - top) / vs);
     hdmi_lay_next.cols = (uint16_t)cols;
-    hdmi_lay_next.left = (uint16_t)(((act - cols * hs) / 2) & ~1);
+    hdmi_lay_next.left = (uint16_t)(((act - cols * hw / 2) / 2) & ~1);
     hdmi_lay_next.rows = (uint16_t)rows;
     hdmi_lay_next.scale = (uint8_t)hs;
     hdmi_lay_next.map = map;
@@ -82,7 +84,7 @@ static void hdmi_lay_compute(int act, int vact, uint16_t *map) {
 void hdmi_set_layout(int w, int h, int hscale, int vscale) {
     hdmi_lay_w = (uint16_t)(w & ~3);
     hdmi_lay_h = (uint16_t)h;
-    hdmi_lay_hs = (uint8_t)(hscale < 1 ? 1 : hscale > 4 ? 4 : hscale);
+    hdmi_lay_hs = (uint8_t)(hscale < 1 ? 1 : hscale > 5 ? 5 : hscale);
     hdmi_lay_vs = (uint8_t)(vscale < 2 ? 2 : vscale);
     if (!hdmi_lay_live) {            // before hdmi_init(): it lays the buffers out
         hdmi_lay_on = w > 0 && h > 0;
@@ -837,6 +839,13 @@ static int __attribute__((noinline)) __not_in_flash_func(hdmi_big_line)(
                 const uint p = in[x ^ swz], q = in[(x + 1) ^ swz];
                 o[0] = la[p * 2]; o[1] = lb[p * 2 + 1]; o[2] = la[p * 2];
                 o[3] = lb[q * 2 + 1]; o[4] = la[q * 2]; o[5] = lb[q * 2 + 1]; o += 6;
+            }
+        } else if (hdmi_big_scale == 5) {   // frank-ecat: x1.5, bytes a b c d -> a a b c c d
+            for (int x = 0; x < cols; x += 4) {
+                const uint a = in[x ^ swz], b = in[(x + 1) ^ swz], c = in[(x + 2) ^ swz], d = in[(x + 3) ^ swz];
+                o[0] = la[a * 2]; o[1] = lb[a * 2 + 1]; o[2] = la[b * 2];
+                o[3] = lb[c * 2 + 1]; o[4] = la[c * 2]; o[5] = lb[d * 2 + 1];
+                o += 6;
             }
         } else if (hdmi_big_scale == 1) {   // frank-ecat: one output pixel per fb byte
             for (int x = 0; x < cols; x += 2) {

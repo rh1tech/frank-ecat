@@ -353,6 +353,11 @@ struct MapperPage {
                                     //(a ROM read over a RAM written: two ranges)
     unsigned int        direct_r_size;
     unsigned int        direct_w_size;
+    //A device's page table instead (AddressableDevice::page_table())
+    uint8_t * const *   table_r;
+    uint8_t * const *   table_w;
+    unsigned int        table_r_pages;
+    unsigned int        table_w_pages;
 #endif
 };
 
@@ -631,6 +636,14 @@ public:
     //register is not: its write acts (a DL11 sends the byte, a channel starts),
     //and the dump only shows it. Memories and the windows into them say true
     virtual bool debug_writable(MAYBE_UNUSED unsigned int address) const { return false; }
+#ifdef ECAT_EMBEDDED
+    //A device that keeps its own memory in 256-byte pages (a banking MMU):
+    //the bytes of each page of its address space, or nullptr where an access
+    //must come to get_value()/set_value() (a switch, a card). The mapper reads
+    //and writes the others in place (MemoryMapper::read_fast()); the device
+    //changes the entries, never the table. *pages: entries in it
+    virtual uint8_t * const * page_table(MAYBE_UNUSED bool write, MAYBE_UNUSED unsigned int * pages) { return nullptr; }
+#endif
 
     //Asked by the mapper for a range marked "routed = 1", before the access and
     //with the same address the device would get: does this device answer here
@@ -1394,12 +1407,21 @@ public:
     inline unsigned int read_fast(unsigned int address)
     {
         MapperPage * e = direct_page(address);
-        if (e != nullptr && e->direct_r != nullptr) {
+        if (e != nullptr) {
             const unsigned int a = address + e->offset;
-            if (a < e->direct_r_size) {
-                this->last_device = e->device_r;
-                this->no_device = false;
-                return e->direct_r[a];
+            if (e->direct_r != nullptr) {
+                if (a < e->direct_r_size) {
+                    this->last_device = e->device_r;
+                    this->no_device = false;
+                    return e->direct_r[a];
+                }
+            } else if (e->table_r != nullptr && (a >> 8) < e->table_r_pages) {
+                const uint8_t * b = e->table_r[a >> 8];
+                if (b != nullptr) {
+                    this->last_device = e->device_r;
+                    this->no_device = false;
+                    return b[a & 0xFF];
+                }
             }
         }
         return read(address);
@@ -1407,13 +1429,23 @@ public:
     inline void write_fast(unsigned int address, unsigned int value)
     {
         MapperPage * e = direct_page(address);
-        if (e != nullptr && e->direct_w != nullptr) {
+        if (e != nullptr) {
             const unsigned int a = address + e->offset_w;
-            if (a < e->direct_w_size) {
-                this->last_device = e->device_w;
-                this->no_device = false;
-                e->direct_w[a] = (uint8_t)value;
-                return;
+            if (e->direct_w != nullptr) {
+                if (a < e->direct_w_size) {
+                    this->last_device = e->device_w;
+                    this->no_device = false;
+                    e->direct_w[a] = (uint8_t)value;
+                    return;
+                }
+            } else if (e->table_w != nullptr && (a >> 8) < e->table_w_pages) {
+                uint8_t * b = e->table_w[a >> 8];
+                if (b != nullptr) {
+                    this->last_device = e->device_w;
+                    this->no_device = false;
+                    b[a & 0xFF] = (uint8_t)value;
+                    return;
+                }
             }
         }
         write(address, value);

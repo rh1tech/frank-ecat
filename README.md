@@ -18,9 +18,10 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | `frank-ecat-orion` | Орион-128 (М1, М3 with disks, Z80 Card II) | ~50% (М1, М3), 93% (Z80 Card II at 5 MHz) |
 | `frank-ecat-irisha` | Ириша (ГМД-70, КНГМД), Диалог, Каспий | ~55-60% (Ириша, Каспий), ~70% (Диалог) |
 | `frank-ecat-unior` | Юниор ФВ-6506, Арго ФВ-6511 | ~55% (Юниор), ~72% (Арго) |
+| `frank-ecat-pravetz` | Правец-82, -8М, -8А, -8А (full), -8С (Apple II), Правец-8Д (Oric) | 52-77% |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`
-(`agat`, `radio-86rk`, `orion-128`, `irisha`, `unior`, ...), where the file browser (F11) opens.
+(`agat`, `radio-86rk`, `orion-128`, `irisha`, `unior`, `pravetz`, ...), where the file browser (F11) opens.
 
 ## Layout
 

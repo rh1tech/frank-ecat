@@ -20,6 +20,9 @@ Apple2MMU::Apple2MMU(InterfaceManager *im, EmulatorConfigDevice *cd):
 {
     std::memset(m_float, 0xFF, sizeof(m_float));
     for (unsigned i = 0; i < 256; i++) { m_rd[i] = m_float; m_wr[i] = nullptr; }
+#ifdef ECAT_EMBEDDED
+    for (unsigned i = 0; i < 256; i++) { m_fast_rd[i] = nullptr; m_fast_wr[i] = nullptr; }
+#endif
 }
 
 emulator::Result Apple2MMU::load_config(SystemData *sd)
@@ -214,6 +217,15 @@ void Apple2MMU::rebuild(unsigned lo, unsigned hi)
         m_rd[p] = (ram != nullptr && m_sw[SW_LCRAM]) ? ram : rom_page(p << 8);
         m_wr[p] = (ram != nullptr && m_sw[SW_LCWRITE]) ? ram : nullptr;
     }
+#ifdef ECAT_EMBEDDED
+    // What the mapper reads and writes in place: all but $C000-$CFFF, where
+    // every access is a switch ($C0xx, $CFFF) or may be a card's
+    for (unsigned p = lo; p <= hi && p < 0x100; p++) {
+        const bool io = p >= 0xC0 && p < 0xD0;
+        m_fast_rd[p] = io ? nullptr : m_rd[p];
+        m_fast_wr[p] = io ? nullptr : m_wr[p];
+    }
+#endif
 }
 
 // $C080-$C08F. A0 and A1 pick what is read (RAM when they are equal), A3 the
@@ -284,6 +296,20 @@ AddressableDevice * Apple2MMU::page_device(unsigned page) const
     return (page < 0xC8) ? m_slot_dev[page & 7] : m_exp_dev[m_exp_owner];
 }
 
+//The device of a card's page, brought up to date for the access as the mapper
+//does for a device of its own (the MMU itself is timeless_access)
+AddressableDevice * Apple2MMU::card_device(unsigned page, MAYBE_UNUSED bool write)
+{
+    AddressableDevice * d = page_device(page);
+#ifdef ECAT_EMBEDDED
+    if (d->m_sync_on_access) {
+        im->dm->sync_pending();
+        if (write) im->dm->m_batch_cut = true;
+    }
+#endif
+    return d;
+}
+
 unsigned Apple2MMU::get_value(unsigned address)
 {
     if ((address & 0xF000) == 0xC000) {
@@ -295,13 +321,13 @@ unsigned Apple2MMU::get_value(unsigned address)
         // that cycle; the release comes after it (a U-LAN card puts its
         // station number there)
         if (address == 0xCFFF) {
-            const unsigned v = (m_rd[0xCF] == nullptr) ? page_device(0xCF)->get_value(address) : m_rd[0xCF][0xFF];
+            const unsigned v = (m_rd[0xCF] == nullptr) ? card_device(0xCF, false)->get_value(address) : m_rd[0xCF][0xFF];
             cx_access(address);
             return v;
         }
         cx_access(address);
         const unsigned page = (address >> 8) & 0xFF;
-        if (m_rd[page] == nullptr) return page_device(page)->get_value(address);
+        if (m_rd[page] == nullptr) return card_device(page, false)->get_value(address);
     }
 
     return m_rd[(address >> 8) & 0xFF][address & 0xFF];
@@ -325,7 +351,7 @@ void Apple2MMU::set_value(unsigned address, unsigned value, bool force)
         cx_access(address);
         const unsigned page = (address >> 8) & 0xFF;
         if (m_rd[page] == nullptr) {
-            page_device(page)->set_value(address, value, force);
+            card_device(page, true)->set_value(address, value, force);
             return;
         }
     }

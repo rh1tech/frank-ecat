@@ -100,6 +100,12 @@ public:
     unsigned int get_direct(unsigned int address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //The sequencer runs up to the processor's bus time at every access
+    //(catch_up()), whenever it was clocked last
+    bool batch_safe() const override { return true; }
+    bool timeless_access() const override { return true; }
+#endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;
     bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;

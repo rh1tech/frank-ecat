@@ -100,7 +100,11 @@ unsigned Apple2IOU::status(unsigned address)
         case 0x7: b = m_mmu->get_switch(Apple2MMU::SW_SLOTC3ROM); break;
         case 0x8: b = m_mmu->get_switch(Apple2MMU::SW_80STORE); break;
         // RDVBLBAR: low while the beam is in the vertical blanking
-        case 0x9: b = (m_video == nullptr) || !m_video->in_vbl(); break;
+        case 0x9:
+#ifdef ECAT_EMBEDDED
+            im->dm->sync_pending();
+#endif
+            b = (m_video == nullptr) || !m_video->in_vbl(); break;
         case 0xA: b = (m_flags & VF_TEXT) != 0; break;
         case 0xB: b = (m_flags & VF_MIXED) != 0; break;
         case 0xC: b = (m_flags & VF_PAGE2) != 0; break;

@@ -23,6 +23,11 @@ class Apple2MMU;
 class Apple2Video: public RasterDisplay, public Apple2VideoSource
 {
 public:
+#ifdef ECAT_EMBEDDED
+    //The beam (RasterDisplay::clock) walks every line a batch covers; the
+    //frame is drawn whole, once a frame
+    bool batch_safe() const override { return true; }
+#endif
     enum Monitor { MON_GREEN = 0, MON_WHITE, MON_AMBER, MON_RGB, MON_RGB_STOCK, MON_RGB_VARIANT, MON_COUNT };
     enum Charset { CS_IIE = 0, CS_II };
 
@@ -52,6 +57,18 @@ private:
     uint8_t m_dots[560 + 4];
     uint8_t m_late[40];         // a hires byte of this line shifted half a dot
 
+#ifdef ECAT_EMBEDDED
+    //frank-ecat: a line whose bytes and modes are those it was last drawn
+    //with is right on the surface already (a third of the time otherwise)
+    struct DrawnLine {
+        bool valid;
+        unsigned flags, mon, font_base;
+        bool flash;
+        uint8_t main[40], aux[40];
+    };
+    DrawnLine m_drawn[192];
+    bool same_line(unsigned line, unsigned flags);
+#endif
     void build_line(unsigned line, unsigned flags);
     unsigned glyph(unsigned code, unsigned row, bool altchar) const;
     void render_line(unsigned line);

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <climits>
+#include <cstdint>
 #include "emulator/core.h"
 #include "emulator/devices/common/serial_line.h"
 #include "emulator/devices/common/byte_tap.h"
@@ -78,6 +80,21 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where a byte is sent or the receiver takes its next step;
+    //an access brings the UART up to date first (not timeless)
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override
+    {
+        int64_t r = INT64_MAX;
+        if (m_tx_busy) r = m_tx_left;
+        if (m_rx_left > 0) { if (m_rx_left < r) r = m_rx_left; }
+        else if (!(m_lsr & 0x01)) r = 1;       //LSR_DR
+        if (r == INT64_MAX) return UINT_MAX;
+        return r <= 1 ? 1u : (r > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned)r);
+    }
+#endif
 
     unsigned get_value(unsigned address) override;
     unsigned get_direct(unsigned address) override;

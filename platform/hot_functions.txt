@@ -194,3 +194,27 @@ ArgoMemory::set_value
 ArgoMemory::translate_cpu
 ArgoKeyboard::get_value
 ZXKeyboard::clock
+
+# Apple II / Правец
+Apple2Video::render_line_unlocked
+Apple2Video::same_line
+Apple2Video::build_line
+Apple2Video::glyph
+Apple2Video::HSYNC
+Apple2MMU::get_value
+Apple2MMU::set_value
+Apple2IOU::get_value
+Apple2IOU::set_value
+Apple2IOU::access
+Apple2Disk2::run
+Apple2Disk2::step_sequencer
+Apple2Disk2::catch_up
+Apple2Disk2::get_value
+Apple2Disk2::set_value
+Apple2Disk2::clock
+PravetzKeyboard::clock
+PravetzKeyboard::kbd_latch
+mos6502::*
+mos6502core::*
+mos6502Core::*
+RasterDisplay::clock

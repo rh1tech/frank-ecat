@@ -59,6 +59,10 @@ private:
 
     uint8_t * m_rd[256];
     uint8_t * m_wr[256];        // null: the write goes nowhere
+#ifdef ECAT_EMBEDDED
+    uint8_t * m_fast_rd[256];   // m_rd/m_wr but $C0-$CF, see page_table()
+    uint8_t * m_fast_wr[256];
+#endif
     uint8_t m_float[256];       // what an empty slot answers
 
     uint8_t * main_buf() const { return m_ram->get_buffer(); }
@@ -68,6 +72,7 @@ private:
     void lc_access(unsigned address, bool read);
     void cx_access(unsigned address);
     AddressableDevice * page_device(unsigned page) const;
+    AddressableDevice * card_device(unsigned page, bool write);
 
 
 public:
@@ -79,6 +84,16 @@ public:
     unsigned get_direct(unsigned address) override;
     void set_value(unsigned address, unsigned value, bool force=false) override;
     bool debug_writable(unsigned int address) const override;
+#ifdef ECAT_EMBEDDED
+    //Memory and switches: an access depends on nothing that moves with time.
+    //A card's own page (page_device()) is brought up to date before it
+    bool timeless_access() const override { return true; }
+    uint8_t * const * page_table(bool write, unsigned int * pages) override
+    {
+        *pages = 256;
+        return write ? m_fast_wr : m_fast_rd;
+    }
+#endif
 
     // From the IOU: a //e switch changed, or asked for its state ($C011-$C01F)
     void set_switch(Switch s, bool on);

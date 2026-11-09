@@ -44,6 +44,9 @@ Apple2Video::Apple2Video(InterfaceManager *im, EmulatorConfigDevice *cd):
     sy = 192;
     std::memset(m_dots, 0, sizeof(m_dots));
     std::memset(m_late, 0, sizeof(m_late));
+#ifdef ECAT_EMBEDDED
+    for (DrawnLine &d : m_drawn) d.valid = false;
+#endif
 }
 
 emulator::Result Apple2Video::load_config(SystemData *sd)
@@ -106,6 +109,9 @@ emulator::Result Apple2Video::load_config(SystemData *sd)
 void Apple2Video::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    for (DrawnLine &d : m_drawn) d.valid = false;
+#endif
     for (unsigned m = 0; m < MON_RGB; m++) vr.FillRGB(A2_MONO[m], m_mono[m], 2);
     vr.FillRGB(A2_COLORS, m_rgb, 16);
     // The stock card: of the four dots the 74LS175 latches on each colour
@@ -241,10 +247,44 @@ void Apple2Video::render_line(unsigned line)
     screen_valid = true;
 }
 
+#ifdef ECAT_EMBEDDED
+//The bytes the line is drawn from, as build_line() takes them, and the modes
+bool Apple2Video::same_line(unsigned line, unsigned flags)
+{
+    const uint8_t * main = m_mmu->video_main();
+    const uint8_t * aux = m_mmu->video_aux();
+    const bool text = (flags & Apple2IOU::VF_TEXT) || ((flags & Apple2IOU::VF_MIXED) && line >= 160);
+    const bool col80 = m_iie && aux != nullptr && (flags & Apple2IOU::VF_80COL);
+    const bool page2 = (flags & Apple2IOU::VF_PAGE2) && !(flags & Apple2IOU::VF_80STORE);
+    unsigned a;
+    if (!text && (flags & Apple2IOU::VF_HIRES))
+        a = (page2 ? 0x4000 : 0x2000) + ((line & 7) << 10) + text_row(line >> 3);
+    else
+        a = (page2 ? 0x800 : 0x400) + text_row(line >> 3);
+    DrawnLine &d = m_drawn[line];
+    const unsigned mon = m_monitor.load();
+    const bool same = d.valid && d.flags == flags && d.mon == mon && d.font_base == m_font_base
+        && d.flash == m_flash && std::memcmp(d.main, main + a, 40) == 0
+        && (!col80 || std::memcmp(d.aux, aux + a, 40) == 0);
+    if (same) return true;
+    d.valid = true;
+    d.flags = flags;
+    d.mon = mon;
+    d.font_base = m_font_base;
+    d.flash = m_flash;
+    std::memcpy(d.main, main + a, 40);
+    if (col80) std::memcpy(d.aux, aux + a, 40);
+    return false;
+}
+#endif
+
 void Apple2Video::render_line_unlocked(unsigned line)
 {
     if (!has_valid_renderer() || render_pixels == nullptr || line >= sy) return;
     const unsigned flags = m_iou->video_flags();
+#ifdef ECAT_EMBEDDED
+    if (same_line(line, flags)) return;
+#endif
     build_line(line, flags);
     ecat_pixel_t * out = reinterpret_cast<ecat_pixel_t *>(static_cast<uint8_t *>(render_pixels) + line * line_bytes);
     const unsigned mon = m_monitor.load();
@@ -292,6 +332,9 @@ void Apple2Video::render_line_unlocked(unsigned line)
 
 void Apple2Video::render_all(MAYBE_UNUSED bool force_render)
 {
+#ifdef ECAT_EMBEDDED
+    if (force_render || !screen_valid) for (DrawnLine &d : m_drawn) d.valid = false;
+#endif
     if (!screen_valid && has_valid_renderer() && render_pixels != nullptr)
         for (unsigned line = 0; line < 192 && line < sy; line++)
             render_line_unlocked(line);

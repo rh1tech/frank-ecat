@@ -99,6 +99,10 @@ public:
     ConfigFields get_config_fields() override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Autorepeat and the host's queue, a batch late at most
+    bool batch_safe() const override { return true; }
+#endif
     bool needs_shift_char(char ch, unsigned int key) override;
     bool key_for_char(unsigned int codepoint, unsigned int &key, bool &shift) override;
     unsigned int rus_switch_key() const override { return m_key_ruslat; }

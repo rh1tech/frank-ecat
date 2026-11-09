@@ -96,13 +96,15 @@ extern "C" void __not_in_flash_func(ESPectrum_vsync)(void) {
 }
 
 /* the largest whole scale that fits the mode's active area: x1..x4 across,
- * x2..x4 down (the line map needs runs of at least two lines) */
+ * x2..x4 down (the line map needs runs of at least two lines); x1.5 across
+ * (5) where x1 would leave a narrow strip - the 560 dots of an Apple II */
 static void layout_for(int w, int h, int *hs, int *vs) {
     const video_mode_t m = graphics_get_video_mode(ECAT_VIDEO_MODE);
     const int act_w = m.screen_width * 2, act_h = m.v_active;
     int x = act_w / (w > 0 ? w : 1), y = act_h / (h > 0 ? h : 1);
     if (x < 1) x = 1;
     if (x > 4) x = 4;
+    if (x == 1 && w * 3 / 2 <= act_w) x = 5;
     if (y < 2) y = 2;
     if (y > 4) y = 4;
     *hs = x;

@@ -82,6 +82,11 @@ public:
     unsigned get_value(unsigned address) override;
     unsigned get_direct(unsigned address) override;
     void set_value(unsigned address, unsigned value, bool force=false) override;
+#ifdef ECAT_EMBEDDED
+    //Switches, the keyboard latch, the paddle timers (read off the bus time):
+    //nothing that moves with time but RDVBLBAR, which brings the beam up to date
+    bool timeless_access() const override { return true; }
+#endif
 
     unsigned video_flags() const { return m_flags; }
     bool softsw() const { return m_softsw; }

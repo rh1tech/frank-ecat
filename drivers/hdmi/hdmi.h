@@ -112,7 +112,7 @@ void hdmi_update_mode_timing(void);
 // framebuffer row for each of the v_active lines, latched once per frame.
 void hdmi_set_vmap(const uint16_t *map, int n);
 // frank-ecat (HSTX expander only): show a w x h framebuffer (rows from getLineBuffer,
-// in plain byte order, w a multiple of 4) ×hscale (1..4) across, ×vscale (>= 2) down,
+// in plain byte order, w a multiple of 4) ×hscale (1..4, 5: ×1.5) across, ×vscale (>= 2) down,
 // centred in the current mode. Before graphics_init() it selects the layout scanout;
 // after it the change is applied at the next frame start (core0, no re-init).
 void hdmi_set_layout(int w, int h, int hscale, int vscale);

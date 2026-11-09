@@ -286,3 +286,11 @@ ecat_add_firmware(irisha VIDEO_MODE 28 REFRESH 5001 SURFACE 640 240 MACHINES
 ecat_add_firmware(unior VIDEO_MODE 28 REFRESH 5001 SURFACE 480 300 MACHINES
     unior/Unior.cfg
     unior/Argo.cfg)
+
+ecat_add_firmware(pravetz VIDEO_MODE 28 REFRESH 5001 SURFACE 560 224 MACHINES
+    pravetz/Pravetz-82.cfg
+    pravetz/Pravetz-8M.ext
+    pravetz/Pravetz-8A.cfg
+    pravetz/Pravetz-8A-full.ext
+    pravetz/Pravetz-8C.cfg
+    pravetz/Pravetz-8D.cfg)

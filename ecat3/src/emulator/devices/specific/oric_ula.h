@@ -45,6 +45,10 @@ public:
     bool native_frame_rate(uint64_t &num, uint64_t &den) override { return raster_frame_rate(num, den, 1); }
 
     void HSYNC(const unsigned line, const unsigned sync_val) override;
+#ifdef ECAT_EMBEDDED
+    //The beam (RasterDisplay::clock) walks every line a batch covers
+    bool batch_safe() const override { return true; }
+#endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;
     bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;

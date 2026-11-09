@@ -95,6 +95,17 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the line takes a byte back or the receiver steps
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override
+    {
+        int64_t r = m_rx_left > 0 ? m_rx_left : 1;
+        if (m_tx_left > 0 && m_tx_left < r) r = m_tx_left;
+        return r <= 1 ? 1u : (r > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned)r);
+    }
+#endif
     unsigned get_value(unsigned address) override;
     unsigned get_direct(unsigned address) override;
     void set_value(unsigned address, unsigned value, bool force=false) override;

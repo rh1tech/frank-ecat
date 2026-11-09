@@ -80,6 +80,11 @@ public:
     void clock(unsigned int counter) override;
     unsigned int clocks_to_event() const override;
     bool has_clock_events() const override { return true; }
+#ifdef ECAT_EMBEDDED
+    //t1_run()/t2_run() take any number of clocks; the timeouts end batches
+    //through clocks_to_event()
+    bool batch_safe() const override { return true; }
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     unsigned int get_value(unsigned int address) override;
