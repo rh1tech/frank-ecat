@@ -992,7 +992,9 @@ extern "C" void ecat_ui_info(char *buf, unsigned n)
         "\n"
         UI_MK_HEAD "--- Firmware ---\n"
         UI_MK_TEXT "frank-ecat     : " UI_MK_WHITE "%s, %s\n"
-        UI_MK_TEXT "Emulator core  : " UI_MK_WHITE "eCat3 by Mikhail Revzin\n",
+        UI_MK_TEXT "Emulator core  : " UI_MK_WHITE "eCat3 by Mikhail Revzin\n"
+        "\n"
+        UI_MK_WHITE "(c) 2026 Mikhail Matveev, https://rh1.tech\n",
         ecat_ui_machine_title(machine_running), family_title.c_str(), ecat_machines[machine_running],
         ecat_ui_speed(), saved_w, saved_h, renderer ? renderer->palette_count() : 0,
         m.screen_width * 2, m.v_active,

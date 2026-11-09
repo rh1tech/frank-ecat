@@ -1,0 +1,42 @@
+#
+# frank-ecat — eCat3 (retro computers emulator) on RP2350 (FRANK M2)
+#
+# Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+# https://github.com/rh1tech/frank-ecat
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The server-side gate: every pushed commit and every pull request commit
+# goes through tools/check-attribution.sh, the same script the local hooks
+# (.githooks) call. It catches what the hooks cannot: a clone without
+# tools/install-hooks.sh, a push with --no-verify, a commit made on GitHub.
+
+name: attribution
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Self-test the patterns
+        run: tools/check-attribution.sh --self-test
+      - name: Check the pushed or proposed commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            tools/check-attribution.sh --range "$PR_BASE..$PR_HEAD"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            tools/check-attribution.sh --range "$AFTER"   # a new branch: its whole history
+          else
+            tools/check-attribution.sh --range "$BEFORE..$AFTER"
+          fi
