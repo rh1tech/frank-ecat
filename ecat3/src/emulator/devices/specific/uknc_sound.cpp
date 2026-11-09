@@ -4,6 +4,7 @@
 // Description: УК-НЦ sound - the speaker line and the tone grid of register 177716
 
 #include "uknc_sound.h"
+#include "emulator/utils.h"
 #include "uknc_timer.h"
 
 #define IN_LINE     0x01        // разряд 7 регистра
@@ -39,6 +40,9 @@ emulator::Result UKNCSound::load_config(SystemData *sd)
 {
     emulator::Result res = GenericSound::load_config(sd);
     if (!res) return res;
+#ifdef ECAT_EMBEDDED
+    m_defer = read_confg_value(cd, "defer", false, (unsigned int)160);
+#endif
 
     //Какому таймеру принадлежит счётчик. Без параметра берётся единственный
     //таймер машины - так открывается состояние, записанное до того, как сетку
@@ -127,7 +131,7 @@ void UKNCSound::clock(unsigned int counter)
     //step log, 32 steps of at least 12 clocks), so the clocks of a few batches
     //at once give the same sum: about a sample's worth, not every batch
     m_deferred += counter;
-    if (m_deferred < 160) return;
+    if (m_deferred < m_defer) return;
     counter = m_deferred;
     m_deferred = 0;
 #endif

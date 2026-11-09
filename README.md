@@ -20,7 +20,7 @@ Work in progress. Running now with sound over HDMI, at full speed unless noted (
 | `frank-ecat-unior` | Юниор ФВ-6506, Арго ФВ-6511 | 53% (Юниор), 68% (Арго) |
 | `frank-ecat-pravetz` | Правец-82, -8М, -8А, -8А (full), -8С (Apple II), Правец-8Д (Oric) | 49-84% |
 | `frank-ecat-bk` | БК0010, БК0010-01 and БК0011М, each plain, with the КНГМД, А16М, СМК-512; БК0011М МСТД | 69-91% |
-| `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores, a fast mode (the table timing, no memory waits: `platform/machine_overrides.txt`): 75% (5.8-6.3 of 8 MHz); RT-11 boots from the disk |
+| `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores, a fast mode (the table timing, no memory waits, the picture at 25 Hz, double batches: `platform/machine_overrides.txt`): 85-100% (6.8-8.0 of 8 MHz); RT-11 boots from the disk |
 | `frank-ecat-e85` | Электроника МС 0585, with МС 1702, with the hard disk | both cores (the КНГМД's 8051 on the second): 100% at the ПРОС prompt (73% busy), 65-85% while loading |
 | `frank-ecat-poisk` | Поиск-1, 128 КБ, with the cartridge RAM, with the КНГМД 302 | 96-100% (MS-DOS 5 and Volkov Commander from the disk) |
 

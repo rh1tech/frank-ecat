@@ -1908,8 +1908,14 @@ void Emulator::run_domain(size_t only, uint64_t q_end)
 {
     ClockDomain &d = domains[only];
     CPU * const p = d.cpu;
-    const unsigned int batch_max = batch_max_cycles(only);
+    unsigned int batch_max = batch_max_cycles(only) * p->m_batch_scale;
     const uint64_t scale = d.scale;
+    //Shorter than a quantum: the cores meet at its end (eight times 16 us
+    //stood the УК-НЦ still)
+    if (m_parallel && scale != 0) {
+        const uint64_t q = m_par_quantum / scale;
+        if (q > 1 && batch_max >= q) batch_max = (unsigned int)(q - 1);
+    }
     if (!dm->batch_ok((unsigned int)only)) {
         while (d.norm < q_end) {
             const unsigned int counter = p->execute();

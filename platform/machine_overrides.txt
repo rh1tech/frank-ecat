@@ -20,3 +20,28 @@ uknc/UKNC.cfg  ppu  timing  legacy
 uknc/UKNC.cfg  plane0  wait  -
 uknc/UKNC.cfg  cpu-ram  wait  -
 uknc/UKNC.cfg  ppu-mapper  wait  -
+# ... the picture every other frame (25 a second; the list of lines is still
+# walked every frame), and batches of both processors twice the 16 us: 7.1 of
+# 8 MHz. Three times boots RT-11 too (7.2), four times broke the boot (the
+# CPU and the PPU talk through the channels within a batch)
+uknc/UKNC.cfg  display  frame_skip  1
+uknc/UKNC.cfg  cpu  batch_scale  2
+uknc/UKNC.cfg  ppu  batch_scale  2
+
+# The same for the two variants
+uknc/UKNC-031.ext   cpu  timing  legacy
+uknc/UKNC-031.ext   ppu  timing  legacy
+uknc/UKNC-031.ext   plane0  wait  -
+uknc/UKNC-031.ext   cpu-ram  wait  -
+uknc/UKNC-031.ext   ppu-mapper  wait  -
+uknc/UKNC-031.ext   display  frame_skip  1
+uknc/UKNC-031.ext   cpu  batch_scale  2
+uknc/UKNC-031.ext   ppu  batch_scale  2
+uknc/UKNC-basic.ext  cpu  timing  legacy
+uknc/UKNC-basic.ext  ppu  timing  legacy
+uknc/UKNC-basic.ext  plane0  wait  -
+uknc/UKNC-basic.ext  cpu-ram  wait  -
+uknc/UKNC-basic.ext  ppu-mapper  wait  -
+uknc/UKNC-basic.ext  display  frame_skip  1
+uknc/UKNC-basic.ext  cpu  batch_scale  2
+uknc/UKNC-basic.ext  ppu  batch_scale  2

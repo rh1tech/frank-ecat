@@ -62,6 +62,7 @@ private:
     // three planes, the address, scale, colours and cursor); a line whose
     // inputs hash the same is on the surface already. 0: not drawn
     uint32_t m_line_hash[288]{};
+    unsigned int m_frame_skip = 0;      // frames not drawn after each drawn one
 #endif
 
     // A palette change requested from the interface thread, applied by the

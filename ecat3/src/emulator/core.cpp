@@ -2004,6 +2004,10 @@ emulator::Result CPU::load_config(SystemData *sd)
         return emulator::Result::error(emulator::ErrorCode::ConfigError,
             "{CPU|" + std::string(QT_TRANSLATE_NOOP("CPU", "No CPU clock value found")) + "} " + name);
 
+#ifdef ECAT_EMBEDDED
+    m_batch_scale = read_confg_value(cd, "batch_scale", false, (unsigned int)1);
+    if (m_batch_scale < 1) m_batch_scale = 1;
+#endif
     std::string breaks = read_confg_value(cd, "breakpoints", false, std::string(""));
     if (!breaks.empty()) {
         // Addresses may be separated by commas, spaces or tabs

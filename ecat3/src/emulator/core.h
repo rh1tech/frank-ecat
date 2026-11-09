@@ -1071,6 +1071,12 @@ protected:
     uint64_t m_hold_total;
 
 public:
+#ifdef ECAT_EMBEDDED
+    //Batches of this processor's domain on a parallel machine are this many
+    //times the 16 us (parameter batch_scale, set by the firmware's overrides):
+    //fewer device clockings for the devices' timing seen a little coarser
+    unsigned int m_batch_scale = 1;
+#endif
     unsigned int clock;
     MemoryMapper * mm;
     unsigned int m_debug;

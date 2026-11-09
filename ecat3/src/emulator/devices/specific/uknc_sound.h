@@ -64,6 +64,7 @@ private:
     uknc_real m_prev_phase;
 #ifdef ECAT_EMBEDDED
     unsigned int m_deferred = 0;    //clocks not given to GenericSound::clock() yet
+    unsigned int m_defer = 160;     //that many at least (parameter defer)
 #endif
 
     // Фильтр на шагах счётчика - единственное равномерное место в тракте, см.

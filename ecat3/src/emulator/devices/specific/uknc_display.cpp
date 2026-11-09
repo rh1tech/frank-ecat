@@ -77,6 +77,9 @@ emulator::Result UKNCDisplay::load_config(SystemData *sd)
 {
     emulator::Result res = RasterDisplay::load_config(sd);
     if (!res) return res;
+#ifdef ECAT_EMBEDDED
+    m_frame_skip = read_confg_value(cd, "frame_skip", false, (unsigned int)0);
+#endif
 
     static const char * names[3] = {"plane0", "plane1", "plane2"};
     for (unsigned i = 0; i < 3; i++) {
@@ -319,6 +322,11 @@ void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
 
     if (!has_valid_renderer() || render_pixels == nullptr) return;
     if ((int)(UKNC_WIDTH * sizeof(ecat_pixel_t)) > line_bytes) return;
+#ifdef ECAT_EMBEDDED
+    //frame_skip N: the surface takes every (N+1)th frame (the list is still
+    //walked every frame: the cursor, the colours, the scale come from it)
+    if (m_frame_skip != 0 && (m_frames % (m_frame_skip + 1)) != 0) return;
+#endif
 
     // The beam has drawn on this surface, so render_all() must not blank it.
     // Its first pass came after the picture under a loaded host, and in the
