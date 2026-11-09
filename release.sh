@@ -39,6 +39,9 @@ echo "$MAJOR $(printf '%02d' $MINOR)" > version.txt
 echo "frank-ecat $VERSION_DOT"
 
 mkdir -p release
+# the core first: in a fresh build directory the families' hot-function
+# lists (tools/hot_sections.py) would ask for its objects before they exist
+BUILD_DIR=build-release CONSOLE=uart ./build.sh ecat_core
 BUILD_DIR=build-release CONSOLE=uart ./build.sh $(for f in $FAMILIES; do printf 'frank-ecat-%s ' "$f"; done)
 for f in $FAMILIES; do
     cp "build-release/frank-ecat-$f.uf2" "release/m2p2_frank-ecat-${f}_${VERSION}.uf2"
