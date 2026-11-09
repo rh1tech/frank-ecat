@@ -83,6 +83,10 @@ private:
     uint64_t m_char_ticks = 0;
     bool m_tx_busy = false;
     bool m_tx_hold = false;             // символ ждёт разрешения на ~cts
+#ifdef ECAT_EMBEDDED
+    bool m_cts_credit = true;           // the receiver was free after the last byte (tx_blocked())
+    uint64_t m_credit_wait = 0;         // clocks held for it
+#endif
     int64_t m_tx_left = 0;
     int64_t m_rx_left = 0;
 

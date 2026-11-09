@@ -13,7 +13,7 @@ Work in progress. Running now with sound over HDMI, at full speed unless noted (
 | Firmware | Machines | Load at full speed |
 |---|---|---|
 | `frank-ecat-rk86` | Радио-86РК, Спектр-001, Микроша, Апогей БК-01Ц | 41-48% of a core |
-| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 75-80% (4.1-4.4 of 5.5 MHz, the КЦГД's processor on the table timing): not yet |
+| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 90% (4.9 of 5.5 MHz, a fast mode: the table timing, double batches; RT-11 boots) |
 | `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | 51-88% |
 | `frank-ecat-orion` | Орион-128 (М1, М3 with disks, Z80 Card II) | ~52% (М1, М3), 84% (Z80 Card II at 5 MHz) |
 | `frank-ecat-irisha` | Ириша (ГМД-70, КНГМД), Диалог, Каспий | 62-75% |

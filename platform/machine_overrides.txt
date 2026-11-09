@@ -8,6 +8,12 @@
 # ДВК-4 at 3.3 of 5.5 MHz; with the table it is 4.6. The terminal draws at its
 # table speed, the ДВК itself keeps its own timing
 dvk/DVK-4.cfg  kcgd-cpu  timing  legacy
+# ... and the ДВК's own ВМ3 on the table timing, the batches of all three
+# processors twice the 16 us: 4.4 -> 4.9 of 5.5 MHz, RT-11 boots
+dvk/DVK-4.cfg  cpu  timing  legacy
+dvk/DVK-4.cfg  cpu  batch_scale  2
+dvk/DVK-4.cfg  kcgd-cpu  batch_scale  2
+dvk/DVK-4.cfg  kmd-cpu  batch_scale  2
 
 # The УК-НЦ in a fast mode: both ВМ2 on the table timing, the memory waits
 # of the CPU's and the PPU's RAM and of the PPU's bus off. With the chip's bus

@@ -22,6 +22,7 @@
 #define CALLBACK_IAKO   2
 #define CALLBACK_INIT   3
 #define CALLBACK_RXD    4
+#define CALLBACK_CTS    5
 
 // Посылок на символ: старт, восемь данных и стоп
 #define BITS_PER_CHAR   10
@@ -38,7 +39,7 @@ DL11::DL11(InterfaceManager *im, EmulatorConfigDevice *cd):
     , i_txd(this, im, 8, "txd", MODE_W)
     , i_rxd(this, im, 8, "rxd", MODE_R, CALLBACK_RXD)
     , i_rx_free(this, im, 1, "rx_free", MODE_W)
-    , i_cts(this, im, 1, "cts", MODE_R)
+    , i_cts(this, im, 1, "cts", MODE_R, CALLBACK_CTS)
 {
     m_clocked = true;   // clock() переопределён
     can_read = true;
@@ -75,6 +76,9 @@ emulator::Result DL11::load_config(SystemData *sd)
 // проверяет это сразу после команды RESET
 void DL11::init_registers()
 {
+#ifdef ECAT_EMBEDDED
+    m_cts_credit = true;
+#endif
     m_rcsr = 0;
     m_rbuf = 0;
     m_xcsr = CSR_DONE;
@@ -101,6 +105,12 @@ void DL11::update_rx_free()
 // подключена)
 bool DL11::tx_blocked()
 {
+#ifdef ECAT_EMBEDDED
+    //After a byte sent, until the receiver has been seen free again: on two
+    //cores its "busy" comes a quantum late, and the next byte overran it (the
+    //ДВК-4's КЦГД lost characters of every line)
+    if (i_cts.linked > 0 && !m_cts_credit) return true;
+#endif
     return i_cts.linked > 0 && (i_cts.value & 1) == 0;
 }
 
@@ -137,6 +147,10 @@ void DL11::transmit_done()
     m_tx_busy = false;
     m_sent++;
     put(b);
+#ifdef ECAT_EMBEDDED
+    m_cts_credit = false;
+    m_credit_wait = 0;
+#endif
 
     // Петля (разряд 2) и заглушка на разъёме возвращают байт в свой приёмник
     if ((m_xcsr & XCSR_MAINT) || m_plug)
@@ -172,6 +186,13 @@ void DL11::clock(unsigned int counter)
 {
     if (m_tx_busy) {
         if (m_tx_hold) {
+#ifdef ECAT_EMBEDDED
+            //A receiver that never says it was busy: free after four characters
+            if (!m_cts_credit) {
+                m_credit_wait += counter;
+                if (m_credit_wait >= 4 * m_char_ticks) m_cts_credit = true;
+            }
+#endif
             if (!tx_blocked()) m_tx_hold = false;
         } else {
             m_tx_left -= counter;
@@ -215,6 +236,13 @@ void DL11::interface_callback(unsigned int callback_id, unsigned int new_value, 
         // переполнение, как на настоящей линии. Очередь - только для
         // сценария и порта хоста, которые ждут готовности приёмника
         receive((uint8_t)(new_value & 0xFF));
+        return;
+    }
+    if (callback_id == CALLBACK_CTS) {
+#ifdef ECAT_EMBEDDED
+        //The receiver free again (after taking the byte): the next may go
+        if ((new_value & 1) && !(old_value & 1)) m_cts_credit = true;
+#endif
         return;
     }
     if (callback_id == CALLBACK_INIT) {
