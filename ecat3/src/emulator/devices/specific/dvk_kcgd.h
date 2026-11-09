@@ -153,6 +153,22 @@ public:
 
     // Для развёртки (поток отрисовки читает без блокировки, как все дисплеи)
     uint32_t vram(unsigned index) const { return m_vram[index & (VRAM_WORDS - 1)]; }
+#ifdef ECAT_EMBEDDED
+    //Writes to the video memory so far, and the count at the last write to
+    //each chunk of 64 words: a line the display drew after the last write to
+    //every chunk it covers is on the surface as it is
+    uint64_t m_vram_writes = 1;
+    std::vector<uint64_t> m_chunk_written;
+    uint64_t written_since(unsigned from, unsigned words) const
+    {
+        uint64_t m = 0;
+        for (unsigned c = from >> 6; c <= ((from + words - 1) >> 6); c++) {
+            const uint64_t w = m_chunk_written[c & ((VRAM_WORDS >> 6) - 1)];
+            if (w > m) m = w;
+        }
+        return m;
+    }
+#endif
     // В ЦАП идут шесть разрядов из восьми, что хранят две КР1802ИР1
     unsigned palette(unsigned index) const { return m_palette[index & 15] & 077; }
     bool page() const { return (m_csr & 1) != 0; }
@@ -200,6 +216,14 @@ private:
     unsigned int m_half = 0;            // его полукадр
     unsigned int m_drawn = 0;           // его строк уже на поверхности
     unsigned int m_surface_lines = 0;   // строк в поверхности отрисовщика
+#ifdef ECAT_EMBEDDED
+    // frank-ecat: a hash of what each surface line was drawn from (its words,
+    // its address, the palette); a line that hashes the same is not drawn
+    // again. 0: not drawn
+    uint32_t m_line_hash[480] = {};
+    uint64_t m_line_writes[480] = {};   // KCGD::m_vram_writes when it was drawn, + 1
+    uint32_t m_line_key[480] = {};      // its address and palette
+#endif
 
     void follow_scan();
     void render_line(unsigned v, unsigned half);

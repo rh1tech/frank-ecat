@@ -49,6 +49,9 @@ KCGD::KCGD(InterfaceManager *im, EmulatorConfigDevice *cd):
     can_write = true;
     addresable_size = 0200000;
     m_vram.assign(VRAM_WORDS, 0);
+#ifdef ECAT_EMBEDDED
+    m_chunk_written.assign(VRAM_WORDS >> 6, 1);
+#endif
 }
 
 emulator::Result KCGD::load_config(SystemData *sd)
@@ -248,6 +251,9 @@ void KCGD::reset(bool cold)
     AddressableDevice::reset(cold);
     if (cold) {
         std::fill(m_vram.begin(), m_vram.end(), 0);
+#ifdef ECAT_EMBEDDED
+        std::fill(m_chunk_written.begin(), m_chunk_written.end(), ++m_vram_writes);
+#endif
         for (unsigned i = 0; i < 16; i++) m_palette[i] = 0;
         m_ra = 0;
         m_control = 0;
@@ -337,6 +343,9 @@ void KCGD::write_vram(unsigned index, unsigned value, unsigned mask)
     uint32_t &w = m_vram[index & (VRAM_WORDS - 1)];
     w = (w & ~mask & 0xFFFF) | (value & mask);
     if (m_control & CTRL_LORES) w |= HIRES_BIT;
+#ifdef ECAT_EMBEDDED
+    m_chunk_written[(index & (VRAM_WORDS - 1)) >> 6] = ++m_vram_writes;
+#endif
 }
 
 unsigned int KCGD::get_value_word(unsigned int address)
@@ -520,6 +529,9 @@ emulator::Result KCGD::load_state(const StateReader &r)
         for (unsigned i = 0; i < VRAM_WORDS; i++)
             m_vram[i] = lo[i * 2] | (lo[i * 2 + 1] << 8) | (((hi[i >> 3] >> (i & 7)) & 1) ? HIRES_BIT : 0);
     }
+#ifdef ECAT_EMBEDDED
+    std::fill(m_chunk_written.begin(), m_chunk_written.end(), ++m_vram_writes);
+#endif
     r.u("ra", m_ra);
     r.u("out", m_out);
     m_control = m_out & 0xFF;
@@ -793,6 +805,9 @@ void KCGDDisplay::load_font() const
 void KCGDDisplay::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    for (unsigned y = 0; y < 480; y++) m_line_hash[y] = 0;
+#endif
     uint8_t table[64][3];
     for (unsigned v = 0; v < 64; v++)
         for (unsigned ch = 0; ch < 3; ch++)
@@ -866,6 +881,23 @@ void KCGDDisplay::render_line(unsigned v, unsigned half)
     const unsigned y = interlace ? 2 * v + (half & 1) : v;
     uint32_t pal[16];
     for (unsigned i = 0; i < 16; i++) pal[i] = m_colors[m_kcgd->palette(i)];
+#ifdef ECAT_EMBEDDED
+    if (y < 480) {
+        const unsigned row = interlace ? y : 2 * v;
+        const unsigned a = line_address(row);
+        uint32_t key = 2166136261u ^ a ^ (interlace ? 0x80000000u : 0);
+        for (unsigned i = 0; i < 16; i++) key = (key ^ pal[i]) * 16777619u;
+        //Drawn from the same address and palette after the last write to its words
+        if (m_line_hash[y] != 0 && m_line_key[y] == key
+            && m_kcgd->written_since(a, KCGD_LINE_WORDS) < m_line_writes[y]) {
+            screen_valid = true;
+            return;
+        }
+        m_line_key[y] = key;
+        m_line_writes[y] = m_kcgd->m_vram_writes + 1;
+        m_line_hash[y] = 1;
+    }
+#endif
     draw_row(reinterpret_cast<ecat_pixel_t*>(static_cast<uint8_t*>(render_pixels) + y * line_bytes),
              interlace ? y : 2 * v, pal);
     // Луч рисовал на этой поверхности: render_all() не должен рисовать её
@@ -889,6 +921,9 @@ unsigned KCGDDisplay::line_address(unsigned y) const
 void KCGDDisplay::render_all(MAYBE_UNUSED bool force_render)
 {
     if (!screen_valid && m_kcgd != nullptr && render_pixels != nullptr) {
+#ifdef ECAT_EMBEDDED
+        for (unsigned y = 0; y < 480; y++) m_line_hash[y] = 0;
+#endif
         uint32_t pal[16];
         for (unsigned i = 0; i < 16; i++) pal[i] = m_colors[m_kcgd->palette(i)];
         // По поверхности, а не по sy: пока окно не догнало смену режима,

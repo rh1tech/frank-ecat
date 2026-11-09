@@ -1101,13 +1101,15 @@ int main()
         /* A terminal with a processor of its own (the ДВК), the УК-НЦ's PPU: on the second core */
         ecat_core_num = core_num;
         ecat_time_us = time_us_64;
-        if (emu->set_parallel({"ie15-cpu", "ksm-cpu", "kcgd-cpu", "kmd-cpu", "ppu", "kngmd-cpu"})) {
+        /* The КМД's ВМ1 goes with the terminal, except beside the КЦГД: its
+         * ВМ2 at 7.7 MHz with the bus timing is a core's worth by itself (the
+         * ДВК-4's first core waited two thirds of the time) */
+        std::vector<std::string> second = {"ie15-cpu", "ksm-cpu", "kcgd-cpu", "ppu", "kngmd-cpu"};
+        if (emu->dm->get_device_by_name("kcgd-cpu", false) == nullptr) second.push_back("kmd-cpu");
+        if (emu->set_parallel(second)) {
             par_emu = emu;
             core1_renders = emu->display_on_core1();
-            /* (The КМД's own ВМ1 stays on core 0: on core 1 the HDMI line IRQ
-             * there came late during its disk transfers, and the scan-out
-             * stopped for good - not understood yet.)
-             * The ИЕ15 terminal is the heavier half: its core gets nothing else
+            /* The ИЕ15 terminal is the heavier half: its core gets nothing else
              * (the КСМ and КЦГД ones are lighter than the ДВК-3/4 main side) */
             if (emu->dm->get_device_by_name("ie15-cpu", false) != nullptr) hdmi_irq_to_core0();
         }

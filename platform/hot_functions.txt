@@ -102,7 +102,13 @@ DVKMX::clocks_to_batch_event
 DVKKGD::clock
 DWController::clock
 KCGD::clock
+KCGD::wait_states
 KCGDDisplay::clock
+KCGDDisplay::follow_scan
+KCGDDisplay::render_line
+KCGDDisplay::draw_row
+KCGDDisplay::line_address
+ROM::route
 @ all
 I8251::clock
 I8251::do_clock
