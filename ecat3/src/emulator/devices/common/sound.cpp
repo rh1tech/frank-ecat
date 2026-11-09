@@ -183,6 +183,9 @@ void GenericSound::init_sound(unsigned int clock_freq)
     m_burst_room = m_samples_per_buffer * 5 + m_sample_rate / 20;
     m_buffer.resize((max_target + m_burst_room) * m_channels);
     m_buffer_pos = 0;
+#ifdef ECAT_EMBEDDED
+    m_buffer_rd = 0;
+#endif
     m_rate_match.setup(m_sample_rate, (double)target, (double)max_target);
     m_rate_match.set_fixed(m_sample_rate * (double)m_latency_ms / 1000);
 
@@ -509,16 +512,30 @@ void GenericSound::store_frame(int16_t out, int16_t out_left)
     const size_t target = static_cast<size_t>(m_rate_match.target());
     if (m_buffer_pos >= (target + m_burst_room) * m_channels) {
         const size_t keep = target * m_channels;
+#ifdef ECAT_EMBEDDED
+        m_buffer_rd += m_buffer_pos - keep;
+#else
         std::copy(
             m_buffer.begin() + (m_buffer_pos - keep),
             m_buffer.begin() + m_buffer_pos,
             m_buffer.begin()
         );
+#endif
         m_buffer_pos = keep;
         m_overflows++;
     }
+#ifdef ECAT_EMBEDDED
+    if (m_buffer_rd + m_buffer_pos + m_channels > m_buffer.size()) {
+        std::copy(m_buffer.begin() + m_buffer_rd, m_buffer.begin() + m_buffer_rd + m_buffer_pos, m_buffer.begin());
+        m_buffer_rd = 0;
+    }
+    if (m_buffer_pos + m_channels > m_buffer.size()) return;
+    if (m_channels == 2) m_buffer[m_buffer_rd + m_buffer_pos++] = out_left;
+    m_buffer[m_buffer_rd + m_buffer_pos++] = out;
+#else
     if (m_channels == 2) m_buffer[m_buffer_pos++] = out_left;
     m_buffer[m_buffer_pos++] = out;
+#endif
 }
 
 void GenericSound::audio_callback(void* userdata, uint8_t* stream, int len)
@@ -545,12 +562,17 @@ void GenericSound::handle_audio_callback(uint8_t* stream, int len)
 
     if (m_buffer_pos >= samples_requested
         && !m_rate_match.filling((double)(m_buffer_pos / m_channels), (double)frames_requested)) {
+#ifdef ECAT_EMBEDDED
+        std::copy_n(m_buffer.data() + m_buffer_rd, samples_requested, dst);
+        m_buffer_rd += samples_requested;
+#else
         std::copy_n(m_buffer.data(), samples_requested, dst);
         std::copy(
             m_buffer.begin() + samples_requested,
             m_buffer.begin() + m_buffer_pos,
             m_buffer.begin()
         );
+#endif
         m_buffer_pos -= samples_requested;
         for (unsigned int c = 0; c < m_channels; c++)
             m_last_played[c] = dst[samples_requested - m_channels + c];
@@ -559,7 +581,11 @@ void GenericSound::handle_audio_callback(uint8_t* stream, int len)
         m_rate_match.measure(level, (double)frames_requested);
         const size_t surplus = static_cast<size_t>(m_rate_match.surplus(level, (double)frames_requested)) * m_channels;
         if (surplus > 0) {
+#ifdef ECAT_EMBEDDED
+            m_buffer_rd += surplus;
+#else
             std::copy(m_buffer.begin() + surplus, m_buffer.begin() + m_buffer_pos, m_buffer.begin());
+#endif
             m_buffer_pos -= surplus;
             m_overflows++;
         }

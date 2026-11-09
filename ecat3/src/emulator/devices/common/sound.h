@@ -105,6 +105,13 @@ private:
     // Data buffer
     std::vector<int16_t> m_buffer;
     size_t m_buffer_pos = 0;
+#ifdef ECAT_EMBEDDED
+    //The samples are at [m_buffer_rd, m_buffer_rd + m_buffer_pos): a period
+    //taken moves the start instead of the rest of the buffer (moving a
+    //hundred milliseconds of sound down 125 times a second was 5% of a core),
+    //and they go down to the beginning only when the end is reached
+    size_t m_buffer_rd = 0;
+#endif
     mutable compat_mutex m_buffer_mutex;
 
     // What the buffer holds is heard that much later, so it is kept near a

@@ -2067,7 +2067,7 @@ void Emulator::timer_proc(uint64_t time_ticks)
                 unsigned int budget = dm->clocks_to_event(d.cpu);
                 const unsigned int be = dm->cycles_to_batch_event(0);
                 if (be < budget) budget = be;
-                const unsigned int batch_max = dm->batch_ok(0) ? batch_max_cycles(0) : 1;
+                const unsigned int batch_max = dm->batch_ok(0) ? batch_max_cycles(0) * d.cpu->m_batch_scale : 1;
                 if (budget > batch_max) budget = batch_max;
                 if (script) {
                     const uint64_t wake = script->next_wake(clock_counter);
