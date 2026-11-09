@@ -51,3 +51,9 @@ uknc/UKNC-basic.ext  ppu-mapper  wait  -
 uknc/UKNC-basic.ext  display  frame_skip  1
 uknc/UKNC-basic.ext  cpu  batch_scale  2
 uknc/UKNC-basic.ext  ppu  batch_scale  2
+
+# Поиск-1: batches twice the 16 us (MS-DOS 5.00 MHz at 91% busy, from 96%)
+poisk/Poisk-1.cfg  cpu  batch_scale  2
+poisk/Poisk-1-128k.ext  cpu  batch_scale  2
+poisk/Poisk-1-cart-ram.ext  cpu  batch_scale  2
+poisk/Poisk-1-fdd302.ext  cpu  batch_scale  2
