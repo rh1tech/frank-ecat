@@ -22,9 +22,10 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | `frank-ecat-bk` | БК0010, БК0010-01 and БК0011М, each plain, with the КНГМД, А16М, СМК-512; БК0011М МСТД | 70-94% |
 | `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores: 25-40% (2.0-3.1 of 8 MHz): not yet |
 | `frank-ecat-e85` | Электроника МС 0585, with МС 1702, with the hard disk | both cores (the КНГМД's 8051 on the second): 100% at the ПРОС prompt (73% busy), 65-85% while loading |
+| `frank-ecat-poisk` | Поиск-1, 128 КБ, with the cartridge RAM, with the КНГМД 302 | 98-100% (MS-DOS 5 and Volkov Commander from the disk) |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`
-(`agat`, `radio-86rk`, `orion-128`, `irisha`, `unior`, `pravetz`, `bk`, ...), where the file browser (F11) opens.
+(`agat`, `radio-86rk`, `orion-128`, `irisha`, `unior`, `pravetz`, `bk`, `uknc`, `e85`, `poisk`, ...), where the file browser (F11) opens.
 
 ## Layout
 

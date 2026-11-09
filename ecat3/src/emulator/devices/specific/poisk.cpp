@@ -179,6 +179,14 @@ void PoiskDisplay::clock(unsigned int counter)
     update_sync();
 }
 
+#ifdef ECAT_EMBEDDED
+unsigned int PoiskDisplay::clocks_to_batch_event() const
+{
+    const unsigned x = m_pos % LINE_CLOCKS;
+    return (x < PICTURE_CLOCKS) ? PICTURE_CLOCKS - x : LINE_CLOCKS - x;
+}
+#endif
+
 //The processor runs a memory cycle offset clocks after the point the display
 //has been clocked to. With the beam inside the picture, slots of the RAM go
 //by every wait_period clocks from the start of the line and the video owns the
@@ -188,6 +196,9 @@ unsigned int PoiskDisplay::wait_states(MAYBE_UNUSED unsigned int address, MAYBE_
 {
     if (m_wait_busy == 0) return 0;
     unsigned p = m_pos + offset;
+#ifdef ECAT_EMBEDDED
+    p += im->dm->pending_of(m_domain);
+#endif
     if (p >= FRAME_CLOCKS) p %= FRAME_CLOCKS;
     const unsigned line = p / LINE_CLOCKS;
     if (!m_wait_blank && line >= PICTURE_LINES) return 0;

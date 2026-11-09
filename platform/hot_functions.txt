@@ -292,3 +292,20 @@ E85Kngmd::clock
 E85Comm::clock
 Am9519::*
 i8051::*
+
+@ poisk
+# Поиск-1: the 8088 and the CGA-like display
+i8086core::*
+i8086::*
+I8086Core::*
+PoiskDisplay::clock
+PoiskDisplay::wait_states
+PoiskDisplay::render_line
+PoiskDisplay::render_line_unlocked
+PoiskDisplay::update_sync
+PoiskDisplay::clocks_to_batch_event
+PoiskVram::*
+PoiskTrap::*
+I8259::*
+@ all
+I8253::clocks_to_batch_event

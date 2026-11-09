@@ -49,6 +49,11 @@ private:
 public:
 #ifdef ECAT_EMBEDDED
     bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
+    //A batch ends where a channel counts out: its output moves (an interrupt,
+    //a gate, a sound edge), and Count() drops the clocks past the end of a
+    //step that runs over it
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
 #endif
     I8253(InterfaceManager *im, EmulatorConfigDevice *cd);
 

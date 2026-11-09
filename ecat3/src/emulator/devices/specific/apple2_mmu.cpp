@@ -302,7 +302,7 @@ AddressableDevice * Apple2MMU::card_device(unsigned page, MAYBE_UNUSED bool writ
 {
     AddressableDevice * d = page_device(page);
 #ifdef ECAT_EMBEDDED
-    if (d->m_sync_on_access) {
+    if (write ? d->m_sync_on_write : d->m_sync_on_access) {
         im->dm->sync_pending();
         if (write) im->dm->m_batch_cut = true;
     }

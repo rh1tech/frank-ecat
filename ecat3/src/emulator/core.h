@@ -402,6 +402,8 @@ public:
     //up to date first, when Emulator::timer_proc() clocks them a batch of
     //instructions at a time (MemoryMapper, DeviceManager::sync_pending())
     bool m_sync_on_access = false;
+    //The same for a write (timeless_write())
+    bool m_sync_on_write = false;
     //The core whose emulation owns this device: 1 for a processor run on the
     //second core and what belongs to it (Emulator::set_parallel())
     uint8_t m_core = 0;
@@ -413,6 +415,10 @@ public:
     //processor reaches (a port fed by the tape, the FDC) is brought up to date
     //before an access
     virtual bool timeless_access() const { return false; }
+    //A write the same as a read, unless the device says otherwise: a port
+    //whose outputs drive a clocked device (an i8255 setting a display's mode)
+    //has it act after the devices are up to date, as a read need not
+    virtual bool timeless_write() const { return timeless_access(); }
     //Its clock() may be given a batch of instructions' cycles at once and end
     //up where the same cycles one instruction at a time would have taken it,
     //given that every access to it is preceded by a clock() of what is owed.

@@ -171,6 +171,28 @@ void I8253::Count(const unsigned int A, const unsigned int Increment)
     };
 }
 
+#ifdef ECAT_EMBEDDED
+unsigned int I8253::clocks_to_batch_event() const
+{
+    unsigned int r = UINT_MAX;
+    for (unsigned int A = 0; A < 3; A++) {
+        if (ext_clock_mask & (1u << A)) continue;
+        if (Loaded[A] != 1) continue;
+        if (NeedRestart[A] == 1) return 1;
+        if (Counting[A] != 1) continue;
+        const unsigned int dec = (I8253_MODES[COUNTER_LOAD_DEC_VALUE][Modes[A]] == 1) ? 2 : 1;
+        unsigned int ctr = Counters[A*2] + Counters[A*2+1] * 256u;
+        if (ctr == 0) ctr = 65536;
+        uint64_t n = (ctr + dec - 1) / dec;             //steps to the end
+        if (per_channel_clock && ch_clock_multiplier[A] != ch_clock_divider[A] && ch_clock_multiplier[A] != 0)
+            n = (n * ch_clock_divider[A] + ch_clock_multiplier[A] - 1) / ch_clock_multiplier[A];
+        if (n == 0) n = 1;
+        if (n < r) r = (unsigned int)n;
+    }
+    return r;
+}
+#endif
+
 void I8253::Reload(unsigned int A)
 {
     Counters[A*2] = StartData[A*2];

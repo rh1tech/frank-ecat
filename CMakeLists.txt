@@ -337,3 +337,9 @@ ecat_add_firmware(e85 VIDEO_MODE 28 REFRESH 5001 SURFACE 1024 256 MACHINES
     e85/MS0585.cfg
     e85/MS0585-1702.ext
     e85/MS0585-NMD.ext)
+
+ecat_add_firmware(poisk VIDEO_MODE 28 REFRESH 5001 SURFACE 640 200 MACHINES
+    poisk/Poisk-1.cfg
+    poisk/Poisk-1-128k.ext
+    poisk/Poisk-1-cart-ram.ext
+    poisk/Poisk-1-fdd302.ext)

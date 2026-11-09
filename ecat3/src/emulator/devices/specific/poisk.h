@@ -78,6 +78,14 @@ public:
     void reset(bool cold) override;
     void set_renderer(VideoRenderer &vr) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //The sync lines change where the picture part of a line ends and where
+    //the line does (a program polls them through the ВВ55): batches end there.
+    //wait_states() adds the clocks still owed (DeviceManager::pending_of())
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override;
+#endif
     //Reports the end of each frame itself, see GenericDisplay::own_frames()
     bool own_frames() const override { return true; }
     void get_screen_constraints(unsigned int * sx, unsigned int * sy) override;
@@ -184,6 +192,12 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the motor's one-shot runs out
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { return m_motor_left ? (unsigned int)m_motor_left : UINT_MAX; }
+#endif
     unsigned int get_value(unsigned int address) override;
     unsigned get_direct(unsigned address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;

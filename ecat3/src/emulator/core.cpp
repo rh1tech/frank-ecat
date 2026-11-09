@@ -354,6 +354,7 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
         ComputerDevice * d = devices[i].device.get();
 #ifdef ECAT_EMBEDDED
         d->m_sync_on_access = !d->timeless_access();
+        d->m_sync_on_write = !d->timeless_write();
 #endif
         if (d->belongs_to_class("cpu")) continue;
         if (!d->is_clocked()) continue;
@@ -3016,7 +3017,7 @@ AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int *
 #define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); } } while (0)
 //A write may start what the devices' next event did not know of (a DMA
 //transfer, a timer reloaded): the batch ends with this instruction
-#define ECAT_SYNC_FOR_W(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); im->dm->m_batch_cut = true; } } while (0)
+#define ECAT_SYNC_FOR_W(dev) do { if ((dev)->m_sync_on_write) { (dev)->m_syncs++; im->dm->sync_pending(); im->dm->m_batch_cut = true; } } while (0)
 #else
 #define ECAT_SYNC_FOR(dev) do { } while (0)
 #define ECAT_SYNC_FOR_W(dev) do { } while (0)
