@@ -158,14 +158,17 @@ target_link_libraries(ecat_ui PUBLIC ecat_platform)
 
 # memmap_ecat.ld INCLUDEs ecat_hot.ld (the functions that run from SRAM):
 # empty until the emulator core is built, see ecat_hot below
-if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.ld)
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.ld "/* no hot functions */\n")
+# (in a directory of its own: ld looks in the current one before -L, and a
+# family's own list, hot-<family>/, must be found first)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hot-all)
+if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/hot-all/ecat_hot.ld)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/hot-all/ecat_hot.ld "/* no hot functions */\n")
 endif()
 
 function(ecat_firmware_setup target)
     pico_set_linker_script(${target} ${CMAKE_CURRENT_SOURCE_DIR}/memmap_ecat.ld)
     set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/memmap_ecat.ld)
-    target_link_options(${target} PRIVATE -L${CMAKE_CURRENT_BINARY_DIR}
+    target_link_options(${target} PRIVATE -L${CMAKE_CURRENT_BINARY_DIR}/hot-all
         -Wl,--wrap=panic -Wl,--wrap=__cxa_throw -Wl,--wrap=__cxa_allocate_exception -Wl,--print-memory-usage -Wl,--no-enum-size-warning)
     target_compile_definitions(${target} PRIVATE PICO_MALLOC_PANIC=0)
     if(DEBUG_CONSOLE STREQUAL "usb")
@@ -189,7 +192,7 @@ add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.stamp
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/hot_sections.py
             ${CMAKE_CURRENT_SOURCE_DIR}/platform/hot_functions.txt
-            ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.ld ${CMAKE_NM} $<TARGET_OBJECTS:ecat_core>
+            ${CMAKE_CURRENT_BINARY_DIR}/hot-all/ecat_hot.ld ${CMAKE_NM} $<TARGET_OBJECTS:ecat_core>
     COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.stamp
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/platform/hot_functions.txt
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/hot_sections.py $<TARGET_OBJECTS:ecat_core>
@@ -246,9 +249,27 @@ function(ecat_add_firmware family)
         ECAT_VIDEO_MODE=${F_VIDEO_MODE} ECAT_REFRESH=${F_REFRESH} ECAT_FAMILY="${family}"
         ECAT_SURFACE_W=${surface_w} ECAT_SURFACE_H=${surface_h})
     target_link_libraries(${target} ecat_ui ecat_platform ecat_core)
+    # The family's own hot functions (an ecat_hot.ld found before the shared one)
+    set(hot_dir ${CMAKE_CURRENT_BINARY_DIR}/hot-${family})
+    file(MAKE_DIRECTORY ${hot_dir})
+    if(NOT EXISTS ${hot_dir}/ecat_hot.ld)
+        file(WRITE ${hot_dir}/ecat_hot.ld "/* no hot functions */\n")
+    endif()
+    add_custom_command(
+        OUTPUT ${hot_dir}/ecat_hot.stamp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/hot_sections.py --family ${family}
+                ${CMAKE_CURRENT_SOURCE_DIR}/platform/hot_functions.txt
+                ${hot_dir}/ecat_hot.ld ${CMAKE_NM} $<TARGET_OBJECTS:ecat_core>
+        COMMAND ${CMAKE_COMMAND} -E touch ${hot_dir}/ecat_hot.stamp
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/platform/hot_functions.txt
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/hot_sections.py $<TARGET_OBJECTS:ecat_core>
+        COMMAND_EXPAND_LISTS
+        COMMENT "Listing the ${family} hot functions for SRAM")
+    add_custom_target(ecat_hot_${family} DEPENDS ${hot_dir}/ecat_hot.stamp)
+    target_link_options(${target} PRIVATE -L${hot_dir})
     ecat_firmware_setup(${target})
-    add_dependencies(${target} ecat_hot)
-    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ecat_hot.stamp)
+    add_dependencies(${target} ecat_hot_${family})
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${hot_dir}/ecat_hot.stamp)
 endfunction()
 
 ecat_add_firmware(rk86 VIDEO_MODE 28 REFRESH 5001 SURFACE 480 300 MACHINES
@@ -311,3 +332,8 @@ ecat_add_firmware(uknc VIDEO_MODE 28 REFRESH 5001 SURFACE 640 288 MACHINES
     uknc/UKNC.cfg
     uknc/UKNC-031.ext
     uknc/UKNC-basic.ext)
+
+ecat_add_firmware(e85 VIDEO_MODE 28 REFRESH 5001 SURFACE 1024 256 MACHINES
+    e85/MS0585.cfg
+    e85/MS0585-1702.ext
+    e85/MS0585-NMD.ext)

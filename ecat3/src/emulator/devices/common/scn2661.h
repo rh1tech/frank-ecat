@@ -68,6 +68,19 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends at the receiver's and the transmitter's next step
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { int64_t r = INT64_MAX;
+        if (m_rx_wait > 0) r = m_rx_wait;
+        if (m_line_left > 0) { if (m_line_left < r) r = m_line_left; }
+        else if ((m_command & 0004) && !(m_status & 0002) && (m_command & 0300) != 0200)
+            r = 1;      //CMD_RXEN, no ST_RXRDY, not the short loop: the receiver looks
+        if (m_tsr_busy && m_tx_left < r) r = m_tx_left;
+        if (r == INT64_MAX) return UINT_MAX;
+        return r <= 1 ? 1u : (r > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned)r); }
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     unsigned int get_value(unsigned int address) override;

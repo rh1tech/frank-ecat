@@ -5,23 +5,37 @@
 # Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Usage: hot_sections.py LIST OUT.ld NM OBJECT...
+# Usage: hot_sections.py [--family F] LIST OUT.ld NM OBJECT...
 # LIST: demangled names (platform/hot_functions.txt), or a prefix and '*'. OUT.ld gets one input
 # section line per matching function (-ffunction-sections: .text.<mangled>),
-# included by memmap_ecat.ld inside its .ram_hot output section.
+# included by memmap_ecat.ld inside its .ram_hot output section. A line
+# "@ family ..." scopes the names after it ("@ all": every firmware); with
+# --family only the names scoped to that family (or all) are taken.
 
 import subprocess
 import sys
 
 
 def main():
-    lst, out, nm = sys.argv[1], sys.argv[2], sys.argv[3]
-    objs = sys.argv[4:]
+    args = sys.argv[1:]
+    family = None
+    if args and args[0] == '--family':
+        family = args[1]
+        args = args[2:]
+    lst, out, nm = args[0], args[1], args[2]
+    objs = args[3:]
     wanted = []
+    scope = ['all']
     for line in open(lst, encoding='utf-8'):
         line = line.split('#', 1)[0].strip()
-        if line:
-            wanted.append(line)
+        if not line:
+            continue
+        if line.startswith('@'):
+            scope = line[1:].split()
+            continue
+        if family is None or 'all' in scope or family in scope:
+            if line not in wanted:
+                wanted.append(line)
     found = {}
     for o in objs:
         r = subprocess.run([nm, '--defined-only', o], capture_output=True, text=True)

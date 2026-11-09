@@ -7,6 +7,11 @@
 # Flash goes through the 16 KB XIP cache, shared with PSRAM, and a miss is a
 # QSPI transfer, so a hot function in flash costs more than its instructions.
 
+# A line "@ family ..." scopes the entries after it to those firmwares
+# (CMakeLists.txt: ecat_add_firmware's name; "@ all" for every one): SRAM is
+# short, and a family that never runs a function should not carry it there.
+
+@ all
 # the loop
 Emulator::timer_proc
 Emulator::run_partition
@@ -42,6 +47,7 @@ ROM::get_value
 Interface::change
 Interface::changed
 
+@ agat pravetz
 # 6502 (Агат, Правец): the instruction functions, all of them by prefix
 mos6502core::execute
 mos6502core::get_address
@@ -53,12 +59,14 @@ mos6502Core::write_mem
 mos6502::read_mem
 mos6502::write_mem
 
+@ dvk bk uknc e85
 # ДВК: the PDP-11 processors and the ИЕ15 terminal (its own processor, its display)
 pdp11core::*
 K1801VM1Core::*
 k1801vm1::*
 K1801VM2Core::*
 k1801vm2::*
+@ dvk
 IE15CPU::execute
 IE15CPU::execute_one
 IE15CPU::skip
@@ -81,8 +89,11 @@ IE15Display::draw_line
 KSMDisplay::render_row
 KSMDisplay::render_all
 DVKMX::clock
+@ bk
 BKFDC::clock
+@ dvk e85
 MS7004::clock
+@ dvk
 pdp11core::execute_misc
 MemoryMapper::port_device
 DVKPanel::clock
@@ -92,20 +103,26 @@ DVKKGD::clock
 DWController::clock
 KCGD::clock
 KCGDDisplay::clock
+@ all
 I8251::clock
 I8251::do_clock
+@ bk
 BKTimer::clock
+@ dvk bk uknc e85
 DL11::clock
 DL11::get_value_word
 DL11::set_value_word
+@ all
 MemoryMapper::read_port
 MemoryMapper::write_port
+@ dvk bk uknc e85
 MemoryMapper::read_word
 MemoryMapper::write_word
 MemoryMapper::map
 AddressableDevice::get_value_word
 AddressableDevice::set_value_word
 
+@ orion unior
 # Z80 (Орион-128 Z80 Card II)
 z80core::*
 z80::execute
@@ -121,6 +138,7 @@ Generator::clocks_to_batch_event
 PageMapper::get_value
 PageMapper::set_value
 
+@ rk86 orion irisha unior
 # 8080
 i8080core::execute
 i8080::read_mem
@@ -133,8 +151,12 @@ I8080Core::read_port
 I8080Core::write_port
 i8080::execute
 
+@ agat
 # raster displays (Агат)
+@ all
 RasterDisplay::clock
+@ agat
+@ agat
 Agat7Display::clock
 Agat7Display::HSYNC
 Agat7Display::VSYNC
@@ -151,6 +173,7 @@ Agat9Mapper::do_access
 Agat9Mapper::get_value
 Agat9Mapper::set_value
 Agat9Mapper::build_pages
+@ all
 Memory::get_direct
 PageMapper::get_value
 PageMapper::set_value
@@ -158,12 +181,14 @@ PortAddress::get_value
 PortAddress::set_value
 MemoryMapper::map_read
 
+@ all
 # sound
 GenericSound::clock
 GenericSound::push_frame
 GenericSound::store_frame
 Speaker::calc_sound_value
 
+@ all
 # ВГ75 / ВТ57 / ВВ55 / keyboard / tape
 I8275::clock
 I8275::dma_tick
@@ -178,6 +203,7 @@ ScanKeyboard::interface_callback
 ScanKeyboard::calculate_out
 TapeRecorder::clock
 
+@ rk86 orion irisha unior
 # ВИ53 / ВВ51 / byte tape: polled by the Юниор's and the Арго's tape loops
 I8253::clock
 I8253::Count
@@ -189,12 +215,14 @@ TapeRecorder::bytes_clock
 TapeRecorder::advance_unit
 TapeRecorder::clock_sound
 TapeRecorder::clocks_to_batch_event
+@ unior
 ArgoMemory::get_value
 ArgoMemory::set_value
 ArgoMemory::translate_cpu
 ArgoKeyboard::get_value
 ZXKeyboard::clock
 
+@ pravetz
 # Apple II / Правец
 Apple2Video::render_line_unlocked
 Apple2Video::same_line
@@ -219,6 +247,7 @@ mos6502core::*
 mos6502Core::*
 RasterDisplay::clock
 
+@ dvk bk uknc e85
 # БК: the 1801ВМ1 bus timing, the display
 Vm1BusTiming::*
 BKDisplay::render_bytes
@@ -227,10 +256,12 @@ BKDisplay::render_line_unlocked
 BKDisplay::HSYNC
 BKDisplay::control
 BKDisplay::quarter
+@ all
 MemoryMapper::fill_page
 MemoryMapper::fill_direct
 MemoryMapper::peek_read_device
 
+@ uknc
 # УК-НЦ
 UKNCDisplay::*
 UKNCRamTiming::*
@@ -242,6 +273,22 @@ UKNCGraphics::*
 PlanePair::*
 WaitMap::*
 IndirectMemory::*
+@ dvk bk uknc e85
 DL11::clocks_to_batch_event
 DL11::clock
 RasterDisplay::clocks_to_event
+
+@ e85
+# Э-85: the ПРОС devices clocked every batch
+SCN2661::clock
+SCN2661::clocks_to_batch_event
+MC146818::clock
+MC146818::tick
+MC146818::update_irq
+E85Display::*
+E85Video::clock
+E85Video::clocks_to_batch_event
+E85Kngmd::clock
+E85Comm::clock
+Am9519::*
+i8051::*

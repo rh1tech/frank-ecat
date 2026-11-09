@@ -45,6 +45,10 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //tick() takes any number of ticks; its interrupt a batch late at most
+    bool batch_safe() const override { return true; }
+#endif
 
     unsigned int get_value(unsigned int address) override;
     unsigned get_direct(unsigned address) override;

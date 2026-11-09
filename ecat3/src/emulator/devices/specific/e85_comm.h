@@ -60,6 +60,13 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the byte is sent
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { if (!m_shifting) return UINT_MAX;
+        return m_tx_left <= 1 ? 1u : (m_tx_left > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned)m_tx_left); }
+#endif
 
     unsigned int get_value(unsigned int address) override;
     unsigned get_direct(unsigned address) override;

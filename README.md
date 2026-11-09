@@ -21,6 +21,7 @@ Work in progress. Running now, at full speed with sound over HDMI:
 | `frank-ecat-pravetz` | Правец-82, -8М, -8А, -8А (full), -8С (Apple II), Правец-8Д (Oric) | 52-77% |
 | `frank-ecat-bk` | БК0010, БК0010-01 and БК0011М, each plain, with the КНГМД, А16М, СМК-512; БК0011М МСТД | 70-94% |
 | `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores: 25-40% (2.0-3.1 of 8 MHz): not yet |
+| `frank-ecat-e85` | Электроника МС 0585, with МС 1702, with the hard disk | both cores (the КНГМД's 8051 on the second): 100% at the ПРОС prompt (73% busy), 65-85% while loading |
 
 Disk and tape images go on the card under `/ecat/software/<machine type>/`
 (`agat`, `radio-86rk`, `orion-128`, `irisha`, `unior`, `pravetz`, `bk`, ...), where the file browser (F11) opens.
@@ -35,7 +36,7 @@ Disk and tape images go on the card under `/ecat/software/<machine type>/`
 | `platform/` | board bring-up, heap (SRAM + PSRAM), files (flash VFS + SD), sound (HDMI / I2S), the emulator frontend, the diag firmware |
 | `drivers/` | HDMI (pico-speccy, HSTX back-end), I2S, PSRAM, SD / FatFs, USB HID |
 | `tools/embed_vfs.py` | packs a family's machines into the flash VFS |
-| `tools/hot_sections.py`, `platform/hot_functions.txt` | the emulator functions that run from SRAM |
+| `tools/hot_sections.py`, `platform/hot_functions.txt` | the emulator functions that run from SRAM, per family (`@ family` lines) |
 
 ## Build
 

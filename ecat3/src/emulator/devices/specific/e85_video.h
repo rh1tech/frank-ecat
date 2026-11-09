@@ -76,6 +76,12 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends where the vector is ready (an interrupt)
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { return m_busy ? m_busy : UINT_MAX; }
+#endif
     void interface_callback(unsigned int callback_id, unsigned int new_value, unsigned int old_value) override;
 
     unsigned int route(unsigned int address, unsigned int mode) override;
@@ -156,6 +162,12 @@ public:
     void state_restored() override;
     void set_renderer(VideoRenderer &vr) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A batch ends at the end of the line (the frame interrupt comes at one)
+    bool batch_safe() const override { return true; }
+    bool has_batch_events() const override { return true; }
+    unsigned int clocks_to_batch_event() const override { return m_pos < m_line_clocks ? m_line_clocks - m_pos : 1u; }
+#endif
     bool own_frames() const override { return true; }
     bool native_frame_rate(uint64_t &num, uint64_t &den) override;
     void get_screen_constraints(unsigned int * sx, unsigned int * sy) override;
