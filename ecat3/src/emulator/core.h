@@ -891,6 +891,14 @@ protected:
 public:
     PortAddress(InterfaceManager *im, EmulatorConfigDevice *cd);
     emulator::Result load_config(SystemData *sd) override;
+#ifdef ECAT_EMBEDDED
+    //A read gives the value latched (a keyboard's code, polled in a loop) and
+    //does not bring the devices up to date, unless it stores the address read
+    //as a write does; a write does, without ending the batch
+    bool timeless_access() const override { return !store_on_read; }
+    bool timeless_write() const override { return false; }
+    bool write_ends_batch() const override { return false; }
+#endif
     unsigned int get_value(unsigned int address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;
     unsigned int get_value_word(unsigned int address) override;
