@@ -355,6 +355,7 @@ emulator::Result DeviceManager::load_devices_config(SystemData *sd)
 #ifdef ECAT_EMBEDDED
         d->m_sync_on_access = !d->timeless_access();
         d->m_sync_on_write = !d->timeless_write();
+        d->m_cut_on_write = d->m_sync_on_write && d->write_ends_batch();
 #endif
         if (d->belongs_to_class("cpu")) continue;
         if (!d->is_clocked()) continue;
@@ -2539,6 +2540,23 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
             //OR, and calls routing_changed() when the answers change. It is
             //asked at both ends of the page, both ways. One that takes a
             //single direction is left to map(), which skips it for the other
+#ifdef ECAT_EMBEDDED
+            //A read-only one that answers the whole page (a strict ROM): its
+            //reads are cached, a write takes the full scan (map() skips it)
+            if (mr->mode == MODE_R && mr->range_begin <= p_begin && mr->range_end >= p_end
+                && mr->address_mask == 0 && !mr->or_read && !mr->through) {
+                const unsigned int a0 = p_begin - mr->range_begin + mr->base;
+                const unsigned int a1 = p_end - mr->range_begin + mr->base;
+                if (mr->device->route(a0, MODE_R) == ROUTE_ANSWER && mr->device->route(a1, MODE_R) == ROUTE_ANSWER) {
+                    e->offset = e->offset_w = mr->base - mr->range_begin;
+                    e->device_r = mr->device;
+                    e->timeout_r = false;
+                    e->uncached_w = true;
+                    fill_direct(e);
+                    return e;
+                }
+            }
+#endif
             if (mr->range_begin > p_begin || mr->range_end < p_end || mr->address_mask != 0
                 || mr->mode != MODE_RW) {
                 e->uncached = true;
@@ -3017,7 +3035,7 @@ AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int *
 #define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); } } while (0)
 //A write may start what the devices' next event did not know of (a DMA
 //transfer, a timer reloaded): the batch ends with this instruction
-#define ECAT_SYNC_FOR_W(dev) do { if ((dev)->m_sync_on_write) { (dev)->m_syncs++; im->dm->sync_pending(); im->dm->m_batch_cut = true; } } while (0)
+#define ECAT_SYNC_FOR_W(dev) do { if ((dev)->m_sync_on_write) { (dev)->m_syncs++; im->dm->sync_pending(); if ((dev)->m_cut_on_write) im->dm->m_batch_cut = true; } } while (0)
 #else
 #define ECAT_SYNC_FOR(dev) do { } while (0)
 #define ECAT_SYNC_FOR_W(dev) do { } while (0)

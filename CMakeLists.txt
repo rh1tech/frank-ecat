@@ -233,8 +233,10 @@ function(ecat_add_firmware family)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_vfs.py
                 --deploy ${CMAKE_CURRENT_SOURCE_DIR}/ecat3/deploy
                 --headless ${ECAT_HOST_HEADLESS}
+                --overrides ${CMAKE_CURRENT_SOURCE_DIR}/platform/machine_overrides.txt
                 --out-dir ${vfs_dir} ${F_MACHINES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_vfs.py ${machine_files}
+                ${CMAKE_CURRENT_SOURCE_DIR}/platform/machine_overrides.txt
         COMMENT "Packing the ${family} machines into the flash VFS")
     add_executable(${target}
         platform/ecat_main.cpp

@@ -32,8 +32,6 @@ public:
     //and the devices wired to it - the tape, which ends a batch at every
     //instruction while it runs. A poll is not a reason to clock the others
     bool timeless_access() const override { return true; }
-    //A write moves the outputs: a display's mode, a timer's gate (the Поиск)
-    bool timeless_write() const override { return false; }
 #endif
     I8255(InterfaceManager *im, EmulatorConfigDevice *cd);
 

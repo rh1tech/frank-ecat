@@ -54,6 +54,9 @@ target_compile_definitions(ecat_core PUBLIC ECAT_EMBEDDED ECAT_SINGLE_THREAD FOR
 target_compile_options(ecat_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>
     -O2 -ffunction-sections -fdata-sections
+    # aligned: the interpreter loops swing by a tenth with where they land in
+    # SRAM (the ДВК-3 at 7.3 or 8.0 MHz for the same code)
+    -falign-functions=16 -falign-loops=8 -falign-jumps=4
     # objects may live in PSRAM, where LDREX/STREX never succeed: the atomics are
     # calls to platform/ecat_atomic.c (interrupts off, plain read-modify-write)
     -fno-inline-atomics

@@ -130,6 +130,10 @@ void IrishaDisplay::state_restored()
 void IrishaDisplay::memory_callback(unsigned int callback_id, unsigned int address)
 {
     // TODO: validate current page only
+#ifdef ECAT_EMBEDDED
+    if (address < m_dirty_lo) m_dirty_lo = address;
+    if (address > m_dirty_hi) m_dirty_hi = address;
+#endif
     screen_valid = false;
     was_updated = true;
 }
@@ -211,12 +215,18 @@ void IrishaDisplay::apply_ports()
         }
         screen_valid = false;
         was_updated = true;
+#ifdef ECAT_EMBEDDED
+        m_redraw_all = true;
+#endif
     }
 }
 
 void IrishaDisplay::set_renderer(VideoRenderer &vr)
 {
     GenericDisplay::set_renderer(vr);
+#ifdef ECAT_EMBEDDED
+    m_redraw_all = true;
+#endif
     vr.FillRGB(Irisha_Back_4, Irisha_RGBA4, 4);
     vr.FillRGB(Irisha_Color_8, Irisha_RGBA8, 8);
     vr.FillRGB(Irisha_Back_16, Irisha_RGBA16, 16);
@@ -234,6 +244,26 @@ void IrishaDisplay::render_all(const bool force_render)
         //touched the screen
         screen_valid = true;
         was_updated = true;
+#ifdef ECAT_EMBEDDED
+        //Only the bytes written since, of the page shown
+        if (!m_redraw_all && !force_render && (m_mode_index == 1 || m_mode_index == 2 || m_mode_index == 3)) {
+            const unsigned lo = m_dirty_lo, hi = m_dirty_hi;
+            m_dirty_lo = ~0u;
+            m_dirty_hi = 0;
+            if (lo > hi) return;
+            const unsigned from = (lo > m_base_address) ? lo - m_base_address : 0;
+            if (hi < m_base_address) return;
+            unsigned to = hi - m_base_address + 1;
+            if (to > m_page_size) to = m_page_size;
+            for (unsigned a = from; a < to; a++) {
+                if (m_mode_index == 2) render_color(a); else render_mono(a);
+            }
+            return;
+        }
+        m_redraw_all = false;
+        m_dirty_lo = ~0u;
+        m_dirty_hi = 0;
+#endif
         // Blank fields
         const auto buf = static_cast<ecat_pixel_t *>(render_pixels);
         const ecat_pixel_t black = Irisha_RGBA4[0];

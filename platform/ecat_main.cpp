@@ -1102,8 +1102,9 @@ int main()
         ecat_core_num = core_num;
         ecat_time_us = time_us_64;
         /* The КМД's ВМ1 goes with the terminal, except beside the КЦГД: its
-         * ВМ2 at 7.7 MHz with the bus timing is a core's worth by itself (the
-         * ДВК-4's first core waited two thirds of the time) */
+         * ВМ2 at 7.7 MHz is the heavier half even with the table timing (with
+         * the КМД as well the second core held the ДВК-4 at 3.9 MHz, without
+         * it 4.6) */
         std::vector<std::string> second = {"ie15-cpu", "ksm-cpu", "kcgd-cpu", "ppu", "kngmd-cpu"};
         if (emu->dm->get_device_by_name("kcgd-cpu", false) == nullptr) second.push_back("kmd-cpu");
         if (emu->set_parallel(second)) {

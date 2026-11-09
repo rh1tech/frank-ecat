@@ -19,6 +19,8 @@
 #   ecat.ini                     deploy/.ecat.ini, the shipped defaults
 # Output: vfs_data.S (the file bodies, .incbin) and vfs_table.c (the index),
 # and machines.txt (the configurations, in order, for the machine menu).
+# --overrides FILE: "MACHINE DEVICE PARAMETER VALUE" lines, a parameter of a
+# device set in the packed copy of that machine (platform/machine_overrides.txt)
 
 import argparse
 import os
@@ -38,6 +40,7 @@ def main():
     ap.add_argument('--deploy', required=True)
     ap.add_argument('--headless', required=True)
     ap.add_argument('--out-dir', required=True)
+    ap.add_argument('--overrides')
     ap.add_argument('machines', nargs='+')
     a = ap.parse_args()
     a.headless = os.path.abspath(a.headless)
@@ -57,6 +60,40 @@ def main():
         seen.add(vpath)
         entries.append((vpath, src))
 
+    overrides = {}
+    if a.overrides:
+        for line in open(a.overrides, encoding='utf-8'):
+            line = line.split('#', 1)[0].split()
+            if len(line) == 4:
+                overrides.setdefault(line[0], []).append(line[1:])
+
+    def override(m, path):
+        """The machine's file with its overrides applied, or path as it is"""
+        if m not in overrides:
+            return path
+        text = open(path, 'rb').read().decode('utf-8')
+        nl = '\r\n' if '\r\n' in text else '\n'
+        lines = text.split(nl)
+        for dev, par, val in overrides[m]:
+            start = None
+            for i, l in enumerate(lines):
+                if start is None:
+                    if l.split(':', 1)[0].strip() == dev and l.rstrip().endswith('{'):
+                        start = i
+                    continue
+                if l.strip() == '}':
+                    lines.insert(i, '\t%s = %s' % (par, val))
+                    break
+                if l.split('=', 1)[0].strip() == par:
+                    lines[i] = '\t%s = %s' % (par, val)
+                    break
+            if start is None:
+                sys.exit('embed_vfs: override of %s: no device %s' % (m, dev))
+        out_path = os.path.join(flat_dir, 'ovr_' + m.replace('/', '_'))
+        with open(out_path, 'wb') as f:
+            f.write(nl.join(lines).encode('utf-8'))
+        return out_path
+
     machines = []
     dirs = []
     for m in a.machines:
@@ -74,9 +111,9 @@ def main():
             flat = os.path.join(flat_dir, d.replace('/', '_') + '_' + base + '.cfg')
             with open(flat, 'wb') as f:
                 f.write(r.stdout)
-            add(vcfg, flat)
+            add(vcfg, override(m, flat))
         else:
-            add(vcfg, src)
+            add(vcfg, override(m, src))
         machines.append(vcfg)
         if d not in dirs:
             dirs.append(d)

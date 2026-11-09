@@ -315,3 +315,13 @@ PoiskTrap::*
 I8259::*
 @ all
 I8253::clocks_to_batch_event
+
+@ irisha
+# Ириша / Диалог / Каспий: the display, drawn by the bytes written
+IrishaDisplay::render_all
+IrishaDisplay::render_mono
+IrishaDisplay::render_color
+IrishaDisplay::memory_callback
+IrishaDisplay::clock
+IrishaDisplay::apply_ports
+I8259::*

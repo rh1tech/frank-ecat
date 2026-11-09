@@ -31,6 +31,12 @@ private:
     bool m_poll_ports = false;
     void apply_ports();
     RAM * vram{};
+#ifdef ECAT_EMBEDDED
+    //frank-ecat: the bytes of the video memory written since the screen was
+    //drawn; only they are drawn again, unless the whole is (m_redraw_all)
+    unsigned m_dirty_lo = ~0u, m_dirty_hi = 0;
+    bool m_redraw_all = true;
+#endif
 
 
     void render_mono(unsigned address) const;

@@ -180,6 +180,13 @@ unsigned int I8253::clocks_to_batch_event() const
         if (Loaded[A] != 1) continue;
         if (NeedRestart[A] == 1) return 1;
         if (Counting[A] != 1) continue;
+        //A channel that counts out every few hundred clocks is a tone or a
+        //baud rate: ending batches at it cost the Ириша half a core, and
+        //counted over a batch it was always right. A slow one is a timer
+        //(an interrupt, the Поиск's sound gate), ended at
+        unsigned int period = StartData[A*2] + StartData[A*2+1] * 256u;
+        if (period == 0) period = 65536;
+        if (period < 256) continue;
         const unsigned int dec = (I8253_MODES[COUNTER_LOAD_DEC_VALUE][Modes[A]] == 1) ? 2 : 1;
         unsigned int ctr = Counters[A*2] + Counters[A*2+1] * 256u;
         if (ctr == 0) ctr = 65536;

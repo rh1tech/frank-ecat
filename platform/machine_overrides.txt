@@ -1,0 +1,10 @@
+# frank-ecat — parameters of the shipped configurations changed for the
+# microcontroller (tools/embed_vfs.py applies them to the packed copies; the
+# vendored eCat3 configurations stay as upstream has them)
+#
+# MACHINE  DEVICE  PARAMETER  VALUE   # why
+
+# The КЦГД's ВМ2 with the chip's bus timing was a core by itself and held the
+# ДВК-4 at 3.3 of 5.5 MHz; with the table it is 4.6. The terminal draws at its
+# table speed, the ДВК itself keeps its own timing
+dvk/DVK-4.cfg  kcgd-cpu  timing  legacy
