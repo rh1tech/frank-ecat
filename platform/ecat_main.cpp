@@ -363,6 +363,7 @@ static void status(void)
     printf("audio: %u drivers (%u live), %lu chunks, peak %d\n", (unsigned)audio_drivers.size(), live,
            (unsigned long)audio_chunks, audio_peak);
     audio_peak = 0;
+    platform_report_boot();
     printf("vsync %lu, audio ring %d, underruns %lu\n", (unsigned long)vsyncs, frank_audio_level(),
            (unsigned long)frank_audio_underruns);
     printf("hdmi audio tick: %lu us in %lu ticks\n", (unsigned long)frank_audio_tick_us, (unsigned long)frank_audio_ticks);
@@ -1109,6 +1110,7 @@ int main()
             if (emu->dm->get_device_by_name("ie15-cpu", false) != nullptr) hdmi_irq_to_core0();
         }
         printf("running %s\n", ecat_machines[machine]);
+        platform_report_boot();
     }
     platform_watchdog_feed();
     ecat_heap_report();

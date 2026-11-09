@@ -33,6 +33,8 @@ int platform_mount_sd(void);
 
 /* Print and clear crash info saved by the previous boot's fault handler. */
 void platform_report_previous_crash(void);
+/* the reset reason and a crash before it, again for a console that opened late */
+void platform_report_boot(void);
 
 /* DWT cycle counter, for profiling. */
 void platform_cyccnt_enable(void);

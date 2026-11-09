@@ -17,6 +17,7 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
+#include "hardware/structs/powman.h"
 #include "hardware/structs/psm.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/vreg.h"
@@ -237,7 +238,34 @@ void __attribute__((naked, used)) isr_hardfault(void) {
         "b HardFault_Handler_C\n");
 }
 
+/* What reset the chip, read at boot: POWMAN CHIP_RESET (brown-out, RUN pin,
+ * watchdog...) and the watchdog's own REASON */
+static uint32_t boot_chip_reset, boot_wd_reason;
+static uint32_t last_crash[12];
+
+void platform_report_boot(void) {
+    static const struct { uint32_t bit; const char *name; } why[] = {
+        { 1u << 28, "watchdog(rsm)" }, { 1u << 27, "hazard-sysresetreq" }, { 1u << 26, "glitch" },
+        { 1u << 25, "swcore-pd" }, { 1u << 24, "watchdog(swcore)" }, { 1u << 23, "watchdog(powman)" },
+        { 1u << 22, "watchdog(powman-async)" }, { 1u << 21, "rescue" }, { 1u << 19, "debug-port" },
+        { 1u << 18, "RUN pin" }, { 1u << 17, "brown-out" }, { 1u << 16, "power-on" },
+    };
+    printf("boot: reset by");
+    for (unsigned i = 0; i < sizeof(why) / sizeof(why[0]); i++)
+        if (boot_chip_reset & why[i].bit) printf(" %s", why[i].name);
+    printf(" (CHIP_RESET 0x%08lx, watchdog reason %lu)\n", (unsigned long)boot_chip_reset,
+           (unsigned long)boot_wd_reason);
+    if (last_crash[0] == CRASH_HARDFAULT)
+        printf("boot: after a HardFault on core %lu at PC=0x%08lx LR=0x%08lx CFSR=0x%08lx BFAR=0x%08lx\n",
+               (unsigned long)last_crash[8], (unsigned long)last_crash[1], (unsigned long)last_crash[2],
+               (unsigned long)last_crash[5], (unsigned long)last_crash[7]);
+    else if (last_crash[0] == CRASH_PANIC)
+        printf("boot: after a panic on core %lu, LR=0x%08lx: %s\n", (unsigned long)last_crash[3],
+               (unsigned long)last_crash[1], last_crash[2] ? (const char *)(uintptr_t)last_crash[2] : "");
+}
+
 void platform_report_previous_crash(void) {
+    for (int i = 0; i < 12; i++) last_crash[i] = crash_info[i];
     if (crash_info[0] == CRASH_HARDFAULT) {
         printf("*** PREVIOUS CRASH (HardFault) core %u ***\n", (unsigned)crash_info[8]);
         printf("PC=0x%08x LR=0x%08x R0=0x%08x R1=0x%08x\n", (unsigned)crash_info[1],
@@ -288,6 +316,8 @@ static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int ma
 uint32_t platform_init_clocks(void) {
     stdio_init_all();
     setvbuf(stdout, NULL, _IONBF, 0);
+    boot_chip_reset = powman_hw->chip_reset;
+    boot_wd_reason = watchdog_hw->reason;
     printf("\n==== frank-ecat %s ====\n", ECAT_VERSION);
     if (watchdog_caused_reboot()) printf("(watchdog reboot)\n");
 
