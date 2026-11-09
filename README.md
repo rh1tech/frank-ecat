@@ -74,7 +74,7 @@ Esc, Tab to close), `~C boot~` restarts to the model list, `~C m N~`
 switches to machine N of the family, `~C k down ret~` keys (cursor, `esc`, `tab`, `bs`, `f1`..), `~C s~` status (with the reset reason and a crash before it), `~C d~` display/CPU
 state, `~C c DEVICE COMMAND PARAMS~` a device command (as a script's
 `COMMAND device.command(params)`), `~C f DEVICE FIELD...~` device fields (as
-`LOG device.field`), `~C prof~` a sampling profile, `~BOOT~`, `~RST~`.
+`LOG device.field`), `~C prof~` a sampling profile (`prof1` of core 1, `profl`/`prof1l` with the callers; tools/prof.py), `~BOOT~`, `~RST~`.
 
 ## Host check
 

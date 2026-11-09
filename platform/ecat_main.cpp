@@ -1297,8 +1297,11 @@ int main()
                 platform_prof_pairs(true);
                 platform_prof_start(us);
             } else if (strncmp(cmd, "prof1", 5) == 0) {
+                /* "prof1l US": core 1 with the callers */
                 unsigned us = 200;
-                sscanf(cmd + 5, "%u", &us);
+                const bool l = cmd[5] == 'l';
+                sscanf(cmd + (l ? 6 : 5), "%u", &us);
+                platform_prof_pairs(l);
                 platform_prof_start_core1(us);
             } else if (strncmp(cmd, "prof", 4) == 0) {
                 platform_prof_pairs(false);

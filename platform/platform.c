@@ -560,6 +560,7 @@ void __attribute__((used)) prof1_isr_c(uint32_t *frame) {
     lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
     timer1_hw->alarm[1] = timer1_hw->timerawl + sample1_us + (lfsr & 63u);
     prof_buf[prof_n++] = frame[6];
+    if (prof_pairs && prof_n < PROF_SAMPLES) prof_buf[prof_n++] = frame[5];   /* LR: the caller */
 }
 
 static void __attribute__((naked)) prof1_isr(void) {

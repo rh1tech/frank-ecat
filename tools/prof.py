@@ -9,7 +9,7 @@
 # the sampled PCs read back, resolved against the ELF's symbols, a table of
 # functions by share of the samples.
 #
-# Usage: tools/prof.py build/frank-ecat-agat.elf [US | c1:US for core 1 | lr:US with callers] [PORT] [TOP]
+# Usage: tools/prof.py build/frank-ecat-agat.elf [US | c1:US for core 1 | lr:US with callers | c1:lr:US] [PORT] [TOP]
 
 import bisect, subprocess, sys, time
 import serial
@@ -32,9 +32,13 @@ def main():
 
     s = serial.Serial(port, 115200, timeout=0.5)
     s.read(100000)
+    c1 = us.startswith('c1:')
+    if c1:
+        us = us[3:]
     pairs = us.startswith('lr:')
-    cmd = 'prof1' if us.startswith('c1:') else ('profl' if pairs else 'prof')
-    us = us[3:] if (us.startswith('c1:') or pairs) else us
+    if pairs:
+        us = us[3:]
+    cmd = ('prof1l' if pairs else 'prof1') if c1 else ('profl' if pairs else 'prof')
     s.write(('~C %s %s~' % (cmd, us)).encode())
     buf, t = b'', time.time()
     while b'PROF END' not in buf and time.time() - t < 60:
