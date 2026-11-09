@@ -238,7 +238,8 @@ public:
     unsigned int clocks_to_batch_event() const override
     {
         if (medium == TapeMedium::Bytes) return m_transport == T_RECORD ? 1u : UINT_MAX;
-        return (m_transport != T_STOP || tape_mode != TAPE_STOPPED || is_recording || motor_on) ? 1u : UINT_MAX;
+        //(the motor line alone moves nothing: the Поиск leaves it on)
+        return (m_transport != T_STOP || tape_mode != TAPE_STOPPED || is_recording) ? 1u : UINT_MAX;
     }
         bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()
 #endif

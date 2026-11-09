@@ -29,22 +29,22 @@ I8086Core::I8086Core(i8086 * emulator_device, int family):
 
 uint8_t I8086Core::mem_read8(uint32_t address)
 {
-    return (uint8_t)emulator_device->mm->read(address);
+    return (uint8_t)emulator_device->mm->read_fast(address);
 }
 
 void I8086Core::mem_write8(uint32_t address, uint8_t value)
 {
-    emulator_device->mm->write(address, value);
+    emulator_device->mm->write_fast(address, value);
 }
 
 uint16_t I8086Core::mem_read16(uint32_t address)
 {
-    return (uint16_t)emulator_device->mm->read_word(address);
+    return (uint16_t)emulator_device->mm->read_word_fast(address);
 }
 
 void I8086Core::mem_write16(uint32_t address, uint16_t value)
 {
-    emulator_device->mm->write_word(address, value);
+    emulator_device->mm->write_word_fast(address, value);
 }
 
 uint8_t I8086Core::io_read8(uint16_t port)

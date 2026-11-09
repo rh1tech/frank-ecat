@@ -220,7 +220,6 @@ I8251::set_value
 TapeRecorder::bytes_clock
 TapeRecorder::advance_unit
 TapeRecorder::clock_sound
-TapeRecorder::clocks_to_batch_event
 @ unior
 ArgoMemory::get_value
 ArgoMemory::set_value
@@ -306,6 +305,8 @@ i8086::*
 I8086Core::*
 PoiskDisplay::clock
 PoiskDisplay::wait_states
+non-virtual thunk to PoiskDisplay::wait_states
+alu
 PoiskDisplay::render_line
 PoiskDisplay::render_line_unlocked
 PoiskDisplay::update_sync
@@ -315,6 +316,9 @@ PoiskTrap::*
 I8259::*
 @ all
 I8253::clocks_to_batch_event
+I8253::Count
+I8253::clock
+TapeRecorder::clocks_to_batch_event
 
 @ irisha
 # Ириша / Диалог / Каспий: the display, drawn by the bytes written
