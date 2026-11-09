@@ -20,7 +20,8 @@
 # Output: vfs_data.S (the file bodies, .incbin) and vfs_table.c (the index),
 # and machines.txt (the configurations, in order, for the machine menu).
 # --overrides FILE: "MACHINE DEVICE PARAMETER VALUE" lines, a parameter of a
-# device set in the packed copy of that machine (platform/machine_overrides.txt)
+# device set in the packed copy of that machine, or removed with VALUE "-"
+# (platform/machine_overrides.txt)
 
 import argparse
 import os
@@ -82,10 +83,14 @@ def main():
                         start = i
                     continue
                 if l.strip() == '}':
-                    lines.insert(i, '\t%s = %s' % (par, val))
+                    if val != '-':
+                        lines.insert(i, '\t%s = %s' % (par, val))
                     break
                 if l.split('=', 1)[0].strip() == par:
-                    lines[i] = '\t%s = %s' % (par, val)
+                    if val == '-':
+                        del lines[i]        # "-": the parameter removed
+                    else:
+                        lines[i] = '\t%s = %s' % (par, val)
                     break
             if start is None:
                 sys.exit('embed_vfs: override of %s: no device %s' % (m, dev))

@@ -358,6 +358,12 @@ struct MapperPage {
     uint8_t * const *   table_w;
     unsigned int        table_r_pages;
     unsigned int        table_w_pages;
+    //Or two byte planes (AddressableDevice::plane_buffers())
+    uint8_t *           pair_lo;
+    uint8_t *           pair_hi;
+    unsigned int        pair_depth;
+    bool                pair_r;
+    bool                pair_w;
 #endif
 };
 
@@ -657,6 +663,10 @@ public:
     //and writes the others in place (MemoryMapper::read_fast()); the device
     //changes the entries, never the table. *pages: entries in it
     virtual uint8_t * const * page_table(MAYBE_UNUSED bool write, MAYBE_UNUSED unsigned int * pages) { return nullptr; }
+    //A device whose words are a byte of each of two buffers at the same index
+    //(the УК-НЦ processor's RAM, two planes): the buffers at index 0 of its
+    //address space (address >> 1) and the indexes they hold
+    virtual bool plane_buffers(MAYBE_UNUSED uint8_t ** low, MAYBE_UNUSED uint8_t ** high, MAYBE_UNUSED unsigned int * depth) { return false; }
 #endif
 
     //Asked by the mapper for a range marked "routed = 1", before the access and
@@ -1455,6 +1465,10 @@ public:
                     this->no_device = false;
                     return b[a & 0xFF];
                 }
+            } else if (e->pair_r && (a >> 1) < e->pair_depth) {
+                this->last_device = e->device_r;
+                this->no_device = false;
+                return ((a & 1) ? e->pair_hi : e->pair_lo)[a >> 1];
             }
         }
         return read(address);
@@ -1479,6 +1493,11 @@ public:
                     b[a & 0xFF] = (uint8_t)value;
                     return;
                 }
+            } else if (e->pair_w && (a >> 1) < e->pair_depth) {
+                this->last_device = e->device_w;
+                this->no_device = false;
+                ((a & 1) ? e->pair_hi : e->pair_lo)[a >> 1] = (uint8_t)value;
+                return;
             }
         }
         write(address, value);
@@ -1486,6 +1505,14 @@ public:
     inline unsigned int read_word_fast(unsigned int address)
     {
         MapperPage * e = direct_page(address);
+        if (e != nullptr && e->pair_r) {
+            const unsigned int i = (address + e->offset) >> 1;
+            if (i < e->pair_depth) {
+                this->last_device = e->device_r;
+                this->no_device = false;
+                return e->pair_lo[i] | (e->pair_hi[i] << 8);
+            }
+        }
         if (e != nullptr && e->direct_r != nullptr) {
             const unsigned int a = address + e->offset;
             if (a + 1 < e->direct_r_size) {
@@ -1499,6 +1526,16 @@ public:
     inline void write_word_fast(unsigned int address, unsigned int value)
     {
         MapperPage * e = direct_page(address);
+        if (e != nullptr && e->pair_w) {
+            const unsigned int i = (address + e->offset_w) >> 1;
+            if (i < e->pair_depth) {
+                this->last_device = e->device_w;
+                this->no_device = false;
+                e->pair_lo[i] = (uint8_t)value;
+                e->pair_hi[i] = (uint8_t)(value >> 8);
+                return;
+            }
+        }
         if (e != nullptr && e->direct_w != nullptr) {
             const unsigned int a = address + e->offset_w;
             if (a + 1 < e->direct_w_size) {

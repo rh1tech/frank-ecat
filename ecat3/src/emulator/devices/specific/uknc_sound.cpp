@@ -122,6 +122,15 @@ bool UKNCSound::level() const
 
 void UKNCSound::clock(unsigned int counter)
 {
+#ifdef ECAT_EMBEDDED
+    //The level is averaged over the clocks since the last call (the timer's
+    //step log, 32 steps of at least 12 clocks), so the clocks of a few batches
+    //at once give the same sum: about a sample's worth, not every batch
+    m_deferred += counter;
+    if (m_deferred < 160) return;
+    counter = m_deferred;
+    m_deferred = 0;
+#endif
     GenericSound::clock(counter);
     // Где счётчик стоял, когда уровень считали в последний раз: calc_sound_value()
     // зовётся из GenericSound::clock() выше, поэтому отметка ставится после него

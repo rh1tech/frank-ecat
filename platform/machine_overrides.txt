@@ -8,3 +8,15 @@
 # ДВК-4 at 3.3 of 5.5 MHz; with the table it is 4.6. The terminal draws at its
 # table speed, the ДВК itself keeps its own timing
 dvk/DVK-4.cfg  kcgd-cpu  timing  legacy
+
+# The УК-НЦ in a fast mode: both ВМ2 on the table timing, the memory waits
+# of the CPU's and the PPU's RAM and of the PPU's bus off. With the chip's bus
+# and memory timing the two cores ran it at 3.2 of 8 MHz (a third of the PPU's
+# core was the timing); like this 5.8-6.3. Programs run closer to the real
+# machine than the clock says (no memory waits), and loops timed by the
+# instruction count run differently from the real one
+uknc/UKNC.cfg  cpu  timing  legacy
+uknc/UKNC.cfg  ppu  timing  legacy
+uknc/UKNC.cfg  plane0  wait  -
+uknc/UKNC.cfg  cpu-ram  wait  -
+uknc/UKNC.cfg  ppu-mapper  wait  -

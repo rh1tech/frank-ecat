@@ -62,6 +62,9 @@ private:
     // Фаза счётчика на конце прошлого отрезка: сколько тактов он к тому
     // моменту уже отстоял в текущем своём шаге
     uknc_real m_prev_phase;
+#ifdef ECAT_EMBEDDED
+    unsigned int m_deferred = 0;    //clocks not given to GenericSound::clock() yet
+#endif
 
     // Фильтр на шагах счётчика - единственное равномерное место в тракте, см.
     // calc_sound_value(). Частота, на которую он настроен, следует за периодом

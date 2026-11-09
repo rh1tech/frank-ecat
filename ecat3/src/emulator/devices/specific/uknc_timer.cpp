@@ -144,11 +144,45 @@ uknc_real UKNCTimer::counter_phase_cycles() const
 
 void UKNCTimer::clock(unsigned int counter)
 {
+#ifdef ECAT_EMBEDDED
+    //The base ticks a batch brings at once, and the steps of the counter that
+    //only decrement it (not to zero, no event load) in one go: base_tick()
+    //for every 12 clocks was a twentieth of the PPU's core
+    m_acc += counter;
+    if (m_acc < m_base_cycles) return;
+    unsigned int n = m_acc / m_base_cycles;
+    m_acc -= n * m_base_cycles;
+    if ((m_flags & F_RUN) == 0) return;
+    const unsigned int div = TIMER_DIVIDERS[(m_flags & F_DIV_MASK) >> 1];
+    while (n > 0) {
+        const unsigned int need = div - m_divider;      //base ticks to the next step
+        if (n < need) { m_divider += n; return; }
+        if (!m_event_load && m_counter > 1) {
+            //This step and as many after it as the ticks cover, none to zero
+            unsigned int run = 1 + (n - need) / div;
+            if (run > m_counter - 1) run = m_counter - 1;
+            const unsigned int first = (run > UKNC_TIMER_STEP_LOG) ? run - UKNC_TIMER_STEP_LOG + 1 : 1;
+            for (unsigned int j = first; j <= run; j++)
+                m_step_log[(m_steps + j - 1) % UKNC_TIMER_STEP_LOG] = (m_counter - j) & COUNTER_MASK;
+            m_steps += run;
+            m_counter = (m_counter - run) & COUNTER_MASK;
+            n -= need + (run - 1) * div;
+            m_divider = 0;
+            continue;
+        }
+        //One base tick at a time up to and through the step that needs the
+        //full logic (a reload, the zero)
+        m_divider += need - 1;
+        n -= need;
+        base_tick();
+    }
+#else
     m_acc += counter;
     while (m_acc >= m_base_cycles) {
         m_acc -= m_base_cycles;
         base_tick();
     }
+#endif
 }
 
 void UKNCTimer::interface_callback(unsigned int callback_id, MAYBE_UNUSED unsigned int new_value, MAYBE_UNUSED unsigned int old_value)

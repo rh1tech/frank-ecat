@@ -53,6 +53,14 @@ public:
     //Memory: an access depends on nothing that moves with time (the waits
     //come from the memory timing device, which counts the clocks owed)
     bool timeless_access() const override { return true; }
+    bool plane_buffers(uint8_t ** low, uint8_t ** high, unsigned int * depth) override
+    {
+        if (m_low_buf == nullptr || m_depth <= m_base) return false;
+        *low = m_low_buf + m_base;
+        *high = m_high_buf + m_base;
+        *depth = m_depth - m_base;
+        return true;
+    }
 #endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;

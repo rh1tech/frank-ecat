@@ -3,6 +3,8 @@
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
 // Description: УК-НЦ display controller device
 
+#include <cstring>
+
 #include "uknc_display.h"
 #include "emulator/utils.h"
 
@@ -337,8 +339,21 @@ void UKNCDisplay::render_line(unsigned int y, unsigned int bits_address)
         if (m_cursor_on)
             h = (h ^ (1u | (m_cursor_color << 1) | (m_cursor_graphic ? 0x100 : 0) | (m_cursor_pos << 9) | (m_cursor_bit << 20))) * 16777619u;
         unsigned a = bits_address & 0xFFFF;
-        for (unsigned i = 0; i < n; i++, a = (a + 1) & 0xFFFF)
-            h = (h ^ (q0[a] | (q1[a] << 8) | (q2[a] << 16))) * 16777619u;
+        if (a + n <= 0x10000 && (n & 3) == 0) {
+            //Four bytes of each plane a step: the line does not wrap
+            for (unsigned i = 0; i < n; i += 4) {
+                uint32_t w0, w1, w2;
+                memcpy(&w0, q0 + a + i, 4);
+                memcpy(&w1, q1 + a + i, 4);
+                memcpy(&w2, q2 + a + i, 4);
+                h = (h ^ w0) * 16777619u;
+                h = (h ^ w1) * 16777619u;
+                h = (h ^ w2) * 16777619u;
+            }
+        } else {
+            for (unsigned i = 0; i < n; i++, a = (a + 1) & 0xFFFF)
+                h = (h ^ (q0[a] | (q1[a] << 8) | (q2[a] << 16))) * 16777619u;
+        }
         if (h == 0) h = 1;
         if (m_line_hash[y] == h) {
             m_line_scale[y] = (uint8_t)m_scale;

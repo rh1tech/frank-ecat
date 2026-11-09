@@ -2475,6 +2475,23 @@ void MemoryMapper::fill_direct(MapperPage * e)
     if (Memory * m = dynamic_cast<Memory *>(e->device_w)) e->direct_w = m->direct_buffer(true, &e->direct_w_size);
     e->table_r = e->table_w = nullptr;
     e->table_r_pages = e->table_w_pages = 0;
+    e->pair_r = e->pair_w = false;
+    e->pair_lo = e->pair_hi = nullptr;
+    e->pair_depth = 0;
+    {
+        AddressableDevice * pd = (e->device_r != nullptr && !e->uncached_r) ? e->device_r
+                               : (e->device_w != nullptr && !e->uncached_w) ? e->device_w : nullptr;
+        uint8_t * lo = nullptr, * hi = nullptr;
+        unsigned int depth = 0;
+        if (pd != nullptr && e->direct_r == nullptr && e->direct_w == nullptr
+            && pd->plane_buffers(&lo, &hi, &depth)) {
+            e->pair_lo = lo;
+            e->pair_hi = hi;
+            e->pair_depth = depth;
+            e->pair_r = (pd == e->device_r && !e->uncached_r);
+            e->pair_w = (pd == e->device_w && !e->uncached_w && e->offset_w == e->offset);
+        }
+    }
     if (e->direct_r == nullptr && e->device_r != nullptr && !e->uncached_r) e->table_r = e->device_r->page_table(false, &e->table_r_pages);
     if (e->direct_w == nullptr && e->device_w != nullptr && !e->uncached_w) e->table_w = e->device_w->page_table(true, &e->table_w_pages);
 }
@@ -2522,6 +2539,7 @@ MapperPage * MemoryMapper::fill_page(unsigned int page, uint64_t tag)
 #ifdef ECAT_EMBEDDED
     e->direct_r = e->direct_w = nullptr;
     e->table_r = e->table_w = nullptr;
+    e->pair_r = e->pair_w = false;
 #endif
 
     const MapperRange * found = nullptr;
