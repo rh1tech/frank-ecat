@@ -3,6 +3,7 @@
 // Part of the eCat3 project: https://github.com/Ptr314/ecat3
 // Description: Common i8275(КР580ВГ75)-based display controller device
 
+#include <climits>
 #include <cstring>
 
 #include "i8275display.h"
@@ -198,6 +199,8 @@ emulator::Result I8275Display::load_config(SystemData *sd)
     Font = dynamic_cast<AddressableDevice*>(im->dm->get_device_by_name(cd->get_parameter("font").value));
 #ifdef ECAT_EMBEDDED
     m_font_is_rom = dynamic_cast<ROM*>(Font) != nullptr;
+    m_font_ram = dynamic_cast<RAM*>(Font);
+    m_font_copy.clear();
 #endif
 
     m_font_invert = cd->get_parameter("font_invert", false).value != "0";
@@ -460,10 +463,14 @@ void I8275Display::render_all(bool force_render)
         m_drawn_h = m_frame_h;
     }
 #endif
+#ifdef ECAT_EMBEDDED
+    const bool font_ok = !m_frame_zx && font_cacheable();
+    if (m_frame_zx) forget_drawn();     //the ZX picture goes over what they were
+#endif
     for (unsigned int row = 0; row < m_frame_lps; row++)
     {
 #ifdef ECAT_EMBEDDED
-        if (!m_frame_zx && m_font_is_rom && row < I8275D_MAX_ROWS) {
+        if (font_ok && row < I8275D_MAX_ROWS) {
             DrawnRow &d = m_drawn[row];
             if (same_row(row)) {
                 //The surface has it: the attributes leave the row as drawing it did
@@ -486,6 +493,35 @@ void I8275Display::render_all(bool force_render)
 }
 
 #ifdef ECAT_EMBEDDED
+//A ROM font never changes; a RAM one is the bytes every code and line of both
+//banks address, compared with the copy the rows were drawn with
+bool I8275Display::font_cacheable()
+{
+    if (m_font_is_rom) return true;
+    if (m_font_ram == nullptr || !m_font_mapped) return false;
+    if (m_font_copy.empty()) {
+        unsigned int lo = UINT_MAX, hi = 0;
+        for (unsigned int bank = 0; bank < 2; bank++)
+            for (unsigned int code = 0; code < 256; code++)
+                for (unsigned int line = 0; line < 16; line++) {
+                    const unsigned int a = font_address(code, line, bank);
+                    if (a < lo) lo = a;
+                    if (a > hi) hi = a;
+                }
+        if (hi >= m_font_ram->get_size() || hi - lo >= 8192) { m_font_ram = nullptr; return false; }
+        m_font_lo = lo;
+        m_font_copy.assign(m_font_ram->get_buffer() + lo, m_font_ram->get_buffer() + hi + 1);
+        forget_drawn();
+        return true;
+    }
+    const uint8_t * f = m_font_ram->get_buffer() + m_font_lo;
+    if (memcmp(f, m_font_copy.data(), m_font_copy.size()) != 0) {
+        memcpy(m_font_copy.data(), f, m_font_copy.size());
+        forget_drawn();
+    }
+    return true;
+}
+
 void I8275Display::forget_drawn()
 {
     for (DrawnRow &d : m_drawn) d.valid = false;

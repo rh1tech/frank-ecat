@@ -228,12 +228,16 @@ protected:
 
 public:
 #ifdef ECAT_EMBEDDED
-//Playing or recording, a batch is one instruction, as it always was: a
+    //Playing or recording, a batch is one instruction, as it always was: a
     //port it feeds (a ВВ55, timeless_access) is read between its edges, and
-    //a pulse written to it is timed by its own count. Stopped, it adds none
+    //a pulse written to it is timed by its own count. Stopped, it adds none.
+    //A tape of bytes (Юниор, Арго) played talks to a ВВ51 only, which brings
+    //it up to date before every access: it adds none either (recording, the
+    //unit a byte the ВВ51 sends lands on is that of the instruction)
     bool has_batch_events() const override { return true; }
     unsigned int clocks_to_batch_event() const override
     {
+        if (medium == TapeMedium::Bytes) return m_transport == T_RECORD ? 1u : UINT_MAX;
         return (m_transport != T_STOP || tape_mode != TAPE_STOPPED || is_recording || motor_on) ? 1u : UINT_MAX;
     }
         bool batch_safe() const override { return true; }   //checked: see DeviceManager::batch_ok()

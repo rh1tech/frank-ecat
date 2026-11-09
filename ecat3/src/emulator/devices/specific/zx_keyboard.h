@@ -67,6 +67,10 @@ public:
     emulator::Result load_config(SystemData *sd) override;
 
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //Samples the keys once a millisecond, whatever the cycles come in
+    bool batch_safe() const override { return true; }
+#endif
     void reset(bool cold) override;
     void save_state(StateWriter &w) override;
     emulator::Result load_state(const StateReader &r) override;

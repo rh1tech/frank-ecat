@@ -57,6 +57,11 @@ public:
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;
     void clock(unsigned int counter) override;
+#ifdef ECAT_EMBEDDED
+    //A transfer starts at the clock() after the write to the ВТ57 that
+    //enabled channels 0 and 1, and a write ends the batch (m_batch_cut)
+    bool batch_safe() const override { return true; }
+#endif
 
     unsigned int get_value(unsigned int address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;

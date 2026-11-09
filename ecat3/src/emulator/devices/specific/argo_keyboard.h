@@ -32,6 +32,10 @@ public:
     // не трогаем, иначе взгляд на порт менял бы состояние машины
     unsigned int get_direct(unsigned int address) override;
     void set_value(unsigned int address, unsigned int value, bool force=false) override;
+#ifdef ECAT_EMBEDDED
+    //The column out, the matrix's rows back: nothing that moves with time
+    bool timeless_access() const override { return true; }
+#endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;
     bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;

@@ -2994,8 +2994,12 @@ AddressableDevice * MemoryMapper::map_write(unsigned int address, unsigned int *
 
 #ifdef ECAT_EMBEDDED
 #define ECAT_SYNC_FOR(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); } } while (0)
+//A write may start what the devices' next event did not know of (a DMA
+//transfer, a timer reloaded): the batch ends with this instruction
+#define ECAT_SYNC_FOR_W(dev) do { if ((dev)->m_sync_on_access) { (dev)->m_syncs++; im->dm->sync_pending(); im->dm->m_batch_cut = true; } } while (0)
 #else
 #define ECAT_SYNC_FOR(dev) do { } while (0)
+#define ECAT_SYNC_FOR_W(dev) do { } while (0)
 #endif
 
 unsigned int MemoryMapper::read(unsigned int address)
@@ -3186,7 +3190,7 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
                 if (a < e->direct_w_size) { e->direct_w[a] = (uint8_t)value; return; }
             }
 #endif
-            ECAT_SYNC_FOR(e->device_w);
+            ECAT_SYNC_FOR_W(e->device_w);
             e->device_w->set_value(address + PAGE_OFFSET_W(e), value);
         } else
             this->no_device = e->timeout_w;
@@ -3202,7 +3206,7 @@ void MemoryMapper::write(unsigned int address, unsigned int value)
         this->no_device = !this->responds(address, MODE_W);
         return;
     }
-    ECAT_SYNC_FOR(d);
+    ECAT_SYNC_FOR_W(d);
     d->set_value(address_on_device, value);
     while (goes_through(range_index, route) && range_index < this->ranges_count) {
         d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
@@ -3339,7 +3343,7 @@ void MemoryMapper::write_word(unsigned int address, unsigned int value)
                 }
             }
 #endif
-            ECAT_SYNC_FOR(e->device_w);
+            ECAT_SYNC_FOR_W(e->device_w);
             e->device_w->set_value_word(address + PAGE_OFFSET_W(e), value);
         } else
             this->no_device = e->timeout_w;
@@ -3355,12 +3359,12 @@ void MemoryMapper::write_word(unsigned int address, unsigned int value)
         this->no_device = !this->responds(address, MODE_W);
         return;
     }
-    ECAT_SYNC_FOR(d);
+    ECAT_SYNC_FOR_W(d);
     d->set_value_word(address_on_device, value);
     while (goes_through(range_index, route) && range_index < this->ranges_count) {
         d = this->map(&(this->ranges), range_index + 1, this->ranges_count, this->i_config.value, address, MODE_W, &address_on_device, &range_index, &route);
         if (d == nullptr) break;
-        ECAT_SYNC_FOR(d);
+        ECAT_SYNC_FOR_W(d);
         d->set_value_word(address_on_device, value);
     }
 }
@@ -3409,7 +3413,7 @@ void MemoryMapper::write_port(unsigned int address, unsigned int value)
 #endif
         if (d != nullptr)
         {
-            ECAT_SYNC_FOR(d);
+            ECAT_SYNC_FOR_W(d);
             d->set_value(address_on_device, value);
         }
     }

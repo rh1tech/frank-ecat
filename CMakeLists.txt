@@ -282,3 +282,7 @@ ecat_add_firmware(irisha VIDEO_MODE 28 REFRESH 5001 SURFACE 640 240 MACHINES
     irisha/Irisha-kngmd.cfg
     irisha/Dialog.cfg
     irisha/Kaspiy.cfg)
+
+ecat_add_firmware(unior VIDEO_MODE 28 REFRESH 5001 SURFACE 480 300 MACHINES
+    unior/Unior.cfg
+    unior/Argo.cfg)

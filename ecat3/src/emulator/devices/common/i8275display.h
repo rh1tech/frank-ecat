@@ -151,7 +151,8 @@ private:
     //frank-ecat: on a microcontroller redrawing every row of every frame was a
     //third of the time. A row whose snapshot and incoming field attributes are
     //those it was last drawn with is already right on the surface: skipped.
-    //Only with a ROM font (a RAM one, the Арго's, changes under the snapshot)
+    //With a ROM font, or a RAM one (the Арго's) whose bytes are compared with
+    //a copy once a frame: a change of it forgets every row
     struct DrawnRow {
         bool valid;
         RowSnapshot snap;
@@ -162,6 +163,10 @@ private:
     std::vector<DrawnRow> m_drawn;
     unsigned int m_drawn_cpl = 0, m_drawn_h = 0;
     bool m_font_is_rom = false;
+    RAM * m_font_ram = nullptr;
+    unsigned int m_font_lo = 0;
+    std::vector<uint8_t> m_font_copy;   //the RAM font as the rows were drawn with it
+    bool font_cacheable();
     void forget_drawn();
     bool same_row(unsigned int row) const;
 #endif

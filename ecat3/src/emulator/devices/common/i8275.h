@@ -131,8 +131,9 @@ public:
     bool BlinkerChar;               //Character blink, 32 frames
 
 #ifdef ECAT_EMBEDDED
-    //The next DMA cycle (it holds the processor), the end of a raster line
-    //(HRTC, counted by a ВИ53 on some machines) or of the character row
+    //The end of a raster line (HRTC, counted by a ВИ53 on some machines) or of
+    //the character row. The DMA cycles of the row fall within the batch: the
+    //cycles they hold the processor for are the same, a few instructions later
     bool batch_safe() const override { return true; }
     bool has_batch_events() const override { return true; }
     unsigned int clocks_to_batch_event() const override;

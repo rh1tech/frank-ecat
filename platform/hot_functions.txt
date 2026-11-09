@@ -177,3 +177,20 @@ I8255::get_value
 ScanKeyboard::interface_callback
 ScanKeyboard::calculate_out
 TapeRecorder::clock
+
+# ВИ53 / ВВ51 / byte tape: polled by the Юниор's and the Арго's tape loops
+I8253::clock
+I8253::Count
+I8253::clocks_to_event
+I8251::update_status
+I8251::get_value
+I8251::set_value
+TapeRecorder::bytes_clock
+TapeRecorder::advance_unit
+TapeRecorder::clock_sound
+TapeRecorder::clocks_to_batch_event
+ArgoMemory::get_value
+ArgoMemory::set_value
+ArgoMemory::translate_cpu
+ArgoKeyboard::get_value
+ZXKeyboard::clock

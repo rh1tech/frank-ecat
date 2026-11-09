@@ -407,10 +407,6 @@ unsigned int I8275::clocks_to_batch_event() const
         const unsigned int to_line = m_chars_per_line - (m_row_pos % m_chars_per_line);
         if (to_line < r) r = to_line;
     }
-    if (m_filling) {
-        const unsigned int to_dma = (m_dma_delay == 0) ? 1 : m_dma_delay;
-        if (to_dma < r) r = to_dma;
-    }
     return r ? r : 1;
 }
 #endif

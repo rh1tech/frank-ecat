@@ -1772,7 +1772,8 @@ void Emulator::debug_step_slice()
 #ifndef ECAT_BATCH_MAX
 #define ECAT_BATCH_MAX 32       //cycles: a sample of the sound at 32 kHz on a 1 MHz machine
 #endif
-//A batch: 32 cycles, or 16 us of a faster processor (128 on the 8 MHz ВМ2)
+//A batch: 32 cycles, or 16 us of a faster processor (128 on the 8 MHz ВМ2,
+//54 on the 3.4 MHz Арго)
 #define ECAT_BATCH_MAX_CYCLES batch_max_cycles(k)
 #ifdef ECAT_EMBEDDED
 //What a processor's instruction leaves to its domain's devices: clocked
@@ -2054,7 +2055,7 @@ void Emulator::timer_proc(uint64_t time_ticks)
                 unsigned int budget = dm->clocks_to_event(d.cpu);
                 const unsigned int be = dm->cycles_to_batch_event(0);
                 if (be < budget) budget = be;
-                const unsigned int batch_max = dm->batch_ok(0) ? ECAT_BATCH_MAX : 1;
+                const unsigned int batch_max = dm->batch_ok(0) ? batch_max_cycles(0) : 1;
                 if (budget > batch_max) budget = batch_max;
                 if (script) {
                     const uint64_t wake = script->next_wake(clock_counter);
@@ -2062,6 +2063,7 @@ void Emulator::timer_proc(uint64_t time_ticks)
                     else if (wake - clock_counter < budget) budget = (unsigned int)(wake - clock_counter);
                 }
                 unsigned int run = 0;
+                dm->m_batch_cut = false;
                 while (true) {
                     const unsigned int c = d.cpu->execute();
                     if (c == 0) break;
@@ -2069,7 +2071,7 @@ void Emulator::timer_proc(uint64_t time_ticks)
                     d.norm += (uint64_t)c * d.scale;
                     clock_counter += c;
                     dm->add_pending(0, c);
-                    if (run >= budget || d.norm >= target) break;
+                    if (run >= budget || d.norm >= target || dm->m_batch_cut) break;
                 }
                 dm->sync_pending();
                 if (script) {

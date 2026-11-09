@@ -905,6 +905,9 @@ public:
     std::vector<uint8_t> m_domain_events;   //per domain: any device that can end a batch early
     std::vector<std::vector<ComputerDevice*>> m_batch_event_devices;
     bool m_any_pending[2] = {false, false};     //per core
+    //Set by a write to a clocked device: the batch running ends after the
+    //instruction (Emulator::timer_proc), its next event is looked at again
+    bool m_batch_cut = false;
     bool batch_ok(unsigned int domain) const { return domain < m_domain_batch_ok.size() && m_domain_batch_ok[domain]; }
     unsigned int cycles_to_batch_event(unsigned int domain) const
     {

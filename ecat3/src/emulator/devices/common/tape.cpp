@@ -129,6 +129,10 @@ emulator::Result TapeRecorder::load_config(SystemData *sd)
     if (!image.empty())
     {
         const std::string file = find_file_location(sd, image);
+#ifdef ECAT_EMBEDDED
+        //The library is on a card that may not carry it: the recorder starts empty
+        if (file.empty()) return emulator::Result::ok();
+#endif
         if (file.empty())
             return emulator::Result::error(emulator::ErrorCode::FileError,
                 "{TapeRecorder|" + std::string(QT_TRANSLATE_NOOP("TapeRecorder", "Tape image file not found")) + "} " + image);
