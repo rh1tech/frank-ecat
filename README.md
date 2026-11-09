@@ -13,14 +13,14 @@ Work in progress. Running now with sound over HDMI, at full speed unless noted (
 | Firmware | Machines | Load at full speed |
 |---|---|---|
 | `frank-ecat-rk86` | Радио-86РК, Спектр-001, Микроша, Апогей БК-01Ц | 41-48% of a core |
-| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 78% (4.3 of 5.5 MHz, the КЦГД's processor on the table timing): not yet |
+| `frank-ecat-dvk` | ДВК-1, ДВК-2 (ИЕ15), ДВК-3 (КСМ, КГД), ДВК-4 (КЦГД) | both cores: ДВК-1 and ДВК-2 100% (90% busy), ДВК-3 100% (RT-11 82% busy, the console prompt 99%), ДВК-4 75-80% (4.1-4.4 of 5.5 MHz, the КЦГД's processor on the table timing): not yet |
 | `frank-ecat-agat` | Агат-7 (140 KB / 840 KB drives, -pp, -max), Агат-9 (-pp, ЯЗС) | 51-88% |
 | `frank-ecat-orion` | Орион-128 (М1, М3 with disks, Z80 Card II) | ~52% (М1, М3), 84% (Z80 Card II at 5 MHz) |
 | `frank-ecat-irisha` | Ириша (ГМД-70, КНГМД), Диалог, Каспий | 62-75% |
 | `frank-ecat-unior` | Юниор ФВ-6506, Арго ФВ-6511 | 53% (Юниор), 68% (Арго) |
 | `frank-ecat-pravetz` | Правец-82, -8М, -8А, -8А (full), -8С (Apple II), Правец-8Д (Oric) | 49-84% |
 | `frank-ecat-bk` | БК0010, БК0010-01 and БК0011М, each plain, with the КНГМД, А16М, СМК-512; БК0011М МСТД | 69-91% |
-| `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores: 30-49% (2.5-3.9 of 8 MHz): not yet - two ВМ2 with the memory timing are more than the two cores |
+| `frank-ecat-uknc` | УК-НЦ, УК-НЦ (031), УК-НЦ (Бейсик) | both cores: 40% (3.2 of 8 MHz at the boot menu): not yet - two ВМ2 with the bus and memory timing are more than the two cores (the PPU core: a third timing, a fifth the interpreter, the rest display, sound, timer) |
 | `frank-ecat-e85` | Электроника МС 0585, with МС 1702, with the hard disk | both cores (the КНГМД's 8051 on the second): 100% at the ПРОС prompt (73% busy), 65-85% while loading |
 | `frank-ecat-poisk` | Поиск-1, 128 КБ, with the cartridge RAM, with the КНГМД 302 | 96-100% (MS-DOS 5 and Volkov Commander from the disk) |
 

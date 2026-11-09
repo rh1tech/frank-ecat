@@ -8,6 +8,7 @@
 #include "emulator/core.h"
 #include "emulator/devices/common/sound.h"
 #include "libs/audio_filters.h"
+#include "emulator/devices/specific/uknc_timer.h"
 
 class UKNCTimer;
 
@@ -60,15 +61,15 @@ private:
     uint64_t m_seen_steps;
     // Фаза счётчика на конце прошлого отрезка: сколько тактов он к тому
     // моменту уже отстоял в текущем своём шаге
-    double m_prev_phase;
+    uknc_real m_prev_phase;
 
     // Фильтр на шагах счётчика - единственное равномерное место в тракте, см.
     // calc_sound_value(). Частота, на которую он настроен, следует за периодом
     // счёта, а m_grid_last - последнее его значение: им заполняется кусок
     // отрезка до первого шага
     ButterworthLowPassFilter m_grid_filter;
-    double m_grid_rate;
-    double m_grid_last;
+    uknc_real m_grid_rate;
+    uknc_real m_grid_last;
 
     virtual int16_t calc_sound_value() override;
     bool level() const;

@@ -157,7 +157,9 @@ void DL11::transmit_done()
 unsigned int DL11::clocks_to_batch_event() const
 {
     int64_t r = INT64_MAX;
-    if (m_tx_busy) r = m_tx_hold ? 1 : m_tx_left;
+    //A byte held for the host side (nothing on the other end of the УК-НЦ's
+    //network adapter) waits on no clock: the next batch's end looks again
+    if (m_tx_busy && !m_tx_hold) r = m_tx_left;
     if (m_rx_left > 0) { if (m_rx_left < r) r = m_rx_left; }
     else if (!(m_rcsr & CSR_DONE)) r = 1;
     if (r == INT64_MAX) return UINT_MAX;

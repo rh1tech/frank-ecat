@@ -173,12 +173,12 @@ int16_t UKNCSound::calc_sound_value()
     if (m_timer != nullptr)
     {
         const uint64_t d = m_timer->steps() - m_seen_steps;
-        const double step = m_timer->counter_step_cycles();
-        if (d > 0 && d < UKNC_TIMER_STEP_LOG && step > 0.0)
+        const uknc_real step = m_timer->counter_step_cycles();
+        if (d > 0 && d < UKNC_TIMER_STEP_LOG && step > (uknc_real)0)
         {
             //Период счёта программа меняет разрядами 1-2 регистра 177710, и
             //вместе с ним меняется частота, на которой стоит фильтр
-            const double rate = (double)m_system_clock / step;
+            const uknc_real rate = (uknc_real)m_system_clock / step;
             if (rate != m_grid_rate)
             {
                 m_grid_rate = rate;
@@ -186,30 +186,30 @@ int16_t UKNCSound::calc_sound_value()
             }
 
             //До первого шага держался уровень, на котором кончился прошлый отрезок
-            double w = step - m_prev_phase;
-            if (w < 0.0) w = 0.0;
-            double sum = m_grid_last * w;
-            double total = w;
+            uknc_real w = step - m_prev_phase;
+            if (w < (uknc_real)0) w = 0;
+            uknc_real sum = m_grid_last * w;
+            uknc_real total = w;
 
-            const double tail = m_timer->counter_phase_cycles();
+            const uknc_real tail = m_timer->counter_phase_cycles();
             for (unsigned int i = 1; i <= (unsigned int)d; i++)
             {
                 const unsigned int v = m_timer->step_value((unsigned int)d - i);
                 m_grid_last = m_grid_filter.process(level_at(v) ? 1.0f : -1.0f);
                 //Последний шаг длится до конца отрезка, а не целый период
-                const double dur = (i < (unsigned int)d) ? step : tail;
+                const uknc_real dur = (i < (unsigned int)d) ? step : tail;
                 sum += m_grid_last * dur;
                 total += dur;
             }
 
-            if (total > 0.0)
+            if (total > (uknc_real)0)
             {
                 //Фильтр Баттерворта звенит, и на фронте ноты выброс выходит за
                 //единицу: без ограничения он завернулся бы в int16 щелчком
-                double v = sum / total;
-                if (v > 1.0) v = 1.0;
-                else if (v < -1.0) v = -1.0;
-                return (int16_t)((double)m_amplitude * v);
+                uknc_real v = sum / total;
+                if (v > (uknc_real)1) v = 1;
+                else if (v < (uknc_real)-1) v = -1;
+                return (int16_t)((uknc_real)m_amplitude * v);
             }
         }
     }

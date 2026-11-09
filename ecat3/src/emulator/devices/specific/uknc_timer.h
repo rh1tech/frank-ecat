@@ -14,6 +14,14 @@
 // и на самую длинную команду, и на догон после остановки
 #define UKNC_TIMER_STEP_LOG 32
 
+//The grid of the sound in time: double upstream, float on the microcontroller
+//(its FPU is single precision; the values are whole clocks of a few hundred)
+#ifdef ECAT_EMBEDDED
+typedef float uknc_real;
+#else
+typedef double uknc_real;
+#endif
+
 // The programmable timer of the УК-НЦ, registers 177710-177714 on the
 // peripheral processor's bus. A 12 bit counter running down at 2, 4, 8 or
 // 16 us per step; on zero it raises a flag, optionally interrupts through
@@ -124,8 +132,8 @@ public:
     // шага. С этим динамик считает уровень точно по времени, а не по числу
     // шагов: шаг - 12 тактов, команда - десяток-другой, и граница команды
     // почти никогда не совпадает с границей шага
-    double counter_step_cycles() const;
-    double counter_phase_cycles() const;
+    uknc_real counter_step_cycles() const;
+    uknc_real counter_phase_cycles() const;
 
     emulator::Result load_config(SystemData *sd) override;
     void reset(bool cold) override;

@@ -278,6 +278,12 @@ UKNCGraphics::*
 PlanePair::*
 WaitMap::*
 IndirectMemory::*
+AY8910::*
+BKFDC::*
+UKNCHDD::clocks_to_batch_event
+UKNCHDD::clock
+Covox::*
+UKNCMouse::*
 @ dvk bk uknc e85
 DL11::clocks_to_batch_event
 DL11::clock

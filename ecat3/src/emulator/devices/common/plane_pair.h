@@ -49,6 +49,11 @@ public:
     unsigned int get_value_word(unsigned int address) override;
     void set_value_word(unsigned int address, unsigned int value, bool force=false) override;
     unsigned int get_direct(unsigned int address) override;
+#ifdef ECAT_EMBEDDED
+    //Memory: an access depends on nothing that moves with time (the waits
+    //come from the memory timing device, which counts the clocks owed)
+    bool timeless_access() const override { return true; }
+#endif
 
     std::vector<DeviceFieldInfo> get_device_fields() override;
     bool get_field(const std::string &field, unsigned int from, unsigned int to, DeviceFieldValue &out) override;

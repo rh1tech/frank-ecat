@@ -130,16 +130,16 @@ unsigned int UKNCTimer::clocks_to_batch_event() const
 }
 #endif
 
-double UKNCTimer::counter_step_cycles() const
+uknc_real UKNCTimer::counter_step_cycles() const
 {
-    return (double)m_base_cycles * TIMER_DIVIDERS[(m_flags & F_DIV_MASK) >> 1];
+    return (uknc_real)(m_base_cycles * TIMER_DIVIDERS[(m_flags & F_DIV_MASK) >> 1]);
 }
 
-double UKNCTimer::counter_phase_cycles() const
+uknc_real UKNCTimer::counter_phase_cycles() const
 {
     //Предделитель уже отсчитал m_divider базовых шагов, а внутри текущего
     //накопилось m_acc тактов
-    return (double)m_divider * m_base_cycles + m_acc;
+    return (uknc_real)(m_divider * m_base_cycles + m_acc);
 }
 
 void UKNCTimer::clock(unsigned int counter)
